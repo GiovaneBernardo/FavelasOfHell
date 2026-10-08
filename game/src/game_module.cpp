@@ -1,4 +1,4 @@
-﻿#include <cstdint>
+#include <cstdint>
 
 #include "gtabr/ecs.h"
 #include "gtabr/game_module.h"
@@ -9,19 +9,20 @@
 
 namespace {
 
-// Stateless on purpose (no statics): state belongs in the ECS world.
-void HelloSystem(gtabr::SystemContext& ctx) {
-    const auto now = static_cast<std::uint64_t>(ctx.time.elapsed);
-    const auto before = static_cast<std::uint64_t>(ctx.time.elapsed - ctx.time.delta);
+// Stateless on purpose (no statics): state belongs in the ECS world. The system
+// declares what it needs (read access to Time) and the scheduler does the rest.
+void HelloSystem(gtabr::Res<gtabr::Time> time) {
+    const auto now = static_cast<std::uint64_t>(time->elapsed);
+    const auto before = static_cast<std::uint64_t>(time->elapsed - time->delta);
     if (now != before) {
-        GTABR_INFO("[game] Ola, Vidigal! V8 t={}s entities={}", now, ctx.world.entityCount());
+        GTABR_INFO("[game] Ola, Vidigal! V8 t={}s frame={}", now, time->frame);
     }
 }
 
 class HelloPlugin final : public gtabr::Plugin {
 public:
     void build(gtabr::App& app) override {
-        app.addSystem(gtabr::Stage::Update, &HelloSystem, "HelloSystem");
+        app.addSystem(gtabr::Stage::Update, &HelloSystem).name("HelloSystem");
     }
 };
 

@@ -5,9 +5,11 @@
 # modules into their own DLLs later for engine hot reload.
 #
 # Module dependency order (lowest first):
-#   core -> platform -> ecs -> host
+#   core -> jobs -> ecs -> host
+#   core -> platform -> host
 #   core -> assets, renderer, physics
 add_subdirectory(core)
+add_subdirectory(jobs)
 add_subdirectory(platform)
 add_subdirectory(ecs)
 add_subdirectory(host)
@@ -22,7 +24,7 @@ add_library(gtabr::engine ALIAS gtabr_engine)
 # Linking object libraries directly pulls in their objects + usage requirements.
 target_link_libraries(gtabr_engine
     PUBLIC  ${_gtabr_modules}
-    PRIVATE Jolt::Jolt nvrhi SDL3::SDL3 zstd::libzstd lz4::lz4)
+    PRIVATE flecs::flecs_static Jolt::Jolt nvrhi SDL3::SDL3 zstd::libzstd lz4::lz4)
 target_compile_definitions(gtabr_engine PRIVATE GTABR_ENGINE_BUILD)
 set_target_properties(gtabr_engine PROPERTIES OUTPUT_NAME "gtabr_engine" FOLDER "engine")
 gtabr_target_defaults(gtabr_engine)

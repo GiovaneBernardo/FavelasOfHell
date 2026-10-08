@@ -44,6 +44,7 @@ set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "ProgramDatabase")
 # ---------------------------------------------------------------------------
 # Third-party (vcpkg manifest mode, see vcpkg.json)
 # ---------------------------------------------------------------------------
+find_package(flecs CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(Jolt CONFIG REQUIRED)
 find_package(nvrhi CONFIG REQUIRED)

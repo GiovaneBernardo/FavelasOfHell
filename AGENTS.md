@@ -4,7 +4,7 @@ Instructions for AI coding agents working in this repo. Read `README.md` first f
 
 ## Who works on this
 
-The game is called **Favelas Of Heel** (code name `gtabr` in identifiers, see README "Naming"). It is mostly written by AI agents under the direction of an experienced human lead, who makes the architecture and technical decisions and reviews the results. So: follow the Decision Log, ask before changing a decided design, keep diffs reviewable, explain non-obvious choices briefly, and report honestly what you built, tested and could not verify. Do not add dependencies the lead did not ask for without saying so (e.g. the project has its own ECS: do not build core features on a third-party ECS library).
+The game is called **Favelas Of Heel** (code name `gtabr` in identifiers, see README "Naming"). It is mostly written by AI agents under the direction of an experienced human lead, who makes the architecture and technical decisions and reviews the results. So: follow the Decision Log, ask before changing a decided design, keep diffs reviewable, explain non-obvious choices briefly, and report honestly what you built, tested and could not verify. Do not add dependencies the lead did not ask for without saying so (e.g. the ECS is our Bevy-style layer on flecs, see ADR 0001: build features on that layer, do not add another ECS library and do not use flecs directly outside `engine/ecs`).
 
 ## Project in one paragraph
 
@@ -23,7 +23,7 @@ A serious open-world Brazilian crime game on a custom C++20 engine (own renderer
 
 ## Architecture cheat sheet
 
-- ECS: archetype tables by default, sparse sets opt-in; systems are functions with typed params (`Query`, `Res`, `ResMut`, `Commands`, events); schedules with automatic parallelism from access sets; features ship as **plugins**.
+- ECS: Bevy-style layer on flecs (private to `engine/ecs`, ADR 0001); systems are functions with typed params (`Query`, `Res`, `ResMut`, `Commands`, events); our scheduler gets parallelism from access sets and applies commands/events per system in registration order (deterministic); components are POD (trivially copyable) identified by type name; features ship as **plugins**; register components in `build()`, never while systems run.
 - Renderer: render graph with per-viewport instances; tiled deferred + forward transparents; keep acceleration-structure/bindless-friendly data layouts for future ray tracing.
 - Assets: chunked binary container + descriptor (named, typed, strided fields) + payload blocks; GUID-based asset DB; content-hash cache; versions handled via descriptor migration.
 - Blender: headless Blender → glTF-style export on `.blend` change; imported objects remember source `.blend` + object name.

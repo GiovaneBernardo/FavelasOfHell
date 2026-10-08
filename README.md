@@ -41,7 +41,7 @@ Non-goals (for now): console builds, multiplayer, dual-contouring/voxel terrain.
 | Graphics API | **[Decided] NVRHI** over D3D12 + Vulkan | See [Graphics API](#graphics-api) |
 | Shaders | **[Decided] Slang** (HLSL-compatible), compiled to DXIL/SPIR-V | Hot-reloadable |
 | Physics | **[Decided] Jolt Physics** | See [Physics](#physics) |
-| ECS | Custom, Bevy-inspired | See [ECS](#ecs) |
+| ECS | **[Decided] Bevy-style layer on flecs** (storage/queries from flecs, API + parallel scheduler ours) | See [ECS](#ecs), [ADR 0001](docs/adr/0001-ecs-on-flecs.md) |
 | Editor UI | Dear ImGui (docking + viewports), custom-styled | |
 | Render orchestration | Render graph (frame graph) | |
 | Assets | Custom binary formats + importer/serializer/loader | |
@@ -52,7 +52,8 @@ Non-goals (for now): console builds, multiplayer, dual-contouring/voxel terrain.
 /engine          all modules fold into ONE shared library, gtabr_engine.dll
   /core          types, math (glm wrappers), logging, asserts, platform macros   [exists]
   /platform      window (SDL3), dynamic libraries, file system                   [exists]
-  /ecs           entities, App, plugins, systems (placeholder, to be expanded)   [exists]
+  /jobs          job system: worker pool, fork-join counters, thread slots       [exists]
+  /ecs           Bevy-style layer on flecs: World, App, plugins, Query/Res/Commands, parallel scheduler   [exists]
   /host          game-module ABI + hot-reload host                               [exists]
   /assets        asset ids/container (placeholder; zstd + lz4)                   [exists]
   /renderer      NVRHI integration (placeholder; render graph to come)           [exists]
@@ -100,14 +101,20 @@ game  ──►  engine API  ◄──  editor
 
 ### ECS
 
-Bevy-inspired, custom implementation:
+Bevy-style API on top of **[flecs](https://github.com/SanderMertens/flecs)** (MIT) for storage and queries; see [ADR 0001](docs/adr/0001-ecs-on-flecs.md) for the reasoning and the threading model. flecs is private to `engine/ecs`: no flecs header is included by any public engine header.
 
-- **Entities** are generational IDs.
-- **Components** stored in **archetype tables** (SoA, default) or **sparse sets** (opt-in per component for frequently added/removed data like markers/state flags).
-- **Systems** are plain functions with typed parameters (`Query<...>`, `Res<T>`, `ResMut<T>`, `Commands`, `EventReader<T>`, ...), parameters drive automatic access analysis.
-- **Schedules** with stages/system sets, ordering constraints, and a parallel executor built on the job system that uses access info to run non-conflicting systems concurrently.
-- **Plugins**: modules that register components, resources, systems and events (`Plugin::build(App&)`). The engine, renderer, physics and every game feature are plugins; the game DLL exports plugins.
-- Also: resources, events, change detection (added/changed ticks), deferred command buffers, observers/hooks, relationships (parent/child), and reflection for serialization and editor inspection.
+Implemented:
+
+- **Entities** are generational ids. **Components** live in flecs archetype tables; they are plain POD types identified by type name (see hot reload rules below).
+- **Systems** are plain functions with typed parameters: `Query<const T&, U&, With<V>, Without<W>, Entity>`, `Res<T>`, `ResMut<T>`, `Commands`, `EventReader<T>`, `EventWriter<T>`, or a single `World&` for exclusive systems. Parameters declare the access set.
+- **Scheduler** (ours, not the flecs pipeline): stages `Startup`, `PreUpdate`, `Update`, `PostUpdate`. Systems whose access sets do not conflict run concurrently on the job system; conflicting ones run in registration order; `after()/before()` add explicit edges. Exclusive systems are barriers.
+- **Deterministic frames:** `Commands` and events are buffered per system and applied on the main thread in registration order, so results do not depend on thread timing.
+- **Data parallelism:** `Query::parEach(f)` splits a query over all job threads.
+- **Plugins:** `Plugin::build(App&)` registers components, resources, events and systems; everything is owner-tagged and removed before a DLL unloads.
+
+Planned (not implemented): reflection and world serialization across reload (with layout migration), relationships, observers/hooks, change detection, sparse-set opt-in, system sets and automatic sync points. The list with the order is in the ADR.
+
+Rules for components (enforced by `static_assert`): trivially copyable and trivially destructible, no owning members (`std::vector`, `std::string`, pointers into a game module). This is what keeps function pointers out of the world and makes game hot reload safe.
 
 ### Graphics API
 
@@ -228,14 +235,14 @@ We deliberately compile with `/Zi`, not `/ZI`: Edit and Continue keeps the compi
 
 ### Dependencies (vcpkg manifest, `vcpkg.json`)
 
-glm, Jolt Physics, NVRHI (D3D12 + Vulkan), SDL3, zstd, lz4, Dear ImGui (docking, editor only), doctest (tests). Slang is available as the optional `shaders` feature (enabled when renderer work starts). vcpkg is pinned to a fixed commit (`builtin-baseline`) for reproducible builds; `cmake/toolchain.cmake` uses `$VCPKG_ROOT` if set (Visual Studio sets it) or bootstraps `.vcpkg/`. Triplet: `x64-windows-static-md` (third-party static, dynamic CRT).
+flecs (MIT; ECS storage and queries, private to `engine/ecs`), glm, Jolt Physics, NVRHI (D3D12 + Vulkan), SDL3, zstd, lz4, Dear ImGui (docking, editor only), doctest (tests). Slang is available as the optional `shaders` feature (enabled when renderer work starts). vcpkg is pinned to a fixed commit (`builtin-baseline`) for reproducible builds; `cmake/toolchain.cmake` uses `$VCPKG_ROOT` if set (Visual Studio sets it) or bootstraps `.vcpkg/`. Triplet: `x64-windows-static-md` (third-party static, dynamic CRT).
 
 ## Decision Log
 
 | Decision | Status |
 |---|---|
 | C++20, CMake, Windows-first | Decided |
-| Custom Bevy-style ECS | Decided |
+| Bevy-style ECS layer on flecs, own parallel scheduler ([ADR 0001](docs/adr/0001-ecs-on-flecs.md)); supersedes "fully custom ECS" (2026-10-08) | Decided |
 | ImGui editor | Decided |
 | Game code hot-reloadable via DLL; engine/editor stretch goal | Decided |
 | Deferred tiled renderer + listed feature set | Decided |
