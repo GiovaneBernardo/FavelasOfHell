@@ -168,15 +168,18 @@ public:
                 }
             } else {
                 // diffuse + GL normal + packed AO/Roughness/Metal (maps straight onto glTF's ORM) + height.
-                static const char* kMaps[] = {"Diffuse", "nor_gl", "arm", "Displacement"};
-                for (const char* map : kMaps) {
+                // Canonical suffixes: the importer decides color / normal / data from the file name.
+                static const struct { const char* map; const char* suffix; } kMaps[] = {
+                    {"Diffuse", "diff"}, {"nor_gl", "normal"}, {"arm", "arm"}, {"Displacement", "disp"}};
+                for (const auto& [map, suffix] : kMaps) {
                     const Json& byFormat = j[map][variant];
                     std::string url = byFormat["jpg"]["url"].str();
                     if (url.empty()) url = byFormat["png"]["url"].str();
                     if (url.empty()) continue;
                     DownloadFile f;
                     f.url = url;
-                    f.path = baseName(url);
+                    const std::string base = baseName(url);
+                    f.path = id + "_" + variant + "_" + suffix + base.substr(base.find_last_of('.'));
                     p.files.push_back(std::move(f));
                 }
             }

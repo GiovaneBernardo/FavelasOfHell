@@ -16,6 +16,7 @@ struct Row {
     bool importable;
     bool imagePreview;
     bool modelPreview;
+    bool materialPreview = false;
 };
 
 constexpr ImU32 kModel = IM_COL32(236, 140, 56, 255);
@@ -42,7 +43,7 @@ constexpr Row kRows[] = {
     {"gif", FileCategory::Image, "GIF Image", kImage, false, true, false},
     {"hdr", FileCategory::Image, "HDR Image", kImage, false, false, false},
     {"exr", FileCategory::Image, "EXR Image", kImage, false, false, false},
-    {"fmat", FileCategory::Material, "Material", kMaterial, false, false, false},
+    {"fmat", FileCategory::Material, "Material", kMaterial, false, false, false, true},
     {"fvariant", FileCategory::Prefab, "Prefab Variant", kPrefab, false, false, false},
     {"fprefab", FileCategory::Prefab, "Prefab", kPrefab, false, false, false},
     {"fscene", FileCategory::Scene, "Scene", kPrefab, false, false, false},
@@ -66,7 +67,7 @@ constexpr Row kRows[] = {
 FileTypeInfo ClassifyExtension(std::string_view extension) {
     for (const Row& r : kRows) {
         if (extension == r.ext) {
-            return {r.category, r.label, r.color, r.importable, r.imagePreview, r.modelPreview};
+            return {r.category, r.label, r.color, r.importable, r.imagePreview, r.modelPreview, r.materialPreview};
         }
     }
     FileTypeInfo other;

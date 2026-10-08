@@ -19,6 +19,7 @@ struct FileTypeInfo {
     bool importable = false;    // can go through the asset importer
     bool imagePreview = false;  // a thumbnail can be decoded directly from the file
     bool modelPreview = false;  // a thumbnail can be rasterized from its imported prefab
+    bool materialPreview = false; // a lit sphere can be rendered from the authored material
 };
 
 // `extension` is lowercase without the dot ("png"). Unknown extensions get a neutral "File" type.

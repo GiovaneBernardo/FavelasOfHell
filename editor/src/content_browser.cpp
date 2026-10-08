@@ -677,7 +677,7 @@ void ContentBrowser::drawTile(const Entry& e, size_t index, ImVec2 pos, float ti
     if (!e.isDir && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
         ImGui::SetDragDropPayload(kAssetDragPayload, e.rel.c_str(), e.rel.size() + 1);
         ImGui::TextUnformatted(e.name.c_str());
-        ImGui::TextDisabled("Drop onto a viewport to place it");
+        ImGui::TextDisabled(e.type.category == FileCategory::Material ? "Drop onto an object to apply it" : "Drop onto a viewport to place it");
         ImGui::EndDragDropSource();
     }
     if (e.isDir && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
@@ -750,6 +750,34 @@ void ContentBrowser::drawPreview(const Entry& e, ImDrawList* dl, ImVec2 a, ImVec
                     st = ThumbnailService::State::Pending;
                 }
             }
+        }
+    }
+
+    if (e.type.materialPreview) {
+        key = hashString(e.rel, 0x3333);
+        key = hashValue(e.size, key);
+        key = hashValue(e.mtime, key);
+        st = m_thumbs->lookup(key, rect);
+        if (st == ThumbnailService::State::Unknown) {
+            MaterialThumbSource src;
+            const AssetId id = m_db->findAuthored(e.rel);
+            MaterialAsset mat;
+            if (id.isValid() && m_db->load(id, mat)) {
+                src.baseColor = Vec3(mat.baseColor);
+                src.roughness = mat.roughness;
+                src.metallic = mat.metallic;
+                if (mat.baseColorTexture.isValid()) {
+                    // The preview samples the SOURCE image of the texture: cooked textures may be block compressed.
+                    if (const AssetInfo* ti = m_db->find(mat.baseColorTexture.texture))
+                        if (const SourceRecord* sr = m_db->findSource(ti->source)) src.albedoImage = m_db->sourceRoot() / PathFromUtf8(sr->path);
+                }
+                if (mat.metallicRoughnessTexture.isValid()) { // the factors alone would be misleading next to a packed map
+                    src.roughness = 0.55f;
+                    src.metallic = 0.0f;
+                }
+            }
+            m_thumbs->request(key, [src = std::move(src)](ThumbPixels& out) { return RenderMaterialThumbnail(src, out); });
+            st = ThumbnailService::State::Pending;
         }
     }
 
@@ -895,7 +923,9 @@ void ContentBrowser::open(const Entry& e) {
         navigateTo(e.rel);
         return;
     }
-    if (e.type.modelPreview || e.type.category == FileCategory::Model) {
+    if (e.type.category == FileCategory::Material) {
+        if (m_actions.applyMaterial) m_actions.applyMaterial(e.rel);
+    } else if (e.type.modelPreview || e.type.category == FileCategory::Model) {
         if (m_actions.placeModel) m_actions.placeModel(e.rel);
         refresh();
     } else if (e.type.importable) {
@@ -911,6 +941,8 @@ void ContentBrowser::entryContextMenu(const Entry& e) {
     const bool multi = m_selected.size() > 1;
     if (e.isDir) {
         if (ImGui::MenuItem("Open")) open(e);
+    } else if (e.type.category == FileCategory::Material) {
+        if (ImGui::MenuItem("Apply to selected object") && m_actions.applyMaterial) m_actions.applyMaterial(e.rel);
     } else if (e.type.category == FileCategory::Model) {
         if (ImGui::MenuItem("Place in scene")) {
             if (m_actions.placeModel) m_actions.placeModel(e.rel);

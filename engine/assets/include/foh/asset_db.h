@@ -157,6 +157,11 @@ public:
     // Writes an authored variant at <sourceRoot>/<relativePath> (".fvariant" is appended if missing)
     // and indexes it. Returns its id (existing file keeps its id).
     AssetId saveVariant(const std::string& relativePath, const PrefabVariantAsset& variant);
+    // Same for an authored material (".fmat"): materials made in the editor, e.g. from a downloaded texture set.
+    // Rewriting an existing file keeps its id, so everything that uses the material follows the new content.
+    AssetId saveMaterial(const std::string& relativePath, const MaterialAsset& material);
+    // The authored asset (variant or material) stored at `relativePath`, or an invalid id.
+    AssetId findAuthored(const std::string& relativePath) const;
 
     const std::filesystem::path& sourceRoot() const { return m_desc.sourceRoot; }
     const std::filesystem::path& cacheRoot() const { return m_desc.cacheRoot; }

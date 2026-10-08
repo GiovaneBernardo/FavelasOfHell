@@ -166,13 +166,17 @@ void Editor::initAssets() {
 
     ContentBrowserActions actions;
     actions.importFile = [this](const fs::path& file) { importFile(file, 0, 0, false, false); };
+    actions.applyMaterial = [this](const std::string& rel) { applyMaterialToSelection(rel); };
     actions.placeModel = [this](const std::string& rel) { placeAssetByPath(rel, 0, 0, false); };
     actions.openWorkshop = [this] { m_showWorkshop = true; };
     m_browser.init(*m_assets, m_thumbs, m_prefs, m_assetLog, std::move(actions));
 
     WorkshopHost host;
     host.assetRoot = m_assets->sourceRoot();
-    host.importFile = [this](const fs::path& file) { importFile(file, 0, 0, false, false); };
+    host.importFile = [this](const fs::path& file) { return static_cast<unsigned long long>(importFile(file, 0, 0, false, false)); };
+    host.createMaterial = [this](const MaterialRecipe& r, const std::vector<unsigned long long>& tickets) {
+        queueMaterial(r, std::vector<ImportTicket>(tickets.begin(), tickets.end()));
+    };
     host.placeModel = [this](const std::string& rel) { placeAssetByPath(rel, 0, 0, false); };
     host.refreshBrowser = [this] { m_browser.refresh(); };
     m_workshop.init(*m_jobs, m_thumbs, m_prefs, std::move(host));
@@ -252,11 +256,11 @@ void Editor::instantiateAsset(AssetId prefab, size_t sceneIndex, const Transform
     logAsset("Placed " + std::to_string(inst.entities.size()) + " entities into '" + m_scenes[sceneIndex].name + "'.");
 }
 
-void Editor::importFile(const fs::path& file, float dropX, float dropY, bool hasDropPosition, bool place) {
+ImportTicket Editor::importFile(const fs::path& file, float dropX, float dropY, bool hasDropPosition, bool place) {
     const std::string name = PathToUtf8(file.filename());
     if (DetectSourceFormat(file) == SourceFormat::Unknown) {
         logAsset("Cannot import '" + name + "': supported are .gltf, .glb, .fbx, .png, .jpg, .tga, .bmp.");
-        return;
+        return 0;
     }
     // Returns at once: parsing, texture decoding, mips and BC compression run on the worker threads.
     Placement p;
@@ -268,9 +272,104 @@ void Editor::importFile(const fs::path& file, float dropX, float dropY, bool has
     p.started = std::chrono::steady_clock::now();
     m_placements.push_back(p);
     logAsset("Importing '" + name + "'...");
+    return p.ticket;
+}
+
+void Editor::queueMaterial(const MaterialRecipe& recipe, const std::vector<ImportTicket>& tickets) {
+    PendingMaterial pm;
+    pm.recipe = recipe;
+    pm.waiting = tickets;
+    if (pm.waiting.empty()) createMaterialAsset(recipe); // nothing to wait for (textures were refused)
+    else m_pendingMaterials.push_back(std::move(pm));
+}
+
+void Editor::createMaterialAsset(const MaterialRecipe& recipe) {
+    auto textureOf = [&](const std::string& rel) -> AssetId {
+        if (rel.empty()) return {};
+        const SourceRecord* rec = m_assets->findSource(rel);
+        if (!rec) return {};
+        for (const SubAssetRecord& s : rec->subAssets)
+            if (!s.tombstone && s.kind == AssetKind::Texture) return s.guid;
+        return {};
+    };
+    MaterialAsset m;
+    m.name = recipe.name;
+    m.baseColorTexture.texture = textureOf(recipe.colorMap);
+    m.normalTexture.texture = textureOf(recipe.normalMap);
+    const AssetId orm = textureOf(recipe.ormMap);
+    m.metallicRoughnessTexture.texture = orm; // glTF packing: G = roughness, B = metalness
+    m.occlusionTexture.texture = orm;         // R = occlusion
+    m.emissiveTexture.texture = textureOf(recipe.emissiveMap);
+    // Factors multiply the maps: 1 lets the textures decide. Without a packed map fall back to a plain dielectric.
+    m.metallic = orm.isValid() ? 1.0f : 0.0f;
+    m.roughness = orm.isValid() ? 1.0f : 0.8f;
+    if (m.emissiveTexture.isValid()) m.emissive = Vec3(1.0f);
+    if (!m.baseColorTexture.isValid() && !m.normalTexture.isValid() && !orm.isValid()) {
+        logAsset("Could not create material '" + recipe.name + "': none of its textures imported.");
+        return;
+    }
+    const AssetId id = m_assets->saveMaterial(recipe.outPath, m);
+    if (!id.isValid()) {
+        logAsset("Could not write material '" + recipe.outPath + "'.");
+        return;
+    }
+    const AssetId changed[] = {id};
+    m_assetBridge->assetsChanged(changed); // a re-download rewrites the same material: reload it where it is in use
+    m_browser.refresh();
+    if (m_options.workshopTest && !m_viewports.empty()) { // QA: behave like a drop onto the middle of the Scene view
+        ViewportPanel& p = m_viewports.front();
+        m_showWorkshop = false;
+        p.pendingMaterial = id;
+        m_renderer->requestPick(p.id, m_renderer->viewportWidth(p.id) / 2, m_renderer->viewportHeight(p.id) * 7 / 10);
+    }
+    logAsset("Created material '" + recipe.name + "' (" + recipe.outPath + "). Drag it onto an object to use it.");
+}
+
+void Editor::applyMaterial(AssetId material, size_t sceneIndex, Entity entity) {
+    if (sceneIndex >= m_scenes.size() || !material.isValid()) return;
+    World& world = m_scenes[sceneIndex].app->world();
+    MeshRenderer* mr = entity.isNull() || !world.isAlive(entity) ? nullptr : world.get<MeshRenderer>(entity);
+    if (!mr) {
+        logAsset("That object has no mesh to put a material on.");
+        return;
+    }
+    mr->material = material;
+    mr->color = Vec4(1.0f); // the color is a tint on top of the material
+    world.markModified<MeshRenderer>(entity);
+    m_assetBridge->loader().request(material); // streams the material and its textures in the background
+    const AssetInfo* info = m_assets->find(material);
+    logAsset("Applied material '" + (info ? info->name : std::string("?")) + "'.");
+}
+
+void Editor::applyMaterialToSelection(const std::string& relPath) {
+    const AssetId id = m_assets->findAuthored(relPath);
+    if (!id.isValid()) return;
+    if (!m_selection.valid(m_sceneRefs)) {
+        logAsset("Select an object first (or drag the material onto one).");
+        return;
+    }
+    applyMaterial(id, m_selection.scene, m_selection.entity);
 }
 
 void Editor::handleImportResult(const ImportResult& result) {
+    // A material waits for every one of its textures; it is authored when the last one lands.
+    for (size_t i = 0; i < m_pendingMaterials.size();) {
+        PendingMaterial& pm = m_pendingMaterials[i];
+        const auto it = std::find(pm.waiting.begin(), pm.waiting.end(), result.ticket);
+        if (it != pm.waiting.end()) {
+            pm.waiting.erase(it);
+            pm.failed = pm.failed || !result.ok;
+        }
+        if (pm.waiting.empty()) {
+            const MaterialRecipe recipe = pm.recipe;
+            const bool failed = pm.failed;
+            m_pendingMaterials.erase(m_pendingMaterials.begin() + static_cast<std::ptrdiff_t>(i));
+            if (failed) logAsset("Material '" + recipe.name + "' skipped: a texture failed to import.");
+            else createMaterialAsset(recipe);
+            continue;
+        }
+        ++i;
+    }
     Placement placement;
     bool dropped = false;
     if (const auto it = std::find_if(m_placements.begin(), m_placements.end(), [&](const Placement& p) { return p.ticket == result.ticket; });
@@ -653,7 +752,13 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
                     for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
                     return ext.empty() ? ext : ext.substr(1);
                 }());
-                if (type.category == FileCategory::Model) placeAssetByPath(rel, mouse.x, mouse.y, true);
+                if (type.category == FileCategory::Material) {
+                    // Which object is under the cursor is only known after the id pass: apply on the answer.
+                    const float fx = (mouse.x - origin.x) / std::max(avail.x, 1.0f), fy = (mouse.y - origin.y) / std::max(avail.y, 1.0f);
+                    p.pendingMaterial = m_assets->findAuthored(rel);
+                    m_renderer->requestPick(p.id, static_cast<u32>(std::clamp(fx, 0.0f, 0.999f) * static_cast<float>(m_renderer->viewportWidth(p.id))),
+                                            static_cast<u32>(std::clamp(fy, 0.0f, 0.999f) * static_cast<float>(m_renderer->viewportHeight(p.id))));
+                } else if (type.category == FileCategory::Model) placeAssetByPath(rel, mouse.x, mouse.y, true);
                 else logAsset("'" + rel + "' cannot be placed in a scene (only models can).");
             }
             ImGui::EndDragDropTarget();
@@ -871,7 +976,14 @@ void Editor::handlePicking(ViewportPanel& p, const ImVec2& origin, const ImVec2&
     if (m_renderer->takePickResult(p.id, picked)) {
         const Entity e{picked};
         World& world = *m_sceneRefs[p.sceneIndex].world;
-        if (!e.isNull() && world.isAlive(e)) {
+        if (p.pendingMaterial.isValid()) {
+            applyMaterial(p.pendingMaterial, p.sceneIndex, e);
+            p.pendingMaterial = {};
+            if (!e.isNull() && world.isAlive(e)) {
+                m_selection.scene = p.sceneIndex;
+                m_selection.entity = e;
+            }
+        } else if (!e.isNull() && world.isAlive(e)) {
             m_selection.scene = p.sceneIndex;
             m_selection.entity = e;
         } else if (m_selection.scene == p.sceneIndex) {

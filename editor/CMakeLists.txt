@@ -23,6 +23,7 @@ add_executable(foh_editor
     src/thumbnails.cpp
     src/workshop/http_client.cpp
     src/workshop/json.cpp
+    src/workshop/material_recipe.cpp
     src/workshop/providers.cpp
     src/workshop/workshop.cpp
     src/workshop/zip_extract.cpp)

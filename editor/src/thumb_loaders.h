@@ -7,6 +7,7 @@
 #include <unordered_map>
 
 #include "foh/asset_id.h"
+#include "foh/math.h"
 #include "thumbnails.h"
 
 namespace foh {
@@ -26,5 +27,14 @@ struct ModelThumbSource {
 // Software-rasterizes the cooked prefab (all its meshes, node transforms applied) with simple
 // lighting. Runs entirely on the CPU so it needs no GPU context and cannot disturb the renderer.
 bool RenderModelThumbnail(const ModelThumbSource& source, ThumbPixels& out);
+
+// A lit sphere wearing the material's base color (and its albedo image when it has one).
+struct MaterialThumbSource {
+    Vec3 baseColor{1.0f};
+    f32 roughness = 0.8f;
+    f32 metallic = 0.0f;
+    std::filesystem::path albedoImage; // a decodable source image (PNG/JPG/...), may be empty
+};
+bool RenderMaterialThumbnail(const MaterialThumbSource& source, ThumbPixels& out);
 
 } // namespace foh

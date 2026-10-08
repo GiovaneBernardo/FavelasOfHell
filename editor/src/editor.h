@@ -85,6 +85,7 @@ private:
         u32 wantWidth = 0, wantHeight = 0;
         u32 stableFrames = 0;
         bool sizeApplied = false;
+        AssetId pendingMaterial; // dropped on the view: applied to whatever the next pick returns
         // Where the image was drawn last frame (logical window coordinates): drops land by it.
         float imageX = 0.0f, imageY = 0.0f, imageW = 0.0f, imageH = 0.0f;
     };
@@ -100,7 +101,14 @@ private:
     void drawStatsPanel(float dt);
     void saveScreenshot();
     void initAssets();
-    void importFile(const std::filesystem::path& file, float dropX, float dropY, bool hasDropPosition, bool place = true);
+    // Starts an import (returns its ticket, 0 when the file is not importable).
+    ImportTicket importFile(const std::filesystem::path& file, float dropX, float dropY, bool hasDropPosition, bool place = true);
+    // Materials authored from imported texture sets: created when the last of their textures is in the database.
+    void queueMaterial(const MaterialRecipe& recipe, const std::vector<ImportTicket>& tickets);
+    void createMaterialAsset(const MaterialRecipe& recipe);
+    // Puts a material on a mesh entity / on the selected one.
+    void applyMaterial(AssetId material, size_t sceneIndex, Entity entity);
+    void applyMaterialToSelection(const std::string& relPath);
     // Places a model of the asset folder (a path relative to it), importing it first when needed.
     void placeAssetByPath(const std::string& relPath, float x, float y, bool hasPosition);
     void handleImportResult(const ImportResult& result);
@@ -150,6 +158,12 @@ private:
         std::chrono::steady_clock::time_point started;
     };
     std::vector<Placement> m_placements;
+    struct PendingMaterial {
+        MaterialRecipe recipe;
+        std::vector<ImportTicket> waiting;
+        bool failed = false;
+    };
+    std::vector<PendingMaterial> m_pendingMaterials;
     std::vector<std::string> m_assetLog; // newest last, capped
     float m_sinceAssetPoll = 0.0f;
     // Frame times while assets stream in (imports, loads, texture uploads): reported once when streaming ends.

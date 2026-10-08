@@ -22,16 +22,27 @@
 #include "editor_prefs.h"
 #include "foh/jobs.h"
 #include "http_client.h"
+#include "material_recipe.h"
 #include "providers.h"
 #include "thumbnails.h"
 #include "zip_extract.h"
 
 namespace foh {
 
+// A material to author once its textures are imported. All paths are relative to the asset root.
+struct MaterialRecipe {
+    std::string name;
+    std::string outPath; // the ".fmat" to write
+    std::string colorMap, normalMap, ormMap, emissiveMap;
+};
+
 struct WorkshopHost {
     std::filesystem::path assetRoot;
-    // Imports one file (model or texture) into the asset database without placing it.
-    std::function<void(const std::filesystem::path& file)> importFile;
+    // Starts importing one file (model or texture) without placing it; returns the import ticket (0 = refused).
+    std::function<unsigned long long(const std::filesystem::path& file)> importFile;
+    // Creates a material from imported textures: called right after the imports were started, the host
+    // finishes the material when their tickets complete.
+    std::function<void(const MaterialRecipe& recipe, const std::vector<unsigned long long>& tickets)> createMaterial;
     // Places an imported model (path relative to the asset root) into the active scene.
     std::function<void(const std::string& relPath)> placeModel;
     // Something new appeared on disk: let the content browser re-list.
@@ -53,6 +64,7 @@ public:
 
 private:
     struct ZipTask;
+    struct PackTask;
     struct Download;
 
     // search
@@ -74,6 +86,7 @@ private:
     void onFileDone(unsigned id, size_t index, HttpResult& result);
     void afterTransfers(Download& d);
     void beginImport(Download& d);
+    void importMaterialSet(Download& d, const PbrFiles& pbr);
     void stepImport(Download& d);
     void finish(Download& d, bool ok, const std::string& message);
     void writeAttribution(const Download& d);

@@ -141,7 +141,7 @@ void ThumbnailService::startTasks() {
         task->key = key;
         task->loader = std::move(loader);
         Task* raw = task.get();
-        m_jobs->submit(&Task::run, raw, raw->counter);
+        m_jobs->submit(&Task::run, raw, raw->counter, JobPriority::Low);
         m_inFlight.push_back(std::move(task));
     }
 }

@@ -74,8 +74,20 @@ struct Workshop::ZipTask {
     }
 };
 
+struct Workshop::PackTask {
+    JobCounter counter;
+    PbrFiles files;
+    fs::path out;
+    std::string error;
+    bool ok = false;
+    static void run(void* arg) {
+        auto* t = static_cast<PackTask*>(arg);
+        t->ok = PackOrmTexture(t->files, t->out, t->error);
+    }
+};
+
 struct Workshop::Download {
-    enum class Stage { Planning, Downloading, Extracting, Importing, Done, Failed };
+    enum class Stage { Planning, Downloading, Extracting, Packing, Importing, Done, Failed };
     unsigned id = 0;
     WorkshopAsset asset;
     std::string variant;
@@ -90,6 +102,8 @@ struct Workshop::Download {
     std::vector<fs::path> zips;
     size_t zipIndex = 0;
     std::unique_ptr<ZipTask> zip;
+    std::unique_ptr<PackTask> pack;
+    PbrFiles pbr;
     std::vector<fs::path> imports;
     size_t importIndex = 0;
     std::vector<std::string> skipped;
@@ -104,7 +118,10 @@ void Workshop::shutdown() {
     // Extraction jobs write into the project: let them finish instead of abandoning them mid-file.
     if (m_jobs) {
         for (auto& d : m_downloads)
+            {
             if (d->zip) m_jobs->wait(d->zip->counter);
+            if (d->pack) m_jobs->wait(d->pack->counter);
+        }
     }
     m_downloads.clear();
     m_jobs = nullptr;
@@ -271,7 +288,7 @@ void Workshop::afterTransfers(Download& d) {
     d.zip = std::make_unique<ZipTask>();
     d.zip->archive = d.zips[0];
     d.zip->destination = d.dir;
-    m_jobs->submit(&ZipTask::run, d.zip.get(), d.zip->counter);
+    m_jobs->submit(&ZipTask::run, d.zip.get(), d.zip->counter, JobPriority::Low);
 }
 
 void Workshop::beginImport(Download& d) {
@@ -288,6 +305,21 @@ void Workshop::beginImport(Download& d) {
         if (!isImportable(ext)) continue;
         if (isModelExt(ext)) models.push_back(it->path());
         else if (!isRedundantImage(name) && lowerAscii(PathToUtf8(it->path().stem())) != lowerAscii(d.asset.id)) images.push_back(it->path()); // <id>.png is the pack's preview render
+    }
+    if (models.empty() && d.asset.kind == WorkshopKind::Material && !images.empty()) {
+        const PbrFiles pbr = ClassifyPbrFiles(images);
+        if (pbr.any()) {
+            d.pbr = pbr;
+            if (!pbr.needsPacking()) return importMaterialSet(d, pbr);
+            // Separate occlusion/roughness/metalness maps become one ORM texture: bulk pixel work, so off the main thread.
+            d.stage = Download::Stage::Packing;
+            d.message = "Packing roughness/metalness...";
+            d.pack = std::make_unique<PackTask>();
+            d.pack->files = pbr;
+            d.pack->out = d.dir / (safeName(d.asset.id) + "_ORM.png");
+            m_jobs->submit(&PackTask::run, d.pack.get(), d.pack->counter, JobPriority::Low);
+            return;
+        }
     }
     if (!models.empty()) {
         // glTF/GLB first: the engine's primary format. FBX only when it is all there is.
@@ -308,6 +340,24 @@ void Workshop::beginImport(Download& d) {
     d.stage = Download::Stage::Importing;
     d.message = "Importing...";
     d.importIndex = 0;
+}
+
+void Workshop::importMaterialSet(Download& d, const PbrFiles& pbr) {
+    auto rel = [&](const fs::path& p) { return p.empty() ? std::string() : PathToUtf8(p.lexically_relative(m_host.assetRoot)); };
+    MaterialRecipe r;
+    r.name = d.asset.name;
+    r.colorMap = rel(pbr.color);
+    r.normalMap = rel(pbr.normal);
+    r.ormMap = rel(!pbr.arm.empty() ? pbr.arm : d.pack ? d.pack->out : fs::path());
+    r.emissiveMap = rel(pbr.emissive);
+    r.outPath = rel(d.dir / (safeName(d.asset.name) + ".fmat"));
+    std::vector<unsigned long long> tickets;
+    for (const std::string* map : {&r.colorMap, &r.normalMap, &r.ormMap, &r.emissiveMap}) {
+        if (map->empty() || !m_host.importFile) continue;
+        if (const unsigned long long t = m_host.importFile(m_host.assetRoot / PathFromUtf8(*map))) tickets.push_back(t);
+    }
+    if (m_host.createMaterial) m_host.createMaterial(r, tickets);
+    finish(d, true, "Material '" + d.asset.name + "' is being created (" + std::to_string(tickets.size()) + " textures importing)");
 }
 
 void Workshop::stepImport(Download& d) {
@@ -387,10 +437,18 @@ void Workshop::update() {
                 d.zip = std::make_unique<ZipTask>();
                 d.zip->archive = d.zips[d.zipIndex];
                 d.zip->destination = d.dir;
-                m_jobs->submit(&ZipTask::run, d.zip.get(), d.zip->counter);
+                m_jobs->submit(&ZipTask::run, d.zip.get(), d.zip->counter, JobPriority::Low);
             } else {
                 beginImport(d);
             }
+        } else if (d.stage == Download::Stage::Packing && d.pack && d.pack->counter.pending.load(std::memory_order_acquire) == 0) {
+            if (!d.pack->ok) {
+                // Not fatal: the material just lacks the packed map.
+                FOH_WARN("workshop: ORM packing failed: {}", d.pack->error);
+                d.pack->out.clear();
+            }
+            importMaterialSet(d, d.pbr);
+            d.pack.reset();
         } else if (d.stage == Download::Stage::Importing) {
             stepImport(d); // one file per frame: imports are synchronous and must not freeze the UI
             break;

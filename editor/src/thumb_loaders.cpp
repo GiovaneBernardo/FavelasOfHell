@@ -275,4 +275,70 @@ bool RenderModelThumbnail(const ModelThumbSource& source, ThumbPixels& out) {
     return true;
 }
 
+bool RenderMaterialThumbnail(const MaterialThumbSource& src, ThumbPixels& out) {
+    ThumbPixels albedo;
+    const bool textured = !src.albedoImage.empty() && LoadImageThumbnail(src.albedoImage, albedo) && albedo.width && albedo.height;
+    constexpr u32 kSS = 2;
+    const u32 res = kThumbSize * kSS;
+    const Vec3 lightDir = glm::normalize(Vec3(-0.45f, 0.65f, 0.62f));
+    const Vec3 viewDir(0, 0, 1);
+    const float shininess = 8.0f + (1.0f - src.roughness) * 120.0f;
+    out.width = kThumbSize;
+    out.height = kThumbSize;
+    out.rgba.assign(static_cast<size_t>(kThumbSize) * kThumbSize * 4, 0);
+    const float radius = static_cast<float>(res) * 0.46f;
+    const float cx = static_cast<float>(res) * 0.5f, cy = static_cast<float>(res) * 0.5f;
+
+    auto shade = [&](u32 x, u32 y, float rgba[4]) {
+        const float dx = (static_cast<float>(x) + 0.5f - cx) / radius, dy = -(static_cast<float>(y) + 0.5f - cy) / radius;
+        const float r2 = dx * dx + dy * dy;
+        if (r2 > 1.0f) {
+            rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0.0f;
+            return;
+        }
+        const Vec3 n(dx, dy, std::sqrt(1.0f - r2));
+        Vec3 albedoColor = src.baseColor;
+        if (textured) {
+            // Longitude/latitude, tiled twice around so fine textures stay legible on a small sphere.
+            const float u = (std::atan2(n.x, n.z) / (2.0f * math::kPi) + 0.5f) * 2.0f;
+            const float v = (std::asin(std::clamp(n.y, -1.0f, 1.0f)) / math::kPi + 0.5f) * 2.0f;
+            const u32 tx = static_cast<u32>((u - std::floor(u)) * static_cast<float>(albedo.width)) % albedo.width;
+            const u32 ty = static_cast<u32>((1.0f - (v - std::floor(v))) * static_cast<float>(albedo.height)) % albedo.height;
+            const u8* p = &albedo.rgba[(static_cast<size_t>(ty) * albedo.width + tx) * 4];
+            albedoColor *= Vec3(p[0], p[1], p[2]) / 255.0f;
+        }
+        const float diff = std::max(glm::dot(n, lightDir), 0.0f);
+        const Vec3 h = glm::normalize(lightDir + viewDir);
+        const float spec = std::pow(std::max(glm::dot(n, h), 0.0f), shininess) * (0.25f + 0.75f * src.metallic) * (1.0f - 0.6f * src.roughness);
+        const Vec3 specColor = glm::mix(Vec3(1.0f), albedoColor, src.metallic);
+        const float ambient = 0.28f + 0.2f * (0.5f + 0.5f * n.y);
+        const Vec3 diffuseColor = albedoColor * (1.0f - 0.85f * src.metallic);
+        const Vec3 c = glm::min(diffuseColor * (ambient + 0.85f * diff) + specColor * spec, Vec3(1.0f));
+        rgba[0] = c.x;
+        rgba[1] = c.y;
+        rgba[2] = c.z;
+        rgba[3] = 1.0f;
+    };
+
+    for (u32 y = 0; y < kThumbSize; ++y) {
+        for (u32 x = 0; x < kThumbSize; ++x) {
+            float acc[4] = {0, 0, 0, 0};
+            for (u32 sy = 0; sy < kSS; ++sy) {
+                for (u32 sx = 0; sx < kSS; ++sx) {
+                    float s[4];
+                    shade(x * kSS + sx, y * kSS + sy, s);
+                    for (int c = 0; c < 3; ++c) acc[c] += s[c] * s[3]; // coverage weighted
+                    acc[3] += s[3];
+                }
+            }
+            u8* d = out.rgba.data() + (static_cast<size_t>(y) * kThumbSize + x) * 4;
+            if (acc[3] > 0.0f) {
+                for (int c = 0; c < 3; ++c) d[c] = static_cast<u8>(std::clamp(acc[c] / acc[3], 0.0f, 1.0f) * 255.0f + 0.5f);
+            }
+            d[3] = static_cast<u8>(acc[3] / static_cast<float>(kSS * kSS) * 255.0f + 0.5f);
+        }
+    }
+    return true;
+}
+
 } // namespace foh

@@ -37,9 +37,12 @@ On a 4K monitor the editor was unreadable (ImGui's 13 px bitmap font, no DPI han
 
 stb_image is also compiled into the editor (its engine copy is private to `foh_engine.dll`) for thumbnails. The JSON reader is our own (`editor/src/workshop/json.*`).
 
+## Materials from texture sets
+
+A downloaded PBR set becomes an authored material (`<name>.fmat`, `AssetDb::saveMaterial`) next to its textures: files are matched by the last word of their name (color / normal GL / roughness / metalness / AO / packed ARM), separate AO + roughness + metalness maps are packed into one glTF-style ORM texture on a low-priority job, the textures are imported, and the material is written when the last import ticket completes. Dragging a `.fmat` from the content browser onto an object (pick under the cursor) sets `MeshRenderer::material`; "Apply to selected object" does the same for the selection.
+
 ## Known limits / follow-ups
 
 - Import is still synchronous on the main thread (a parallel task covers async import); the workshop imports one file per frame so the UI keeps updating.
-- Texture sets are imported as textures; creating a material from them waits for the material/texture sampling work.
 - Thumbnails of materials and of single sub-assets (virtual folders under a model) are not done yet; neither is a disk cache for thumbnails.
 - The Sketchfab token is stored in plain text in `editor_prefs.txt`.

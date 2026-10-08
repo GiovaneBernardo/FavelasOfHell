@@ -195,6 +195,22 @@ void AssetDb::scan() {
             record.path = toUtf8(sourceFile.lexically_relative(m_desc.sourceRoot));
             indexSource(record);
             m_sources[record.path] = std::move(record);
+        } else if (ext == ".fmat") {
+            std::vector<u8> bytes;
+            std::string error;
+            if (!ReadFileBytes(p, bytes)) continue;
+            auto reader = ContainerReader::Open(std::move(bytes), &error);
+            if (!reader || reader->typeId() != static_cast<u32>(AssetKind::Material)) {
+                FOH_WARN("asset db: bad material file {}: {}", toUtf8(p), error);
+                continue;
+            }
+            AssetInfo info;
+            info.kind = AssetKind::Material;
+            info.name = p.stem().string();
+            info.key = toUtf8(p.lexically_relative(m_desc.sourceRoot));
+            info.file = p;
+            m_assets[reader->id()] = std::move(info);
+            m_deps[reader->id()] = ReadDependencies(*reader);
         } else if (ext == ".fvariant") {
             std::vector<u8> bytes;
             std::string error;
@@ -867,6 +883,40 @@ AssetId AssetDb::saveVariant(const std::string& relativePath, const PrefabVarian
         if (o.material.isValid()) deps.push_back(o.material);
     m_deps[id] = std::move(deps);
     return id;
+}
+
+AssetId AssetDb::saveMaterial(const std::string& relativePath, const MaterialAsset& material) {
+    std::string rel = relativePath;
+    if (fs::path(rel).extension() != ".fmat") rel += ".fmat";
+    const fs::path file = m_desc.sourceRoot / fromUtf8(rel);
+
+    AssetId id = findAuthored(rel);
+    if (!id.isValid()) {
+        std::vector<u8> existing;
+        if (ReadFileBytes(file, existing))
+            if (auto reader = ContainerReader::Open(std::move(existing))) id = reader->id();
+    }
+    if (!id.isValid()) id = GenerateAssetId();
+
+    if (!WriteFileBytes(file, SerializeMaterial(material, id))) return {};
+    AssetInfo info;
+    info.kind = AssetKind::Material;
+    info.name = material.name;
+    info.key = rel;
+    info.file = file;
+    m_assets[id] = std::move(info);
+    std::vector<AssetId> deps;
+    for (const TextureRef* t : {&material.baseColorTexture, &material.normalTexture, &material.metallicRoughnessTexture,
+                                &material.occlusionTexture, &material.emissiveTexture})
+        if (t->isValid() && std::find(deps.begin(), deps.end(), t->texture) == deps.end()) deps.push_back(t->texture);
+    m_deps[id] = std::move(deps);
+    return id;
+}
+
+AssetId AssetDb::findAuthored(const std::string& relativePath) const {
+    for (const auto& [id, info] : m_assets)
+        if (!info.source.isValid() && info.key == relativePath) return id;
+    return {};
 }
 
 } // namespace foh

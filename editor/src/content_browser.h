@@ -28,6 +28,8 @@ struct ContentBrowserActions {
     std::function<void(const std::filesystem::path& file)> importFile;
     // Imports the source (a path relative to the asset root) when needed and places it into the active scene.
     std::function<void(const std::string& relPath)> placeModel;
+    // Puts a material (path relative to the asset root) on the selected scene object.
+    std::function<void(const std::string& relPath)> applyMaterial;
     std::function<void()> openWorkshop;
 };
 
