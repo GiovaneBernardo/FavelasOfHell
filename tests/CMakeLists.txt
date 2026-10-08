@@ -13,7 +13,9 @@ add_executable(foh_tests
     test_renderer_scene.cpp
     test_shadow_cascades.cpp
     test_observers.cpp
-    test_assets.cpp)
+    test_assets.cpp
+    test_asset_import.cpp
+    test_prefab_instance.cpp)
 # nvrhi: the render graph tests include the RHI tier (NVRHI types) directly.
 target_link_libraries(foh_tests PRIVATE foh::engine doctest::doctest nvrhi)
 set_target_properties(foh_tests PROPERTIES FOLDER "tests")

@@ -15,6 +15,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -36,6 +37,20 @@ class RenderGraph;
 class ShaderLibrary;
 class Swapchain;
 struct RgTexture;
+
+// CPU geometry of an imported mesh. All spans index the same vertices; normals and uvs
+// may be empty (up vector / zero).
+struct MeshGeometry {
+    std::span<const Vec3> positions;
+    std::span<const Vec3> normals;
+    std::span<const Vec2> uvs;
+    std::span<const u32> indices;
+};
+// A draw range inside MeshGeometry::indices (one per submesh; MeshRenderer::submesh picks it).
+struct MeshIndexRange {
+    u32 firstIndex = 0;
+    u32 indexCount = 0;
+};
 
 struct SceneId {
     u32 value = 0;
@@ -127,6 +142,14 @@ public:
     ~Renderer();
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
+
+    // ---- imported meshes ----
+    // Uploads (or, for an asset that is already uploaded, replaces: hot reload) the geometry of
+    // an imported mesh. MeshRenderer components that reference `asset` start drawing it with the
+    // next extraction. False if the geometry is inconsistent (nothing changes then).
+    bool uploadMeshAsset(const AssetId& asset, const MeshGeometry& geometry, std::span<const MeshIndexRange> submeshes);
+    void releaseMeshAsset(const AssetId& asset);
+    bool hasMeshAsset(const AssetId& asset) const;
 
     // ---- scenes ----
     SceneId createScene(const char* name);

@@ -1,17 +1,20 @@
 #pragma once
 
 #include <chrono>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "foh/asset_db.h"
 #include "foh/dev_builder.h"
 #include "foh/ecs.h"
 #include "foh/game_module_host.h"
 #include "foh/jobs.h"
 #include "foh/renderer/renderer.h"
 #include "foh/rhi/swapchain.h"
+#include "foh/scene/asset_scene_bridge.h"
 #include "foh/window.h"
 #include "fly_camera.h"
 #include "imgui_platform.h"
@@ -37,6 +40,7 @@ struct EditorOptions {
     // schedule to exercise every resource-recreation path under the validation layer.
     bool stress = false;
     u32 minPassesPerGroup = 4; // --group-passes N (1 = one command list per pass)
+    std::string importFile;    // --import <file>: imports it at startup and places it like a drop (QA)
 };
 
 // The editor: one window, one renderer, any number of scenes (ECS worlds) and
@@ -73,6 +77,8 @@ private:
         u32 wantWidth = 0, wantHeight = 0;
         u32 stableFrames = 0;
         bool sizeApplied = false;
+        // Where the image was drawn last frame (logical window coordinates): drops land by it.
+        float imageX = 0.0f, imageY = 0.0f, imageW = 0.0f, imageH = 0.0f;
     };
 
     bool init();
@@ -85,6 +91,14 @@ private:
     void drawRenderGraphPanel();
     void drawStatsPanel(float dt);
     void saveScreenshot();
+    void initAssets();
+    void importFile(const std::filesystem::path& file, float dropX, float dropY, bool hasDropPosition);
+    void pollAssetChanges(float dt);
+    void drawAssetsPanel();
+    void logAsset(std::string message);
+    void instantiateAsset(AssetId prefab, size_t sceneIndex, const Transform& at);
+    // Where a dropped model goes: the ground point under the cursor in the viewport it was dropped on.
+    Transform dropPlacement(float x, float y, bool hasPosition, size_t& sceneIndex) const;
     void createDebugScene();
     void runStress();
     void drawGizmo(ViewportPanel& panel, const ImVec2& origin, const ImVec2& size, int panelIndex);
@@ -107,6 +121,13 @@ private:
     std::optional<DevBuilder> m_gameBuilder;
     std::optional<DevBuilder> m_shaderBuilder;
     std::vector<ViewportPanel> m_viewports;
+
+    // Assets: the database of imported sources and the glue that puts them into worlds.
+    std::unique_ptr<AssetDb> m_assets;
+    std::unique_ptr<AssetSceneBridge> m_assetBridge;
+    std::vector<std::string> m_assetLog; // newest last, capped
+    float m_sinceAssetPoll = 0.0f;
+    bool m_showAssets = true;
 
     bool m_dockLayoutBuilt = false;
     bool m_showRenderGraph = true;

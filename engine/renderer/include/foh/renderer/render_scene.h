@@ -1,8 +1,10 @@
 #pragma once
 
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
+#include "foh/asset_id.h"
 #include "foh/ecs.h"
 #include "foh/jobs.h"
 #include "foh/math.h"
@@ -42,6 +44,30 @@ struct ExtractedScene {
     u64 frame = 0;
 };
 
+// Imported mesh -> renderer mesh ids (one per submesh). Filled by Renderer::uploadMeshAsset,
+// read by the extraction system to turn MeshRenderer asset references into draw ranges.
+//
+// Thread-safety: set/erase on the main thread while no world is updating; find() may run
+// concurrently from extraction jobs.
+class FOH_API MeshLookup {
+public:
+    static constexpr u32 kInvalid = ~0u;
+
+    u32 find(const AssetId& asset, u32 submesh) const {
+        const auto it = m_meshes.find(asset);
+        return it != m_meshes.end() && submesh < it->second.size() ? it->second[submesh] : kInvalid;
+    }
+    const std::vector<u32>* ids(const AssetId& asset) const {
+        const auto it = m_meshes.find(asset);
+        return it == m_meshes.end() ? nullptr : &it->second;
+    }
+    void set(const AssetId& asset, std::vector<u32> ids) { m_meshes[asset] = std::move(ids); }
+    void erase(const AssetId& asset) { m_meshes.erase(asset); }
+
+private:
+    std::unordered_map<AssetId, std::vector<u32>, AssetIdHash> m_meshes;
+};
+
 // The renderer's copy of one ECS World's render data. The ECS never exposes its
 // storage to the renderer: a plugin (RenderExtractPlugin) copies what is needed
 // into this object once per frame, and the renderer only ever reads the
@@ -66,6 +92,9 @@ public:
         m_writeIndex ^= 1;
         m_dirty = false;
     }
+
+    // Set by the renderer that owns this scene; null for scenes without one (tests).
+    const MeshLookup* meshLookup = nullptr;
 
     // Per-job-thread staging used by the parallel extraction.
     std::vector<ExtractedMesh>& staging(u32 threadSlot) { return m_staging[threadSlot]; }

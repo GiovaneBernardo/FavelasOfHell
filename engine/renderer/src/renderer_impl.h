@@ -32,6 +32,7 @@ struct SceneGpu {
     };
     std::vector<GpuInstance> instances; // sorted by mesh
     std::vector<Batch> batches;
+    std::vector<u32> counts, cursor;    // counting-sort scratch, one slot per mesh id (kept to avoid per-frame allocation)
 };
 
 struct SceneSlot {
@@ -109,6 +110,14 @@ struct Renderer::Impl {
     std::unique_ptr<ShaderLibrary> shaders;
     std::unique_ptr<PipelineCache> pipelines;
     GpuResources gpu;
+    MeshLookup meshLookup; // imported mesh asset -> mesh ids in gpu.meshes
+    // Replaced/released mesh ids stay valid for a few frames: scene snapshots already extracted
+    // (and frames in flight) may still reference them.
+    struct RetiredMesh {
+        u64 frame;
+        u32 id;
+    };
+    std::vector<RetiredMesh> retiredMeshes;
     std::unique_ptr<RenderGraph> windowGraph;
 
     std::vector<SceneSlot> scenes;

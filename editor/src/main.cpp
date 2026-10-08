@@ -8,6 +8,7 @@
 //   --frames N       render N frames, then exit (smoke test; exit code 2 on graphics API errors)
 //   --screenshot f   with --frames: save the last frame as a PNG
 //   --group-passes N passes per command list before a graph is split (1: one list per pass, QA)
+//   --import file    import a model/texture at startup and place it, exactly like dropping it on the window
 //   --stress         scripted resizes / scene switches / panel toggles (QA)
 int main(int argc, char** argv) {
     foh::EditorOptions options;
@@ -22,6 +23,8 @@ int main(int argc, char** argv) {
             options.vsync = false;
         } else if (!std::strcmp(argv[i], "--group-passes") && i + 1 < argc) {
             options.minPassesPerGroup = static_cast<foh::u32>(std::atoi(argv[++i]));
+        } else if (!std::strcmp(argv[i], "--import") && i + 1 < argc) {
+            options.importFile = argv[++i];
         } else if (!std::strcmp(argv[i], "--stress")) {
             options.stress = true;
         } else {

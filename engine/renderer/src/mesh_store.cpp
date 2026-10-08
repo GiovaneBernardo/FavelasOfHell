@@ -79,40 +79,84 @@ MeshStore MeshStore::create(nvrhi::IDevice* device) {
     const MeshData meshes[] = {makeCube(), makePlane(), makeSphere()};
     static_assert(static_cast<u32>(BuiltinMesh::Count) == 3, "update the table above");
 
-    std::vector<MeshVertex> vertices;
-    std::vector<u32> indices;
+    // Room for imported meshes from the start, so the first imports do not reallocate.
+    store.grow(device, 1u << 16, 1u << 18);
     for (const MeshData& m : meshes) {
-        store.m_ranges.push_back(
-            {static_cast<u32>(indices.size()), static_cast<u32>(m.indices.size()), static_cast<i32>(vertices.size())});
-        vertices.insert(vertices.end(), m.vertices.begin(), m.vertices.end());
-        indices.insert(indices.end(), m.indices.begin(), m.indices.end());
+        const Block b = store.append(device, m.vertices, m.indices);
+        store.addRange({b.firstIndex, static_cast<u32>(m.indices.size()), b.baseVertex});
     }
+    return store;
+}
+
+void MeshStore::grow(nvrhi::IDevice* device, size_t vertexCapacity, size_t indexCapacity) {
+    m_vertexCapacity = vertexCapacity;
+    m_indexCapacity = indexCapacity;
 
     nvrhi::BufferDesc vb;
-    vb.byteSize = vertices.size() * sizeof(MeshVertex);
+    vb.byteSize = vertexCapacity * sizeof(MeshVertex);
     vb.isVertexBuffer = true;
     vb.initialState = nvrhi::ResourceStates::VertexBuffer;
     vb.keepInitialState = true;
-    vb.debugName = "BuiltinMeshVertices";
-    store.m_vertices = device->createBuffer(vb);
+    vb.debugName = "MeshVertices";
+    m_vertices = device->createBuffer(vb);
 
     nvrhi::BufferDesc ib;
-    ib.byteSize = indices.size() * sizeof(u32);
+    ib.byteSize = indexCapacity * sizeof(u32);
     ib.isIndexBuffer = true;
     ib.initialState = nvrhi::ResourceStates::IndexBuffer;
     ib.keepInitialState = true;
-    ib.debugName = "BuiltinMeshIndices";
-    store.m_indices = device->createBuffer(ib);
+    ib.debugName = "MeshIndices";
+    m_indices = device->createBuffer(ib);
 
+    // The new buffers start empty: re-upload what the old ones held.
+    if (!m_cpuVertices.empty() || !m_cpuIndices.empty()) upload(device, 0, m_cpuVertices.size(), 0, m_cpuIndices.size());
+}
+
+void MeshStore::upload(nvrhi::IDevice* device, size_t firstVertex, size_t vertexCount, size_t firstIndex, size_t indexCount) {
     nvrhi::CommandListParameters params;
     params.enableImmediateExecution = false;
     nvrhi::CommandListHandle cmd = device->createCommandList(params);
     cmd->open();
-    cmd->writeBuffer(store.m_vertices, vertices.data(), vb.byteSize);
-    cmd->writeBuffer(store.m_indices, indices.data(), ib.byteSize);
+    if (vertexCount)
+        cmd->writeBuffer(m_vertices, m_cpuVertices.data() + firstVertex, vertexCount * sizeof(MeshVertex),
+                         firstVertex * sizeof(MeshVertex));
+    if (indexCount)
+        cmd->writeBuffer(m_indices, m_cpuIndices.data() + firstIndex, indexCount * sizeof(u32), firstIndex * sizeof(u32));
     cmd->close();
     device->executeCommandLists(&cmd, 1);
-    return store;
+}
+
+MeshStore::Block MeshStore::append(nvrhi::IDevice* device, std::span<const MeshVertex> vertices, std::span<const u32> indices) {
+    const Block block{static_cast<u32>(m_cpuIndices.size()), static_cast<i32>(m_cpuVertices.size())};
+    m_cpuVertices.insert(m_cpuVertices.end(), vertices.begin(), vertices.end());
+    m_cpuIndices.insert(m_cpuIndices.end(), indices.begin(), indices.end());
+
+    if (m_cpuVertices.size() > m_vertexCapacity || m_cpuIndices.size() > m_indexCapacity) {
+        size_t vc = m_vertexCapacity, ic = m_indexCapacity;
+        while (vc < m_cpuVertices.size()) vc *= 2;
+        while (ic < m_cpuIndices.size()) ic *= 2;
+        grow(device, vc, ic); // uploads everything, including the new block
+    } else {
+        upload(device, static_cast<size_t>(block.baseVertex), vertices.size(), block.firstIndex, indices.size());
+    }
+    return block;
+}
+
+u32 MeshStore::addRange(const MeshRange& range) {
+    if (!m_freeRanges.empty()) {
+        const u32 id = m_freeRanges.back();
+        m_freeRanges.pop_back();
+        m_ranges[id] = range;
+        return id;
+    }
+    m_ranges.push_back(range);
+    return static_cast<u32>(m_ranges.size() - 1);
+}
+
+void MeshStore::releaseRange(u32 id) {
+    if (id < static_cast<u32>(BuiltinMesh::Count) || id >= m_ranges.size()) return; // builtins are permanent
+    m_ranges[id] = {}; // indexCount 0: draws nothing
+    m_freeRanges.push_back(id);
 }
 
 } // namespace foh

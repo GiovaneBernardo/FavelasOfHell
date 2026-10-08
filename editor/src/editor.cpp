@@ -16,6 +16,7 @@
 #include "foh/rhi/pipeline_cache.h"
 #include "foh/rhi/render_graph.h"
 #include "foh/png.h"
+#include "foh/utf8_path.h"
 
 namespace foh::editor {
 
@@ -162,7 +163,175 @@ bool Editor::init() {
     addViewport("Game", 0, false, false);
     addViewport("Animation Debug", 1, true, true);
     m_viewports[2].camera.position = Vec3(0.0f, 3.0f, 9.0f);
+
+    initAssets();
     return true;
+}
+
+// ---- assets ---------------------------------------------------------------------------------
+
+void Editor::initAssets() {
+    const fs::path root = fs::path(FOH_PROJECT_ROOT);
+    AssetDbDesc desc;
+    desc.sourceRoot = root / "assets";
+    desc.cacheRoot = root / "cache" / "imported";
+    m_assets = std::make_unique<AssetDb>(desc);
+    m_assets->scan();
+    m_assetBridge = std::make_unique<AssetSceneBridge>(*m_assets, *m_renderer);
+    FOH_INFO("asset database: {} source(s) in {}", m_assets->sources().size(), PathToUtf8(desc.sourceRoot));
+    logAsset("Drop a .gltf / .glb / .fbx model or a texture onto the window to import it.");
+}
+
+void Editor::logAsset(std::string message) {
+    FOH_INFO("assets: {}", message);
+    m_assetLog.push_back(std::move(message));
+    if (m_assetLog.size() > 64) m_assetLog.erase(m_assetLog.begin(), m_assetLog.begin() + 16);
+}
+
+Transform Editor::dropPlacement(float x, float y, bool hasPosition, size_t& sceneIndex) const {
+    // The viewport under the cursor, else the first open editor-camera viewport.
+    const ViewportPanel* target = nullptr;
+    auto inside = [&](const ViewportPanel& p) {
+        return x >= p.imageX && x < p.imageX + p.imageW && y >= p.imageY && y < p.imageY + p.imageH;
+    };
+    for (const ViewportPanel& p : m_viewports) {
+        if (!p.open || !p.useEditorCamera || p.imageW <= 0.0f) continue;
+        if (!target) target = &p;
+        if (hasPosition && inside(p)) {
+            target = &p;
+            break;
+        }
+    }
+    Transform t;
+    sceneIndex = target ? target->sceneIndex : 0;
+    if (!target) return t;
+
+    // Ray through the cursor (or the view center) onto the ground plane y = 0.
+    f32 ndcX = 0.0f, ndcY = 0.0f;
+    if (hasPosition && inside(*target)) {
+        ndcX = (x - target->imageX) / target->imageW * 2.0f - 1.0f;
+        ndcY = 1.0f - (y - target->imageY) / target->imageH * 2.0f;
+    }
+    const FlyCamera& cam = target->camera;
+    const f32 aspect = target->imageH > 0.0f ? target->imageW / target->imageH : 1.0f;
+    const f32 tanHalf = std::tan(cam.fovY * 0.5f);
+    const Vec3 dir = glm::normalize(cam.rotation() * Vec3(ndcX * tanHalf * aspect, ndcY * tanHalf, -1.0f));
+    if (dir.y < -1e-4f) {
+        const f32 dist = -cam.position.y / dir.y;
+        if (dist > 0.0f && dist < 500.0f) {
+            t.position = cam.position + dir * dist;
+            return t;
+        }
+    }
+    t.position = cam.position + dir * 12.0f; // looking at the sky or too far: in front of the camera
+    return t;
+}
+
+void Editor::instantiateAsset(AssetId prefab, size_t sceneIndex, const Transform& at) {
+    if (sceneIndex >= m_scenes.size()) sceneIndex = 0;
+    std::string error;
+    const PrefabInstanceResult inst = m_assetBridge->instantiate(m_scenes[sceneIndex].app->world(), prefab, at, &error);
+    if (inst.root.isNull()) {
+        logAsset("Cannot place the model: " + error);
+        return;
+    }
+    m_selection.scene = sceneIndex;
+    m_selection.entity = inst.root;
+    logAsset("Placed " + std::to_string(inst.entities.size()) + " entities into '" + m_scenes[sceneIndex].name + "'.");
+}
+
+void Editor::importFile(const fs::path& file, float dropX, float dropY, bool hasDropPosition) {
+    const SourceFormat format = DetectSourceFormat(file);
+    const std::string name = PathToUtf8(file.filename());
+    if (format == SourceFormat::Unknown) {
+        logAsset("Cannot import '" + name + "': supported are .gltf, .glb, .fbx, .png, .jpg, .tga, .bmp.");
+        return;
+    }
+
+    const auto begin = std::chrono::steady_clock::now();
+    const ImportResult result = m_assets->importFile(file);
+    if (!result.ok) {
+        logAsset("Import of '" + name + "' failed: " + result.error);
+        return;
+    }
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+    logAsset("Imported '" + name + "': " + std::to_string(result.assets.size()) + " asset(s) in " +
+             std::to_string(static_cast<int>(ms)) + " ms" + (result.upToDate ? " (unchanged)" : ""));
+    for (const std::string& w : result.warnings) logAsset("  warning: " + w);
+
+    std::vector<World*> worlds;
+    for (SceneEntry& sc : m_scenes) worlds.push_back(&sc.app->world());
+    m_assetBridge->assetsChanged(result.changed, worlds);
+
+    if (format == SourceFormat::Image) return;
+    if (!result.prefab.isValid()) {
+        logAsset("  no prefab was generated (meshes only).");
+        return;
+    }
+    size_t sceneIndex = 0;
+    const Transform at = dropPlacement(dropX, dropY, hasDropPosition, sceneIndex);
+    instantiateAsset(result.prefab, sceneIndex, at);
+}
+
+void Editor::pollAssetChanges(float dt) {
+    m_sinceAssetPoll += dt;
+    if (m_sinceAssetPoll < 1.0f) return;
+    m_sinceAssetPoll = 0.0f;
+    std::vector<World*> worlds;
+    for (SceneEntry& sc : m_scenes) worlds.push_back(&sc.app->world());
+    for (const ImportResult& r : m_assets->reimportChanged()) {
+        if (!r.ok) {
+            logAsset("Reimport of '" + r.sourcePath + "' failed: " + r.error);
+            continue;
+        }
+        logAsset("Reimported '" + r.sourcePath + "' (" + std::to_string(r.changed.size()) + " asset(s) changed)");
+        m_assetBridge->assetsChanged(r.changed, worlds);
+    }
+}
+
+void Editor::drawAssetsPanel() {
+    if (!ImGui::Begin("Assets", &m_showAssets)) {
+        ImGui::End();
+        return;
+    }
+    ImGui::TextDisabled("Drop .gltf / .glb / .fbx or images onto the window. Sources live in %s",
+                        PathToUtf8(m_assets->sourceRoot()).c_str());
+    if (ImGui::BeginChild("##sources", ImVec2(0, -ImGui::GetTextLineHeightWithSpacing() * 6.5f), ImGuiChildFlags_Borders)) {
+        for (const SourceRecord* src : m_assets->sources()) {
+            u32 live = 0, dead = 0;
+            for (const SubAssetRecord& s : src->subAssets) (s.tombstone ? dead : live)++;
+            const std::string label = src->path + "  (" + std::to_string(live) + " assets" +
+                                      (dead ? ", " + std::to_string(dead) + " removed" : std::string()) + ")###" + src->path;
+            const bool open = ImGui::TreeNode(label.c_str());
+            AssetId prefab;
+            for (const SubAssetRecord& s : src->subAssets)
+                if (!s.tombstone && s.kind == AssetKind::Prefab) prefab = s.guid;
+            if (prefab.isValid()) {
+                ImGui::SameLine();
+                ImGui::PushID(src->path.c_str());
+                if (ImGui::SmallButton("Place")) {
+                    size_t sceneIndex = 0;
+                    const Transform at = dropPlacement(0, 0, false, sceneIndex);
+                    instantiateAsset(prefab, sceneIndex, at);
+                }
+                ImGui::PopID();
+            }
+            if (!open) continue;
+            for (const SubAssetRecord& s : src->subAssets) {
+                const char* kind = AssetKindName(s.kind);
+                if (s.tombstone) ImGui::TextDisabled("%s  %s  (removed from the source)", kind, s.key.c_str());
+                else ImGui::Text("%s  %s", kind, s.name.c_str());
+            }
+            ImGui::TreePop();
+        }
+    }
+    ImGui::EndChild();
+    if (ImGui::BeginChild("##log", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
+        for (const std::string& line : m_assetLog) ImGui::TextUnformatted(line.c_str());
+        if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f) ImGui::SetScrollHereY(1.0f);
+    }
+    ImGui::EndChild();
+    ImGui::End();
 }
 
 void Editor::createDebugScene() {
@@ -206,6 +375,8 @@ void Editor::shutdown() {
     m_gameBuilder.reset();
     m_shaderBuilder.reset();
     m_game.reset();
+    m_assetBridge.reset();
+    m_assets.reset();
     m_scenes.clear();
     m_imguiRenderer.shutdown();
     m_platform.shutdown();
@@ -229,7 +400,15 @@ int Editor::run() {
     }
     auto last = Clock::now();
     u32 rendered = 0;
+    bool startupImportDone = m_options.importFile.empty();
     while (m_window->pollEvents()) {
+        for (const DroppedFile& drop : m_window->droppedFiles()) importFile(PathFromUtf8(drop.path), drop.x, drop.y, true);
+        // --import (QA): behaves like a drop onto the middle of the Scene panel, once the panels have a size.
+        if (!startupImportDone && rendered >= 3) {
+            startupImportDone = true;
+            const ViewportPanel& p = m_viewports.front();
+            importFile(PathFromUtf8(m_options.importFile), p.imageX + p.imageW * 0.5f, p.imageY + p.imageH * 0.62f, true);
+        }
         const auto now = Clock::now();
         const float dt = std::min(std::chrono::duration<float>(now - last).count(), 0.1f);
         last = now;
@@ -278,6 +457,7 @@ bool Editor::frame(float dt) {
     if (m_gameBuilder) m_gameBuilder->poll();
     if (m_shaderBuilder) m_shaderBuilder->poll();
     if (m_game) m_game->pollReload();
+    pollAssetChanges(dt);
     for (SceneEntry& s : m_scenes) s.app->update(dt);
 
     // 3. Render: viewports first (parallel graphs), then the window graph with the UI.
@@ -333,6 +513,7 @@ void Editor::drawMenuBar() {
         ImGui::Separator();
         ImGui::MenuItem("Entities", nullptr, &m_showEntities);
         ImGui::MenuItem("Inspector", nullptr, &m_showInspector);
+        ImGui::MenuItem("Assets", nullptr, &m_showAssets);
         ImGui::MenuItem("Render Graph", nullptr, &m_showRenderGraph);
         ImGui::MenuItem("Stats", nullptr, &m_showStats);
         ImGui::EndMenu();
@@ -368,6 +549,7 @@ void Editor::buildDockLayout(unsigned int dockspaceId) {
     ImGui::DockBuilderDockWindow("Animation Debug", bottomLeft);
     ImGui::DockBuilderDockWindow("Render Graph", bottomRight);
     ImGui::DockBuilderDockWindow("Stats", bottomRight);
+    ImGui::DockBuilderDockWindow("Assets", bottomRight);
     ImGui::DockBuilderFinish(dockspaceId);
 }
 
@@ -382,6 +564,7 @@ void Editor::buildUi(float dt) {
     for (ViewportPanel& p : m_viewports) drawViewport(p, dt);
     if (m_showEntities) m_inspector.drawEntities(m_sceneRefs, m_selection, &m_showEntities);
     if (m_showInspector) m_inspector.drawInspector(m_sceneRefs, m_selection, &m_showInspector);
+    if (m_showAssets) drawAssetsPanel();
     if (m_showRenderGraph) drawRenderGraphPanel();
     if (m_showStats) drawStatsPanel(dt);
 }
@@ -426,6 +609,10 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
         ImGui::SetNextItemAllowOverlap();
         ImGui::Image(ImTextureRef(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(image))), avail);
         const bool hovered = ImGui::IsItemHovered();
+        p.imageX = origin.x;
+        p.imageY = origin.y;
+        p.imageW = avail.x;
+        p.imageH = avail.y;
 
         // Camera: RMB captures the mouse for fly navigation (editor cameras only).
         if (p.useEditorCamera) {

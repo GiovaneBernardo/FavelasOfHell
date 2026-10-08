@@ -168,6 +168,7 @@ SceneId Renderer::createScene(const char* name) {
     slot.id = m_impl->nextId++;
     slot.name = name;
     slot.scene = std::make_unique<RenderScene>();
+    slot.scene->meshLookup = &m_impl->meshLookup;
     m_impl->scenes.push_back(std::move(slot));
     return {m_impl->scenes.back().id};
 }
@@ -183,6 +184,49 @@ RenderScene* Renderer::scene(SceneId id) {
     SceneSlot* s = m_impl->findScene(id);
     return s ? s->scene.get() : nullptr;
 }
+
+// ---- imported meshes --------------------------------------------------------------------------
+
+bool Renderer::uploadMeshAsset(const AssetId& asset, const MeshGeometry& geometry, std::span<const MeshIndexRange> submeshes) {
+    Impl& s = *m_impl;
+    const size_t vertexCount = geometry.positions.size();
+    if (!asset.isValid() || vertexCount == 0 || geometry.indices.empty() || submeshes.empty()) return false;
+    if (!geometry.normals.empty() && geometry.normals.size() != vertexCount) return false;
+    if (!geometry.uvs.empty() && geometry.uvs.size() != vertexCount) return false;
+    for (const u32 index : geometry.indices) {
+        if (index >= vertexCount) return false;
+    }
+    for (const MeshIndexRange& r : submeshes) {
+        if (r.firstIndex > geometry.indices.size() || r.indexCount > geometry.indices.size() - r.firstIndex) return false;
+    }
+
+    std::vector<MeshVertex> vertices(vertexCount);
+    for (size_t i = 0; i < vertexCount; ++i) {
+        vertices[i].position = geometry.positions[i];
+        vertices[i].normal = geometry.normals.empty() ? Vec3(0.0f, 1.0f, 0.0f) : geometry.normals[i];
+        vertices[i].uv = geometry.uvs.empty() ? Vec2(0.0f) : geometry.uvs[i];
+    }
+
+    // Replacing (hot reload): the new ranges become visible together, then the old ones are released.
+    const std::vector<u32> previous = s.meshLookup.ids(asset) ? *s.meshLookup.ids(asset) : std::vector<u32>{};
+    const MeshStore::Block block = s.gpu.meshes.append(s.device->nvrhi(), vertices, geometry.indices);
+    std::vector<u32> ids;
+    ids.reserve(submeshes.size());
+    for (const MeshIndexRange& r : submeshes) ids.push_back(s.gpu.meshes.addRange({block.firstIndex + r.firstIndex, r.indexCount, block.baseVertex}));
+    s.meshLookup.set(asset, std::move(ids));
+    for (const u32 id : previous) s.retiredMeshes.push_back({s.frame, id});
+    return true;
+}
+
+void Renderer::releaseMeshAsset(const AssetId& asset) {
+    Impl& s = *m_impl;
+    if (const std::vector<u32>* ids = s.meshLookup.ids(asset)) {
+        for (const u32 id : *ids) s.retiredMeshes.push_back({s.frame, id});
+    }
+    s.meshLookup.erase(asset);
+}
+
+bool Renderer::hasMeshAsset(const AssetId& asset) const { return m_impl->meshLookup.ids(asset) != nullptr; }
 
 // ---- viewports ----------------------------------------------------------------------------------
 
@@ -332,24 +376,24 @@ GpuInstance packInstance(const ExtractedMesh& m) {
 // Counting sort of the extracted meshes by mesh id into one GPU-ready array plus
 // one batch (= one instanced draw) per mesh.
 void Renderer::Impl::prepareScene(SceneSlot& slot) {
-    constexpr u32 kMeshCount = static_cast<u32>(BuiltinMesh::Count);
+    const u32 meshCount = gpu.meshes.rangeCount();
     const auto& meshes = slot.scene->read().meshes;
-    auto meshOf = [](const ExtractedMesh& m) { return m.mesh < kMeshCount ? m.mesh : 0u; };
-
-    u32 counts[kMeshCount] = {};
-    for (const ExtractedMesh& m : meshes) ++counts[meshOf(m)];
+    auto meshOf = [meshCount](const ExtractedMesh& m) { return m.mesh < meshCount ? m.mesh : 0u; };
 
     SceneGpu& packed = slot.gpu;
+    packed.counts.assign(meshCount, 0u);
+    packed.cursor.assign(meshCount, 0u);
+    for (const ExtractedMesh& m : meshes) ++packed.counts[meshOf(m)];
+
     packed.batches.clear();
-    u32 cursor[kMeshCount] = {};
     u32 offset = 0;
-    for (u32 mesh = 0; mesh < kMeshCount; ++mesh) {
-        cursor[mesh] = offset;
-        if (counts[mesh]) packed.batches.push_back({mesh, offset, counts[mesh]});
-        offset += counts[mesh];
+    for (u32 mesh = 0; mesh < meshCount; ++mesh) {
+        packed.cursor[mesh] = offset;
+        if (packed.counts[mesh]) packed.batches.push_back({mesh, offset, packed.counts[mesh]});
+        offset += packed.counts[mesh];
     }
     packed.instances.resize(meshes.size());
-    for (const ExtractedMesh& m : meshes) packed.instances[cursor[meshOf(m)]++] = packInstance(m);
+    for (const ExtractedMesh& m : meshes) packed.instances[packed.cursor[meshOf(m)]++] = packInstance(m);
 }
 
 void Renderer::beginFrame() {
@@ -358,6 +402,11 @@ void Renderer::beginFrame() {
     s.frame = s.device->frameNumber();
     s.shaders->pollReload();
     s.pipelines->collect(s.frame);
+    std::erase_if(s.retiredMeshes, [&](const Impl::RetiredMesh& r) {
+        if (r.frame + 4 > s.frame) return false;
+        s.gpu.meshes.releaseRange(r.id);
+        return true;
+    });
 
     // Finish picks whose GPU work is done (beginFrame just waited for frame - framesInFlight).
     for (auto& v : s.viewports) {

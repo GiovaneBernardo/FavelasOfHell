@@ -12,6 +12,7 @@ add_executable(foh_editor
     src/main.cpp)
 target_link_libraries(foh_editor PRIVATE foh::engine nvrhi imgui::imgui imguizmo::imguizmo)
 target_compile_definitions(foh_editor PRIVATE
+    FOH_PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
     FOH_GAME_MODULE_FILE="modules/$<TARGET_FILE_NAME:foh_game>")
 add_dependencies(foh_editor foh_game)
 if(TARGET foh_shaders)

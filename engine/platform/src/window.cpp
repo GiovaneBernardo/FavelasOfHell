@@ -87,6 +87,7 @@ struct Window::Impl {
     bool textInput = false;
     InputState input;
     std::vector<WindowEvent> events;
+    std::vector<DroppedFile> dropped;
     SDL_Cursor* cursors[static_cast<size_t>(CursorShape::Hidden) + 1] = {};
     CursorShape cursor = CursorShape::Arrow;
 };
@@ -134,6 +135,7 @@ bool Window::pollEvents() {
     for (bool& pressed : in.keysPressed) pressed = false;
     s.resized = false;
     s.events.clear();
+    s.dropped.clear();
 
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
@@ -220,6 +222,10 @@ bool Window::pollEvents() {
                 s.events.push_back(e);
                 break;
             }
+            case SDL_EVENT_DROP_FILE: {
+                if (event.drop.data) s.dropped.push_back({event.drop.data, event.drop.x, event.drop.y});
+                break;
+            }
             default: break;
         }
     }
@@ -228,6 +234,7 @@ bool Window::pollEvents() {
 
 const InputState& Window::input() const { return m_impl->input; }
 std::span<const WindowEvent> Window::events() const { return m_impl->events; }
+std::span<const DroppedFile> Window::droppedFiles() const { return m_impl->dropped; }
 bool Window::wasResized() const { return m_impl->resized; }
 
 bool Window::isMinimized() const {

@@ -58,7 +58,8 @@ Non-goals (for now): console builds, multiplayer, dual-contouring/voxel terrain.
   /jobs          job system: worker pool, fork-join counters, thread slots       [exists]
   /ecs           Bevy-style layer on flecs: World, App, plugins, Query/Res/Commands, parallel scheduler   [exists]
   /host          game-module ABI + hot-reload host                               [exists]
-  /assets        asset ids/container (placeholder; zstd + lz4)                   [exists]
+  /assets        chunked container, asset types, asset database, glTF/FBX/image importers (ADR 0004)   [exists]
+  /scene         prefab instantiation, imported-mesh upload, reimport sync (assets + ECS + renderer)   [exists]
   /renderer      render graph, D3D12 device/swapchain via NVRHI, scenes + viewports,
                  shader library, ECS render extraction (ADR 0003)                 [exists]
   /physics       Jolt integration (placeholder)                                  [exists]
@@ -252,7 +253,7 @@ Smoke/QA flags (both executables): `--frames N` renders N frames and exits with 
 
 ### Dependencies (vcpkg manifest, `vcpkg.json`)
 
-flecs (MIT; ECS storage and queries, private to `engine/ecs`), glm, Jolt Physics, NVRHI (D3D12 + Vulkan), SDL3, zstd, lz4, Dear ImGui (docking, editor only), doctest (tests). Shaders are compiled with `slangc` from the Vulkan SDK (the vcpkg `shaders` feature, which builds Slang itself, stays available as an alternative). vcpkg is pinned to a fixed commit (`builtin-baseline`) for reproducible builds; `cmake/toolchain.cmake` uses `$VCPKG_ROOT` if set (Visual Studio sets it) or bootstraps `.vcpkg/`. Triplet: `x64-windows-static-md` (third-party static, dynamic CRT).
+flecs (MIT; ECS storage and queries, private to `engine/ecs`), glm, Jolt Physics, NVRHI (D3D12 + Vulkan), SDL3, zstd, lz4, cgltf (MIT, glTF parser) and stb (public domain / MIT, `stb_image` decoding), both header-only and private to `engine/assets`, Dear ImGui (docking, editor only), doctest (tests). **Vendored in `third_party/`** (not in our vcpkg baseline): ufbx (MIT / public domain, FBX loader; see `third_party/ufbx/README.md`). Shaders are compiled with `slangc` from the Vulkan SDK (the vcpkg `shaders` feature, which builds Slang itself, stays available as an alternative). vcpkg is pinned to a fixed commit (`builtin-baseline`) for reproducible builds; `cmake/toolchain.cmake` uses `$VCPKG_ROOT` if set (Visual Studio sets it) or bootstraps `.vcpkg/`. Triplet: `x64-windows-static-md` (third-party static, dynamic CRT).
 
 ## Decision Log
 
@@ -275,7 +276,8 @@ flecs (MIT; ECS storage and queries, private to `engine/ecs`), glm, Jolt Physics
 | First map: Vidigal, ~1500 m x ~500 m ground plan (entire favela + some water), Av. Niemeyer to Leblon as later expansion | Decided |
 | Art direction: realistic lighting and models, dense wires/poles, tight streets, street businesses | Decided |
 | Asset format: chunked container + reflection metadata + descriptor-based bulk data (no FlatBuffers) | Decided |
-| Model import: a source file (gltf/fbx) is an asset with GUID-addressed sub-assets (mesh, material, texture, base prefab), generated base prefab + prefab variants for edits, static geometry first ([ADR 0004](docs/adr/0004-model-and-texture-import.md)) (2026-10-08) | Decided direction, parsers pending |
+| Model import: a source file (gltf/fbx) is an asset with GUID-addressed sub-assets (mesh, material, texture, base prefab), generated base prefab + prefab variants for edits, static geometry first ([ADR 0004](docs/adr/0004-model-and-texture-import.md)) (2026-10-08) | Decided, implemented (see ADR 0004 "Implementation status" for what is still open) |
+| Asset import dependencies: cgltf (glTF), ufbx (FBX, vendored), stb_image (decoding) (2026-10-08) | Decided |
 | Hybrid real-data + procedural world | Decided |
 | Hardware: min RTX 2060 / RX 6600, dev RTX 5070 Ti; RT optional | Decided |
 | Hot reload goal: save code, see it live in ~1-3 s with state preserved (DLL reload baseline, Live++ optional) | Decided |

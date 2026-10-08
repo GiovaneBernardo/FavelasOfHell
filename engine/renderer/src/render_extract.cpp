@@ -24,7 +24,13 @@ void extractRenderScene(ResMut<RenderSceneLink> link, Res<Time> time,
     // is fine: the renderer sorts instances by mesh and nothing depends on order.
     for (u32 i = 0; i < kMaxJobThreads; ++i) scene->staging(i).clear();
     meshes.parEach([scene](Entity e, const Transform& t, const MeshRenderer& m) {
-        scene->staging(JobSystem::currentThreadSlot()).push_back({t.matrix(), m.color, m.mesh, 0, e.id});
+        u32 mesh = m.mesh;
+        if (m.asset.isValid()) {
+            // Not uploaded (yet): skip it instead of drawing the wrong thing.
+            mesh = scene->meshLookup ? scene->meshLookup->find(m.asset, m.submesh) : MeshLookup::kInvalid;
+            if (mesh == MeshLookup::kInvalid) return;
+        }
+        scene->staging(JobSystem::currentThreadSlot()).push_back({t.matrix(), m.color, mesh, 0, e.id});
     });
     size_t total = 0;
     for (u32 i = 0; i < kMaxJobThreads; ++i) total += scene->staging(i).size();

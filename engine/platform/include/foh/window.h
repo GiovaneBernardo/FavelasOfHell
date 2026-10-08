@@ -65,6 +65,12 @@ struct InputState {
     bool isDown(MouseButton b) const { return mouseButtons[static_cast<size_t>(b)]; }
 };
 
+// A file dragged from the OS onto the window. Position is in logical window coordinates.
+struct DroppedFile {
+    std::string path; // UTF-8
+    f32 x = 0.0f, y = 0.0f;
+};
+
 // OS window + event pump (SDL3 behind the scenes; SDL types never leak here).
 //
 // Thread-safety: main thread only (an OS requirement on every platform we
@@ -83,6 +89,8 @@ public:
     // that call (what UI layers consume). Both are valid until the next pollEvents.
     const InputState& input() const;
     std::span<const WindowEvent> events() const;
+    // Files dropped onto the window during the last pollEvents.
+    std::span<const DroppedFile> droppedFiles() const;
     bool isKeyDown(Key key) const { return input().isDown(key); }
 
     // Size or display scale changed (or minimized/restored) during the last pollEvents.

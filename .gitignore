@@ -11,3 +11,6 @@ compile_commands.json
 # Cooked assets / caches (never commit)
 /cache/
 /.hotreload/
+
+# Models/textures dropped into the editor are copied here (with their .meta files) until curated into assets/
+/assets/imported/

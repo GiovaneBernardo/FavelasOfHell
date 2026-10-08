@@ -60,6 +60,7 @@ endif()
 # Layers. Dependency direction:  game -> engine <- editor / runtime
 # The engine never references editor/, runtime/ or game/.
 # ---------------------------------------------------------------------------
+add_subdirectory(third_party/ufbx)  # vendored FBX loader (see third_party/ufbx/README.md)
 add_subdirectory(shaders)  # -> target foh_shaders (Slang -> DXIL/SPIR-V)
 add_subdirectory(engine)   # -> target foh::engine (shared library)
 add_subdirectory(game)     # -> hot-reloadable game module (MODULE library)

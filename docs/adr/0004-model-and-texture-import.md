@@ -1,6 +1,6 @@
 # 0004: Model and texture import: source assets with sub-assets
 
-- Status: **Proposed** (direction chosen by the project lead, 2026-10-08; format details and dependencies still to confirm). Builds on the README decision "Engine formats" and Assets pipeline.
+- Status: **Accepted** (project lead, 2026-10-08) and implemented; the deviations and open items are in "Implementation status" below. Builds on the README decision "Engine formats" and Assets pipeline.
 - Related: AGENTS.md rules 5, 6, 7, 8; [ADR 0001](0001-ecs-on-flecs.md); [ADR 0003](0003-renderer-render-graph-viewports.md)
 
 ## Context
@@ -40,11 +40,30 @@ The `.meta` file holds a table `sub-asset key -> GUID`. The key is the source's 
 
 Every sub-asset records source path, source key, importer version, license and attribution (rule 7), and for `.blend`-sourced data the `.blend` file + object name.
 
-## Open points (need project lead input)
+## Implementation status (2026-10-08)
 
-- **Third-party parsers (new dependencies, need approval and license check):** glTF: cgltf (MIT, tiny) or fastgltf (MIT, faster, C++20); FBX: ufbx (public domain / MIT). Image decoding: stb_image (public domain / MIT) and BC compression: bc7enc / ISPC texture compressor or DirectXTex (MIT, Windows-leaning). Proposed default: cgltf, ufbx, stb_image, bc7enc-style compressor.
-- Exact container chunk layout for `Mesh` and `Texture` (follow-up section once the first importer works).
-- Where the importer cache lives (`cache/imported/<guid>.<ext>` proposed, git-ignored).
+Dependencies chosen: **cgltf** (glTF/GLB, vcpkg), **ufbx** (FBX, vendored in `third_party/ufbx` because it is not in our vcpkg baseline), **stb_image** (PNG/JPG/TGA/BMP decoding, vcpkg). No BC compressor yet (see below).
+
+Built: `engine/assets` (container writer/reader with per-chunk hashes and bounds validation, `AssetId`, asset types and their serializers, the importers, the cook step, `AssetDb`), `engine/scene` (prefab instantiation, mesh upload, reimport sync), the editor drop handler and Assets panel, and `Renderer::uploadMeshAsset`. Tests: `tests/test_asset_import.cpp`, `tests/test_prefab_instance.cpp`.
+
+Where the implementation differs from, or is narrower than, the text above:
+
+- **Metadata is hand-serialized, not reflected.** The README says metadata chunks go through the engine reflection system. `engine/assets` depends only on core (reflection lives in the ECS), so each asset type has explicit, versioned `Serialize*/Deserialize*` functions (`checkHeader` is where a per-version migration branch goes). Moving to reflection means extracting the schema layer from `engine/ecs` first; propose it as its own change.
+- **Prefabs are stored as a node table, not as reflected components.** Same reason. Instantiation spawns `Name` + `Transform` + `MeshRenderer` entities.
+- **Textures are cooked as RGBA8** (sRGB for color, UNORM for normal/data) with a full mip chain, one chunk per mip (streamable). The BC7/BC5/BC4 formats are declared in `TexelFormat` and the descriptor but not produced yet; `stb_dxt.h` is already installed with `stb` and covers BC1-BC5, BC7 needs another encoder (bc7enc or similar).
+- **The renderer does not sample textures yet.** Materials are cooked with their texture references and the editor tints instances with the material's base color, but the G-buffer pass only has a per-instance color. Texture sampling needs a material system (bindless or per-material binding sets) and is the next renderer step.
+- **Transforms are baked at instantiation.** `Transform` is a flat world transform (see `renderer/components.h`), so `InstantiatePrefab` composes the node hierarchy and sets parent links only for the hierarchy view. Moving an instance's root does not move its children until transform propagation exists.
+- **Sub-asset GUIDs are derived deterministically** from (source GUID, kind, key) when a key is new, in addition to being recorded in the `.meta` table, so a lost `.meta` table still reproduces the same ids as long as the source GUID survives. Renames are handled by `AssetDb::remapSubAsset`.
+- **Import runs synchronously on the main thread.** A big model with large textures blocks the editor for the duration. The loader/manager (async loads, handles, ref counting, README item 4) is not built; `AssetDb::load` is the synchronous primitive it will wrap.
+- **Skinning/animation, KHR_texture_transform, glTF sampler state, Draco/meshopt/basisu, EXR/HDR images** are not imported (static geometry only, as decided). Required unsupported glTF extensions fail the import with a clear error; other cases produce warnings.
+- **FBX**: textures are looked up next to the model (relative name, bare file name); FBX materials map onto the PBR fields ufbx derives. Less tested than glTF (one ASCII FBX in the tests).
+- **Dropped files are copied** to `assets/imported/<name>/` (git-ignored for now; move curated assets elsewhere under `assets/`). Cooked output goes to `cache/imported/` (git-ignored).
+
+## Open points
+
+- Container chunk layout details for `Mesh` and `Texture` beyond what is implemented (meshlets, LODs, BLAS-friendly data) arrive with the features that need them.
+- Prefab variant authoring UI (variants can be created and saved through `AssetDb::saveVariant`; there is no editor for them yet).
+- Where curated source assets live (`assets/` layout, Git LFS for large sources) is still to be decided.
 
 ## Consequences
 
