@@ -18,7 +18,8 @@ struct ExtractedMesh {
     Mat4 world;
     Vec4 color;
     u32 mesh;
-    u32 pad[3];
+    u32 pad;
+    u64 entity; // Entity::id, for picking
 };
 
 struct ExtractedCamera {

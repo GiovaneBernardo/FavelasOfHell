@@ -50,6 +50,9 @@ struct ViewFrame {
     u32 width = 0;
     u32 height = 0;
     ViewportFlags flags = ViewportFlags::None;
+    // Picking (see Renderer::requestPick): set only on the frame the id pass runs.
+    u32 pickX = 0, pickY = 0;
+    nvrhi::IStagingTexture* pickStaging = nullptr;
 };
 
 struct Viewport {
@@ -74,6 +77,13 @@ struct Viewport {
     bool graphReady = false; // compiled this frame and waiting to be recorded/submitted
 
     ViewportDebugInfo debug;
+
+    enum class PickState : u8 { Idle, Requested, InFlight, Ready };
+    PickState pickState = PickState::Idle;
+    u32 pickX = 0, pickY = 0;
+    u64 pickSubmittedFrame = 0;
+    u64 pickResult = 0;
+    nvrhi::StagingTextureHandle pickStaging;
 };
 
 // Shared immutable GPU objects.

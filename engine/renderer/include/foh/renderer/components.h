@@ -8,11 +8,25 @@
 // separate LocalTransform/GlobalTransform pair; the extraction below then reads
 // the global one.
 
+#include <string_view>
+
 #include "foh/ecs/reflect.h"
 #include "foh/math.h"
 #include "foh/types.h"
 
 namespace foh {
+
+// Human readable label shown by the editor (hierarchy, inspector). Fixed capacity
+// because components are plain data.
+struct Name {
+    char text[48] = {};
+    static Name Make(std::string_view s) {
+        Name n;
+        const size_t len = s.size() < sizeof(n.text) - 1 ? s.size() : sizeof(n.text) - 1;
+        for (size_t i = 0; i < len; ++i) n.text[i] = s[i];
+        return n;
+    }
+};
 
 struct Transform {
     Vec3 position{0.0f};
@@ -49,6 +63,7 @@ struct DirectionalLight {
 } // namespace foh
 
 // Reflection: lets the world serialize these and migrate them across layout changes.
+FOH_REFLECT(foh::Name, text);
 FOH_REFLECT(foh::Transform, position, rotation, scale);
 FOH_REFLECT(foh::MeshRenderer, mesh, color);
 FOH_REFLECT(foh::Camera, fovY, nearZ, farZ, active);

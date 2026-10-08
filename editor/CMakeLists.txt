@@ -8,8 +8,9 @@ add_executable(foh_editor
     src/editor.cpp
     src/imgui_platform.cpp
     src/imgui_renderer.cpp
+    src/inspector.cpp
     src/main.cpp)
-target_link_libraries(foh_editor PRIVATE foh::engine nvrhi imgui::imgui)
+target_link_libraries(foh_editor PRIVATE foh::engine nvrhi imgui::imgui imguizmo::imguizmo)
 target_compile_definitions(foh_editor PRIVATE
     FOH_GAME_MODULE_FILE="modules/$<TARGET_FILE_NAME:foh_game>")
 add_dependencies(foh_editor foh_game)

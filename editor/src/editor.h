@@ -16,8 +16,10 @@
 #include "fly_camera.h"
 #include "imgui_platform.h"
 #include "imgui_renderer.h"
+#include "inspector.h"
 
 struct ImGuiContext;
+struct ImVec2;
 
 namespace foh {
 
@@ -85,6 +87,8 @@ private:
     void saveScreenshot();
     void createDebugScene();
     void runStress();
+    void drawGizmo(ViewportPanel& panel, const ImVec2& origin, const ImVec2& size, int panelIndex);
+    void handlePicking(ViewportPanel& panel, const ImVec2& origin, const ImVec2& size, bool hovered);
 
     static void buildWindowPasses(RenderGraph& graph, RgTexture backbuffer, void* user);
 
@@ -107,6 +111,13 @@ private:
     bool m_dockLayoutBuilt = false;
     bool m_showRenderGraph = true;
     bool m_showStats = true;
+    bool m_showEntities = true;
+    bool m_showInspector = true;
+    EntityInspector m_inspector;
+    Selection m_selection;
+    std::vector<SceneRef> m_sceneRefs;
+    int m_gizmoOp = 7;       // ImGuizmo::TRANSLATE
+    bool m_gizmoLocal = false;
     bool m_vsync = true;
     float m_avgFrameMs = 16.0f;
     u32 m_frameCount = 0;

@@ -99,12 +99,40 @@ struct GridData {
     RgTexture hdr;
     RgTexture depth;
 };
+struct PickData {
+    RgBuffer instances;
+    RgTexture ids;
+    RgTexture depth;
+};
+struct PickReadbackData {
+    RgTexture ids;
+};
 struct TonemapData {
     RgTexture hdr;
     RgTexture output;
 };
 
 // ---- pass bodies ----
+
+// One instanced draw per mesh batch. Shared by the color pass and the picking pass.
+void drawMeshBatches(Impl& s, const ViewFrame& vf, nvrhi::IFramebuffer* fb, nvrhi::IGraphicsPipeline* pso,
+                     nvrhi::IBindingSet* set, nvrhi::ICommandList* cmd, nvrhi::IBuffer* instances) {
+    nvrhi::GraphicsState gs;
+    gs.setPipeline(pso).setFramebuffer(fb).setViewport(fullViewport(vf)).addBindingSet(set);
+    gs.addVertexBuffer({s.gpu.meshes.vertexBuffer(), 0, 0});
+    gs.addVertexBuffer({instances, 1, 0});
+    gs.setIndexBuffer({s.gpu.meshes.indexBuffer(), nvrhi::Format::R32_UINT, 0});
+    cmd->setGraphicsState(gs);
+    for (const SceneGpu::Batch& b : vf.scene->batches) {
+        const MeshRange& r = s.gpu.meshes.range(b.mesh);
+        cmd->drawIndexed(nvrhi::DrawArguments()
+                             .setVertexCount(r.indexCount)
+                             .setInstanceCount(b.count)
+                             .setStartIndexLocation(r.firstIndex)
+                             .setStartVertexLocation(static_cast<u32>(r.baseVertex))
+                             .setStartInstanceLocation(b.first));
+    }
+}
 
 void recordForward(Impl& s, const ViewFrame& vf, const ForwardData& d, RgPassContext& ctx) {
     nvrhi::ICommandList* cmd = ctx.cmd();
@@ -161,21 +189,33 @@ void recordForward(Impl& s, const ViewFrame& vf, const ForwardData& d, RgPassCon
     });
     if (!pso) return;
 
-    nvrhi::GraphicsState gs;
-    gs.setPipeline(pso).setFramebuffer(fb).setViewport(fullViewport(vf)).addBindingSet(set);
-    gs.addVertexBuffer({s.gpu.meshes.vertexBuffer(), 0, 0});
-    gs.addVertexBuffer({ctx.buffer(d.instances), 1, 0});
-    gs.setIndexBuffer({s.gpu.meshes.indexBuffer(), nvrhi::Format::R32_UINT, 0});
-    cmd->setGraphicsState(gs);
-    for (const SceneGpu::Batch& b : vf.scene->batches) {
-        const MeshRange& r = s.gpu.meshes.range(b.mesh);
-        cmd->drawIndexed(nvrhi::DrawArguments()
-                             .setVertexCount(r.indexCount)
-                             .setInstanceCount(b.count)
-                             .setStartIndexLocation(r.firstIndex)
-                             .setStartVertexLocation(static_cast<u32>(r.baseVertex))
-                             .setStartInstanceLocation(b.first));
-    }
+    drawMeshBatches(s, vf, fb, pso, set, ctx.cmd(), ctx.buffer(d.instances));
+}
+
+// Entity ids instead of colors, same geometry and depth test as the forward pass.
+void recordPick(Impl& s, const ViewFrame& vf, const PickData& d, RgPassContext& ctx) {
+    nvrhi::ICommandList* cmd = ctx.cmd();
+    cmd->writeBuffer(vf.viewCb, &vf.constants, sizeof(ViewConstants));
+    nvrhi::IFramebuffer* fb = ctx.framebuffer();
+    cmd->clearTextureUInt(ctx.texture(d.ids), nvrhi::AllSubresources, 0);
+    cmd->clearDepthStencilTexture(ctx.texture(d.depth), nvrhi::AllSubresources, true, 0.0f, false, 0);
+    const ShaderRef vs = s.shaders->get("mesh_forward.vsMesh", nvrhi::ShaderType::Vertex);
+    const ShaderRef ps = s.shaders->get("mesh_forward.psPick", nvrhi::ShaderType::Pixel);
+    if (!vs || !ps) return;
+    nvrhi::IGraphicsPipeline* pso = s.pipelines->graphics(shaderKey(vs, ps, 6), fb, [&] {
+        nvrhi::GraphicsPipelineDesc pd;
+        pd.inputLayout = s.gpu.meshInput;
+        pd.VS = vs.shader;
+        pd.PS = ps.shader;
+        pd.bindingLayouts = {s.gpu.layoutView};
+        pd.renderState.depthStencilState.depthFunc = nvrhi::ComparisonFunc::GreaterOrEqual; // reverse-Z
+        pd.renderState.rasterState.cullMode = nvrhi::RasterCullMode::Back;
+        pd.renderState.rasterState.frontCounterClockwise = true;
+        return pd;
+    });
+    if (!pso) return;
+    drawMeshBatches(s, vf, fb, pso, viewBindings(ctx, s, vf, nullptr, nvrhi::Format::UNKNOWN), cmd,
+                    ctx.buffer(d.instances));
 }
 
 void recordGrid(Impl& s, const ViewFrame& vf, const GridData& d, RgPassContext& ctx) {
@@ -360,6 +400,65 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
                 d.depth = b.read(depth, RgAccess::SampledRead);
             },
             [self, view](const GridData& d, RgPassContext& ctx) { recordGrid(*self, *view, d, ctx); });
+    }
+
+    // Picking: one extra id pass + a 1-texel copy, only on the frame a pick was requested.
+    if (vp.pickState == Viewport::PickState::Requested) {
+        if (instanceCount == 0) {
+            vp.pickResult = 0;
+            vp.pickState = Viewport::PickState::Ready;
+        } else {
+            if (!vp.pickStaging) {
+                nvrhi::TextureDesc sd;
+                sd.width = 1;
+                sd.height = 1;
+                sd.format = nvrhi::Format::RG32_UINT;
+                sd.debugName = "pick readback";
+                vp.pickStaging = device->nvrhi()->createStagingTexture(sd, nvrhi::CpuAccessMode::Read);
+            }
+            vf.pickStaging = vp.pickStaging.Get();
+            vf.pickX = vp.pickX;
+            vf.pickY = vp.pickY;
+            RgTextureDesc idDesc;
+            idDesc.width = vp.width;
+            idDesc.height = vp.height;
+            idDesc.format = nvrhi::Format::RG32_UINT;
+            idDesc.renderTarget = true;
+            idDesc.name = "PickIds";
+            RgTextureDesc pdDesc = depthDesc;
+            pdDesc.name = "PickDepth";
+            RgTexture ids;
+            g.addPass<PickData>(
+                "PickIds",
+                [&](RgPassBuilder& b, PickData& d) {
+                    d.instances = b.read(instances, RgAccess::VertexRead);
+                    ids = b.createTexture(idDesc);
+                    d.ids = b.colorTarget(0, ids);
+                    d.depth = b.depthTarget(b.createTexture(pdDesc));
+                },
+                [self, view](const PickData& d, RgPassContext& ctx) { recordPick(*self, *view, d, ctx); });
+            g.addPass<PickReadbackData>(
+                "PickReadback",
+                [&](RgPassBuilder& b, PickReadbackData& d) {
+                    d.ids = b.read(ids, RgAccess::CopySrc);
+                    b.neverCull();
+                },
+                [view](const PickReadbackData& d, RgPassContext& ctx) {
+                    nvrhi::TextureSlice src;
+                    src.x = view->pickX;
+                    src.y = view->pickY;
+                    src.width = 1;
+                    src.height = 1;
+                    src.depth = 1;
+                    nvrhi::TextureSlice dst;
+                    dst.width = 1;
+                    dst.height = 1;
+                    dst.depth = 1;
+                    ctx.cmd()->copyTexture(view->pickStaging, dst, ctx.texture(d.ids), src);
+                });
+            vp.pickState = Viewport::PickState::InFlight;
+            vp.pickSubmittedFrame = frame;
+        }
     }
 
     g.addPass<TonemapData>(

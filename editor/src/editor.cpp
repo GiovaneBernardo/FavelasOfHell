@@ -7,6 +7,7 @@
 
 #include <imgui.h>
 #include <imgui_internal.h> // DockBuilder: the default layout
+#include <ImGuizmo.h>
 
 #include "foh/dev_build_defaults.h"
 #include "foh/file_system.h"
@@ -112,7 +113,7 @@ bool Editor::init() {
     m_imgui = ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_NavEnableKeyboard;
-    m_iniPath = (GetExecutableDirectory() / "editor_layout.ini").string();
+    m_iniPath = (GetExecutableDirectory() / "editor_layout_v2.ini").string();
     io.IniFilename = m_iniPath.c_str();
     applyStyle();
     m_platform.init(*m_window);
@@ -264,6 +265,10 @@ bool Editor::frame(float dt) {
     // 1. UI (also decides viewport sizes, activity and cameras).
     m_platform.newFrame(dt);
     ImGui::NewFrame();
+    ImGuizmo::BeginFrame();
+    m_sceneRefs.clear();
+    for (SceneEntry& sc : m_scenes) m_sceneRefs.push_back({sc.name.c_str(), &sc.app->world()});
+    if (!m_selection.valid(m_sceneRefs)) m_selection.entity = kNullEntity;
     buildUi(dt);
     ImGui::Render();
     m_platform.endFrame();
@@ -326,6 +331,8 @@ void Editor::drawMenuBar() {
     if (ImGui::BeginMenu("View")) {
         for (ViewportPanel& p : m_viewports) ImGui::MenuItem(p.title.c_str(), nullptr, &p.open);
         ImGui::Separator();
+        ImGui::MenuItem("Entities", nullptr, &m_showEntities);
+        ImGui::MenuItem("Inspector", nullptr, &m_showInspector);
         ImGui::MenuItem("Render Graph", nullptr, &m_showRenderGraph);
         ImGui::MenuItem("Stats", nullptr, &m_showStats);
         ImGui::EndMenu();
@@ -348,7 +355,12 @@ void Editor::buildDockLayout(unsigned int dockspaceId) {
     ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
     ImGui::DockBuilderSetNodeSize(dockspaceId, vp->Size);
     ImGuiID top = 0, bottom = 0, left = 0, right = 0, bottomLeft = 0, bottomRight = 0;
-    bottom = ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Down, 0.34f, nullptr, &top);
+    ImGuiID side = 0, main = 0, sideTop = 0, sideBottom = 0;
+    side = ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Right, 0.22f, nullptr, &main);
+    sideBottom = ImGui::DockBuilderSplitNode(side, ImGuiDir_Down, 0.58f, nullptr, &sideTop);
+    ImGui::DockBuilderDockWindow("Entities", sideTop);
+    ImGui::DockBuilderDockWindow("Inspector", sideBottom);
+    bottom = ImGui::DockBuilderSplitNode(main, ImGuiDir_Down, 0.34f, nullptr, &top);
     right = ImGui::DockBuilderSplitNode(top, ImGuiDir_Right, 0.5f, nullptr, &left);
     bottomRight = ImGui::DockBuilderSplitNode(bottom, ImGuiDir_Right, 0.55f, nullptr, &bottomLeft);
     ImGui::DockBuilderDockWindow("Scene", left);
@@ -368,6 +380,8 @@ void Editor::buildUi(float dt) {
     }
 
     for (ViewportPanel& p : m_viewports) drawViewport(p, dt);
+    if (m_showEntities) m_inspector.drawEntities(m_sceneRefs, m_selection, &m_showEntities);
+    if (m_showInspector) m_inspector.drawInspector(m_sceneRefs, m_selection, &m_showInspector);
     if (m_showRenderGraph) drawRenderGraphPanel();
     if (m_showStats) drawStatsPanel(dt);
 }
@@ -432,6 +446,10 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
             m_renderer->clearViewportCamera(p.id);
         }
 
+        const int panelIndex = static_cast<int>(&p - m_viewports.data());
+        if (p.useEditorCamera) drawGizmo(p, origin, avail, panelIndex);
+        handlePicking(p, origin, avail, hovered);
+
         // Overlay controls (top-left of the image), on a translucent backdrop so they stay readable on a bright sky.
         ImGui::SetCursorScreenPos(ImVec2(origin.x + 8, origin.y + 8));
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.04f, 0.045f, 0.05f, 0.72f));
@@ -456,6 +474,16 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
                 m_window->setRelativeMouse(false);
             }
             ImGui::SameLine();
+            if (p.useEditorCamera) {
+                ImGui::RadioButton("Move", &m_gizmoOp, ImGuizmo::TRANSLATE);
+                ImGui::SameLine();
+                ImGui::RadioButton("Rotate", &m_gizmoOp, ImGuizmo::ROTATE);
+                ImGui::SameLine();
+                ImGui::RadioButton("Scale", &m_gizmoOp, ImGuizmo::SCALE);
+                ImGui::SameLine();
+                ImGui::Checkbox("Local", &m_gizmoLocal);
+                ImGui::SameLine();
+            }
             if (ImGui::Checkbox("Grid", &p.grid)) {
                 m_renderer->setViewportFlags(p.id, ViewportFlags::Sky | (p.grid ? ViewportFlags::Grid : ViewportFlags::None));
             }
@@ -524,6 +552,90 @@ void Editor::drawStatsPanel(float) {
     ImGui::Separator();
     ImGui::TextDisabled("Scene / Animation Debug: hold RMB over the view, WASD + Q/E to fly, wheel = speed, Shift = fast");
     ImGui::End();
+}
+
+namespace {
+
+// ImGuizmo gives back a world matrix; split it into the Transform components.
+void applyMatrix(Transform& t, const Mat4& m) {
+    t.position = Vec3(m[3]);
+    Vec3 axes[3] = {Vec3(m[0]), Vec3(m[1]), Vec3(m[2])};
+    for (int i = 0; i < 3; ++i) {
+        const f32 len = glm::length(axes[i]);
+        t.scale[i] = len;
+        if (len > 1e-6f) axes[i] /= len;
+    }
+    t.rotation = glm::normalize(glm::quat_cast(Mat3(axes[0], axes[1], axes[2])));
+}
+
+} // namespace
+
+// Transform gizmo (ImGuizmo) for the selected entity, drawn over an editor-camera viewport.
+// ImGuizmo expects an OpenGL-style projection (it unprojects the mouse with it), so it gets
+// one with the same fov/planes instead of our reverse-Z matrix.
+void Editor::drawGizmo(ViewportPanel& p, const ImVec2& origin, const ImVec2& size, int panelIndex) {
+    if (!m_selection.valid(m_sceneRefs) || m_selection.scene != p.sceneIndex) return;
+    World& world = *m_sceneRefs[m_selection.scene].world;
+    Transform* t = world.get<Transform>(m_selection.entity);
+    if (!t || size.x < 8 || size.y < 8) return;
+
+    // Hotkeys, only while the cursor is over this view and the camera is not flying.
+    const bool hotkeys = ImGui::IsWindowHovered() && !p.capturing && !ImGui::GetIO().WantTextInput;
+    if (hotkeys) {
+        if (ImGui::IsKeyPressed(ImGuiKey_W, false)) m_gizmoOp = ImGuizmo::TRANSLATE;
+        if (ImGui::IsKeyPressed(ImGuiKey_E, false)) m_gizmoOp = ImGuizmo::ROTATE;
+        if (ImGui::IsKeyPressed(ImGuiKey_R, false)) m_gizmoOp = ImGuizmo::SCALE;
+        if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+            // Frame the selection: back off along the current view direction.
+            const f32 dist = std::max(4.0f, std::max({t->scale.x, t->scale.y, t->scale.z}) * 3.0f);
+            p.camera.position = t->position - (p.camera.rotation() * Vec3(0, 0, -1)) * dist;
+        }
+    }
+
+    ImGuizmo::SetOrthographic(false);
+    ImGuizmo::SetDrawlist(ImGui::GetWindowDrawList());
+    ImGuizmo::SetRect(origin.x, origin.y, size.x, size.y);
+    ImGuizmo::SetID(panelIndex);
+    const Mat4 view = glm::inverse(p.camera.world());
+    const Mat4 proj = glm::perspectiveRH_NO(p.camera.fovY, size.x / size.y, p.camera.nearZ, p.camera.farZ);
+    Mat4 model = t->matrix();
+    const bool snap = ImGui::GetIO().KeyCtrl;
+    const float step = m_gizmoOp == ImGuizmo::ROTATE ? 15.0f : (m_gizmoOp == ImGuizmo::SCALE ? 0.1f : 0.5f);
+    const float snapAll[3] = {step, step, step};
+    if (ImGuizmo::Manipulate(&view[0][0], &proj[0][0], static_cast<ImGuizmo::OPERATION>(m_gizmoOp),
+                             m_gizmoLocal ? ImGuizmo::LOCAL : ImGuizmo::WORLD, &model[0][0], nullptr,
+                             snap ? snapAll : nullptr)) {
+        applyMatrix(*t, model);
+    }
+}
+
+// Click-to-select: ask the renderer for the entity under the cursor (an id pass runs on the
+// next frame only), and apply answers as they arrive.
+void Editor::handlePicking(ViewportPanel& p, const ImVec2& origin, const ImVec2& size, bool hovered) {
+    ImGuiIO& io = ImGui::GetIO();
+    const bool gizmoBusy = ImGuizmo::IsOver() || ImGuizmo::IsUsing();
+    if (hovered && !gizmoBusy && !p.capturing && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        const ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0.0f);
+        if (drag.x * drag.x + drag.y * drag.y < 16.0f && size.x > 0 && size.y > 0) {
+            const float fx = (io.MousePos.x - origin.x) / size.x;
+            const float fy = (io.MousePos.y - origin.y) / size.y;
+            if (fx >= 0 && fx < 1 && fy >= 0 && fy < 1) {
+                m_renderer->requestPick(p.id, static_cast<u32>(fx * static_cast<float>(m_renderer->viewportWidth(p.id))),
+                                        static_cast<u32>(fy * static_cast<float>(m_renderer->viewportHeight(p.id))));
+            }
+        }
+    }
+    u64 picked = 0;
+    if (m_renderer->takePickResult(p.id, picked)) {
+        const Entity e{picked};
+        World& world = *m_sceneRefs[p.sceneIndex].world;
+        if (!e.isNull() && world.isAlive(e)) {
+            m_selection.scene = p.sceneIndex;
+            m_selection.entity = e;
+        } else if (m_selection.scene == p.sceneIndex) {
+            m_selection.entity = kNullEntity; // clicked empty space
+        }
+    }
 }
 
 // Scripted abuse for QA runs (--stress). Everything here is also reachable by a user.

@@ -13,12 +13,14 @@ struct VSIn {
     float4 row1 : INSTANCE1;
     float4 row2 : INSTANCE2;
     float4 color : INSTANCE3;
+    uint2 entity : ENTITY; // Entity::id (lo, hi), used by the picking pass
 };
 
 struct VSOut {
     float4 position : SV_Position;
     float3 worldNormal : TEXCOORD0;
     float4 color : COLOR0;
+    nointerpolation uint2 entity : TEXCOORD1;
 };
 
 [shader("vertex")]
@@ -33,6 +35,7 @@ VSOut vsMesh(VSIn i)
     o.position = mul(g_view.viewProj, float4(world, 1.0));
     o.worldNormal = n;
     o.color = i.color;
+    o.entity = i.entity;
     return o;
 }
 
@@ -46,4 +49,11 @@ float4 psMesh(VSOut i) : SV_Target0
     // Lambert: radiance = albedo / pi * irradiance (sun intensity is irradiance in this unit).
     float3 albedo = i.color.rgb;
     return float4(albedo * (g_view.sunColor.rgb * ndl * 0.3183099 + ambient), 1.0);
+}
+
+// Picking: writes the entity id instead of a color (only rendered on a click frame).
+[shader("fragment")]
+uint2 psPick(VSOut i) : SV_Target0
+{
+    return i.entity;
 }

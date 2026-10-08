@@ -7,6 +7,7 @@ foh_add_engine_module(ecs
         src/buffer_pool.cpp
         src/commands.cpp
         src/events.cpp
+        src/inspect.cpp
         src/query.cpp
         src/schema.cpp
         src/snapshot.cpp

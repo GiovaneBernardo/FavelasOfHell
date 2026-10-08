@@ -53,6 +53,7 @@ find_package(zstd CONFIG REQUIRED)
 find_package(lz4 CONFIG REQUIRED)
 if(FOH_BUILD_EDITOR)
     find_package(imgui CONFIG REQUIRED)
+    find_package(imguizmo CONFIG REQUIRED)
 endif()
 
 # ---------------------------------------------------------------------------

@@ -151,6 +151,17 @@ public:
     float viewportAspect(ViewportId id) const;
     bool viewportDebugInfo(ViewportId id, ViewportDebugInfo& out) const;
 
+    // ---- picking ----
+    // Asks which entity is under pixel (x, y) of the viewport's own image (origin
+    // top-left). The viewport renders an entity-id pass on the NEXT frame only, then
+    // copies that one texel back; the answer is available a few frames later through
+    // takePickResult. Requests while one is pending are ignored. Cost on all other
+    // frames: none.
+    void requestPick(ViewportId id, u32 x, u32 y);
+    // True exactly once per request when the answer is ready; `entityId` is
+    // Entity::id of the picked mesh, or 0 if nothing was under the pixel.
+    bool takePickResult(ViewportId id, u64& entityId);
+
     // ---- frame ----
     // Waits for the GPU if it is too far behind, hot reloads changed shaders,
     // publishes the extracted scenes and applies pending viewport resizes.

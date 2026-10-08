@@ -89,7 +89,7 @@ std::unique_ptr<Renderer> Renderer::create(const RendererDesc& desc) {
 
     // Mesh vertex stream 0 + per-instance stream 1 (see mesh_forward.slang).
     {
-        nvrhi::VertexAttributeDesc attrs[4];
+        nvrhi::VertexAttributeDesc attrs[5];
         attrs[0].name = "POSITION";
         attrs[0].format = nvrhi::Format::RGB32_FLOAT;
         attrs[0].offset = offsetof(MeshVertex, position);
@@ -112,7 +112,13 @@ std::unique_ptr<Renderer> Renderer::create(const RendererDesc& desc) {
         attrs[3].bufferIndex = 1;
         attrs[3].elementStride = sizeof(GpuInstance);
         attrs[3].isInstanced = true;
-        s.gpu.meshInput = dev->createInputLayout(attrs, 4, nullptr);
+        attrs[4].name = "ENTITY";
+        attrs[4].format = nvrhi::Format::RG32_UINT;
+        attrs[4].offset = offsetof(GpuInstance, entityLo);
+        attrs[4].bufferIndex = 1;
+        attrs[4].elementStride = sizeof(GpuInstance);
+        attrs[4].isInstanced = true;
+        s.gpu.meshInput = dev->createInputLayout(attrs, 5, nullptr);
     }
     s.gpu.meshes = MeshStore::create(dev);
 
@@ -271,6 +277,22 @@ bool Renderer::viewportDebugInfo(ViewportId id, ViewportDebugInfo& out) const {
     return true;
 }
 
+void Renderer::requestPick(ViewportId id, u32 x, u32 y) {
+    Viewport* v = m_impl->findViewport(id);
+    if (!v || v->pickState != Viewport::PickState::Idle) return;
+    v->pickX = std::min(x, v->width ? v->width - 1 : 0);
+    v->pickY = std::min(y, v->height ? v->height - 1 : 0);
+    v->pickState = Viewport::PickState::Requested;
+}
+
+bool Renderer::takePickResult(ViewportId id, u64& entityId) {
+    Viewport* v = m_impl->findViewport(id);
+    if (!v || v->pickState != Viewport::PickState::Ready) return false;
+    entityId = v->pickResult;
+    v->pickState = Viewport::PickState::Idle;
+    return true;
+}
+
 // ---- frame --------------------------------------------------------------------------------------------
 
 namespace {
@@ -281,6 +303,9 @@ GpuInstance packInstance(const ExtractedMesh& m) {
     g.row1 = Vec4(m.world[0][1], m.world[1][1], m.world[2][1], m.world[3][1]);
     g.row2 = Vec4(m.world[0][2], m.world[1][2], m.world[2][2], m.world[3][2]);
     g.color = m.color;
+    g.entityLo = static_cast<u32>(m.entity);
+    g.entityHi = static_cast<u32>(m.entity >> 32);
+    g.pad[0] = g.pad[1] = 0;
     return g;
 }
 
@@ -315,6 +340,22 @@ void Renderer::beginFrame() {
     s.frame = s.device->frameNumber();
     s.shaders->pollReload();
     s.pipelines->collect(s.frame);
+
+    // Finish picks whose GPU work is done (beginFrame just waited for frame - framesInFlight).
+    for (auto& v : s.viewports) {
+        if (v->pickState != Viewport::PickState::InFlight) continue;
+        if (s.frame < v->pickSubmittedFrame + s.device->framesInFlight()) continue;
+        size_t pitch = 0;
+        const void* data = s.device->nvrhi()->mapStagingTexture(v->pickStaging, nvrhi::TextureSlice(),
+                                                                nvrhi::CpuAccessMode::Read, &pitch);
+        v->pickResult = 0;
+        if (data) {
+            const u32* texel = static_cast<const u32*>(data);
+            v->pickResult = static_cast<u64>(texel[0]) | (static_cast<u64>(texel[1]) << 32);
+            s.device->nvrhi()->unmapStagingTexture(v->pickStaging);
+        }
+        v->pickState = Viewport::PickState::Ready;
+    }
 
     // Apply pending viewport resizes now, while no graph is in flight.
     for (auto& v : s.viewports) {

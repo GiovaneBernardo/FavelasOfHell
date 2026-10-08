@@ -25,12 +25,14 @@ static_assert(sizeof(ViewConstants) == 4 * 64 + 5 * 16, "ViewConstants must matc
 static_assert(offsetof(ViewConstants, cameraPos) == 256, "ViewConstants layout drifted from view.slangh");
 static_assert(offsetof(ViewConstants, params) == 320, "ViewConstants layout drifted from view.slangh");
 
-// Per-instance vertex stream: rows 0..2 of the world matrix and the base color.
+// Per-instance vertex stream: rows 0..2 of the world matrix, base color, entity id.
 struct GpuInstance {
     Vec4 row0, row1, row2;
     Vec4 color;
+    u32 entityLo, entityHi; // Entity::id, read by the picking pass
+    u32 pad[2];
 };
-static_assert(sizeof(GpuInstance) == 64, "instance stride is baked into the input layout");
+static_assert(sizeof(GpuInstance) == 80, "instance stride is baked into the input layout");
 
 struct MeshVertex {
     Vec3 position;

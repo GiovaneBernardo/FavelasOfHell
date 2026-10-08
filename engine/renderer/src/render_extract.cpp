@@ -8,7 +8,7 @@ namespace {
 // PostUpdate so it sees the frame's final transforms. ResMut on the link makes
 // the scheduler serialize it against anything else touching the link.
 void extractRenderScene(ResMut<RenderSceneLink> link, Res<Time> time,
-                        Query<const Transform&, const MeshRenderer&> meshes,
+                        Query<Entity, const Transform&, const MeshRenderer&> meshes,
                         Query<Entity, const Transform&, const Camera&> cameras,
                         Query<const Transform&, const DirectionalLight&> suns) {
     RenderScene* scene = link->scene;
@@ -23,8 +23,8 @@ void extractRenderScene(ResMut<RenderSceneLink> link, Res<Time> time,
     // sequential concatenation. Order across threads is not deterministic, which
     // is fine: the renderer sorts instances by mesh and nothing depends on order.
     for (u32 i = 0; i < kMaxJobThreads; ++i) scene->staging(i).clear();
-    meshes.parEach([scene](const Transform& t, const MeshRenderer& m) {
-        scene->staging(JobSystem::currentThreadSlot()).push_back({t.matrix(), m.color, m.mesh, {0, 0, 0}});
+    meshes.parEach([scene](Entity e, const Transform& t, const MeshRenderer& m) {
+        scene->staging(JobSystem::currentThreadSlot()).push_back({t.matrix(), m.color, m.mesh, 0, e.id});
     });
     size_t total = 0;
     for (u32 i = 0; i < kMaxJobThreads; ++i) total += scene->staging(i).size();
@@ -51,6 +51,7 @@ void extractRenderScene(ResMut<RenderSceneLink> link, Res<Time> time,
 } // namespace
 
 void RegisterRenderExtract(App& app) {
+    app.registerComponent<Name>();
     app.registerComponent<Transform>();
     app.registerComponent<MeshRenderer>();
     app.registerComponent<Camera>();
