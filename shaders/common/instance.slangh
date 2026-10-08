@@ -1,0 +1,17 @@
+// Position-only view of the instanced mesh vertex streams, for the depth-only passes.
+// The normal/uv/color/entity attributes of the shared input layout are not read.
+#pragma once
+
+struct DepthVSIn {
+    float3 position : POSITION;
+    // Per-instance: rows 0..2 of the world matrix.
+    float4 row0 : INSTANCE0;
+    float4 row1 : INSTANCE1;
+    float4 row2 : INSTANCE2;
+};
+
+float4 instanceWorldPosition(DepthVSIn i)
+{
+    float4 p = float4(i.position, 1.0);
+    return float4(dot(i.row0, p), dot(i.row1, p), dot(i.row2, p), 1.0);
+}

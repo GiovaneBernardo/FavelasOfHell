@@ -11,6 +11,7 @@ add_executable(foh_tests
     test_math.cpp
     test_render_graph.cpp
     test_renderer_scene.cpp
+    test_shadow_cascades.cpp
     test_observers.cpp
     test_assets.cpp)
 # nvrhi: the render graph tests include the RHI tier (NVRHI types) directly.

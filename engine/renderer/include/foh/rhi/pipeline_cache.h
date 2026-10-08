@@ -33,6 +33,15 @@ public:
         return insert(full, m_device->createGraphicsPipeline(desc, framebuffer->getFramebufferInfo()));
     }
 
+    // Same for compute pipelines: `makeDesc` returns nvrhi::ComputePipelineDesc. The key must
+    // include the shader's ShaderRef::uid (and the binding layout) like graphics keys do.
+    template <class MakeDesc>
+    nvrhi::IComputePipeline* compute(u64 key, MakeDesc&& makeDesc) {
+        if (auto* hit = findCompute(key)) return hit;
+        const nvrhi::ComputePipelineDesc desc = makeDesc();
+        return insertCompute(key, m_device->createComputePipeline(desc));
+    }
+
     // Drops pipelines unused for `maxAgeFrames` frames. Main thread, between frames.
     void collect(u64 frame, u64 maxAgeFrames = 300);
     size_t size() const;
@@ -41,6 +50,8 @@ private:
     u64 combine(u64 key, nvrhi::IFramebuffer* framebuffer) const;
     nvrhi::IGraphicsPipeline* find(u64 fullKey);
     nvrhi::IGraphicsPipeline* insert(u64 fullKey, nvrhi::GraphicsPipelineHandle pipeline);
+    nvrhi::IComputePipeline* findCompute(u64 key);
+    nvrhi::IComputePipeline* insertCompute(u64 key, nvrhi::ComputePipelineHandle pipeline);
 
     nvrhi::IDevice* m_device;
     struct Impl;

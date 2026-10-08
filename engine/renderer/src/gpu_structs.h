@@ -6,6 +6,7 @@
 #include <cstddef>
 
 #include "foh/math.h"
+#include "foh/renderer/shadow_cascades.h"
 #include "foh/types.h"
 
 namespace foh {
@@ -20,8 +21,15 @@ struct ViewConstants {
     Vec4 sunColor;
     Vec4 viewport;
     Vec4 params;
+    Mat4 cascadeViewProj[kShadowCascades];
+    Vec4 cascadeSplits;
+    Vec4 cascadeTexel;
+    Vec4 shadowParams;
 };
-static_assert(sizeof(ViewConstants) == 4 * 64 + 5 * 16, "ViewConstants must match view.slangh");
+static_assert(kShadowCascades == 4, "view.slangh declares four cascades");
+static_assert(sizeof(ViewConstants) == 4 * 64 + 5 * 16 + 4 * 64 + 3 * 16, "ViewConstants must match view.slangh");
+static_assert(offsetof(ViewConstants, cascadeViewProj) == 336, "ViewConstants layout drifted from view.slangh");
+static_assert(offsetof(ViewConstants, shadowParams) == 624, "ViewConstants layout drifted from view.slangh");
 static_assert(offsetof(ViewConstants, cameraPos) == 256, "ViewConstants layout drifted from view.slangh");
 static_assert(offsetof(ViewConstants, params) == 320, "ViewConstants layout drifted from view.slangh");
 

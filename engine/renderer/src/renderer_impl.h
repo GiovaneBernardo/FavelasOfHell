@@ -15,6 +15,7 @@
 #include "foh/rhi/graphics_device.h"
 #include "foh/rhi/pipeline_cache.h"
 #include "foh/rhi/render_graph.h"
+#include "foh/rhi/render_graph_helpers.h"
 #include "foh/rhi/shader_library.h"
 #include "foh/rhi/swapchain.h"
 #include "gpu_structs.h"
@@ -45,8 +46,12 @@ struct SceneSlot {
 // for the frame and pass lambdas can capture a pointer to it.
 struct ViewFrame {
     ViewConstants constants{};
+    ShadowCascades cascades{};
+    bool shadowsOn = false;
+    u32 shadowTile = 0; // texels per cascade side
     const SceneGpu* scene = nullptr;
     nvrhi::IBuffer* viewCb = nullptr;
+    nvrhi::IBuffer* shadowCb = nullptr;
     u32 width = 0;
     u32 height = 0;
     ViewportFlags flags = ViewportFlags::None;
@@ -72,6 +77,7 @@ struct Viewport {
     // beginFrame() still holds raw pointers to them in this frame's draw data.
     std::vector<nvrhi::TextureHandle> retired;
     nvrhi::BufferHandle viewCb;  // volatile constant buffer
+    nvrhi::BufferHandle shadowCb; // volatile: the view-projection of the cascade being drawn
     std::unique_ptr<RenderGraph> graph;
     ViewFrame frame;
     bool graphReady = false; // compiled this frame and waiting to be recorded/submitted
@@ -91,6 +97,8 @@ struct GpuResources {
     nvrhi::BindingLayoutHandle layoutView;       // b0
     nvrhi::BindingLayoutHandle layoutViewTexture; // b0 + t0
     nvrhi::BindingLayoutHandle layoutTexture;     // t0
+    nvrhi::BindingLayoutHandle layoutDeferred;    // b0 + t0..t4 (G-buffer, depth, shadow atlas) + s0
+    nvrhi::SamplerHandle shadowSampler;           // hardware PCF compare, see deferred.slang
     nvrhi::InputLayoutHandle meshInput;
     MeshStore meshes;
 };
@@ -121,6 +129,8 @@ struct Renderer::Impl {
     std::vector<RecordJobArg> recordJobs;
     std::vector<Viewport*> readyViewports;
     std::chrono::steady_clock::time_point startTime = std::chrono::steady_clock::now();
+
+    RgShaderServices services() const { return {shaders.get(), pipelines.get()}; }
 
     Viewport* findViewport(ViewportId id);
     const Viewport* findViewport(ViewportId id) const;

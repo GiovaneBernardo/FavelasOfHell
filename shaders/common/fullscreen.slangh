@@ -1,4 +1,6 @@
 // Oversized triangle covering the screen, generated from SV_VertexID (no vertex buffer).
+// Only fullscreen.slang compiles vsFullscreen; pixel shaders include this for FullscreenOut.
+// The part hanging over the screen edges is clipped by the rasterizer, nothing to discard.
 #pragma once
 
 struct FullscreenOut {

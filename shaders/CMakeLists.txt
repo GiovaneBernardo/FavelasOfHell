@@ -18,7 +18,9 @@ set(FOH_SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/bin/shaders")
 
 set(_common_headers
     "${CMAKE_CURRENT_SOURCE_DIR}/common/view.slangh"
-    "${CMAKE_CURRENT_SOURCE_DIR}/common/fullscreen.slangh")
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/fullscreen.slangh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/gbuffer.slangh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/instance.slangh")
 
 set(FOH_SHADER_OUTPUTS "")
 
@@ -52,16 +54,16 @@ function(foh_shader file entry stage)
 endfunction()
 
 if(FOH_SLANGC)
-    foh_shader(mesh_forward.slang vsMesh vertex)
-    foh_shader(mesh_forward.slang psMesh fragment)
-    foh_shader(mesh_forward.slang psPick fragment)
-    foh_shader(sky.slang vsFullscreen vertex)
+    foh_shader(fullscreen.slang vsFullscreen vertex) # shared by every fullscreen pass
+    foh_shader(depth.slang vsDepth vertex)
+    foh_shader(shadow.slang vsShadow vertex)
+    foh_shader(opaque.slang vsOpaque vertex)
+    foh_shader(opaque.slang psOpaque fragment)
+    foh_shader(opaque.slang psPick fragment)
+    foh_shader(deferred.slang psDeferred fragment)
     foh_shader(sky.slang psSky fragment)
-    foh_shader(grid.slang vsFullscreen vertex)
     foh_shader(grid.slang psGrid fragment)
-    foh_shader(tonemap.slang vsFullscreen vertex)
     foh_shader(tonemap.slang psTonemap fragment)
-    foh_shader(blit.slang vsFullscreen vertex)
     foh_shader(blit.slang psBlit fragment)
     foh_shader(imgui.slang vsImGui vertex)
     foh_shader(imgui.slang psImGui fragment)

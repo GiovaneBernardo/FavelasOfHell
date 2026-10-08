@@ -1,6 +1,7 @@
-// Forward-lit instanced meshes. Placeholder lighting (sun + hemisphere ambient)
-// until the PBR deferred path lands.
+// Opaque geometry: fills the G-buffer (psOpaque) and the picking id target (psPick).
+// Placeholder material: constant roughness/metallic until the material system lands.
 #include "common/view.slangh"
+#include "common/gbuffer.slangh"
 
 ConstantBuffer<ViewConstants> g_view : register(b0);
 
@@ -24,7 +25,7 @@ struct VSOut {
 };
 
 [shader("vertex")]
-VSOut vsMesh(VSIn i)
+VSOut vsOpaque(VSIn i)
 {
     float4 p = float4(i.position, 1.0);
     float3 world = float3(dot(i.row0, p), dot(i.row1, p), dot(i.row2, p));
@@ -40,15 +41,13 @@ VSOut vsMesh(VSIn i)
 }
 
 [shader("fragment")]
-float4 psMesh(VSOut i) : SV_Target0
+GBufferOut psOpaque(VSOut i)
 {
-    float3 n = normalize(i.worldNormal);
-    float3 toSun = -g_view.sunDirection.xyz;
-    float ndl = saturate(dot(n, toSun)) * g_view.sunDirection.w;
-    float3 ambient = lerp(float3(0.10, 0.09, 0.08), float3(0.30, 0.38, 0.52), n.y * 0.5 + 0.5);
-    // Lambert: radiance = albedo / pi * irradiance (sun intensity is irradiance in this unit).
-    float3 albedo = i.color.rgb;
-    return float4(albedo * (g_view.sunColor.rgb * ndl * 0.3183099 + ambient), 1.0);
+    GBufferOut o;
+    o.albedo = float4(i.color.rgb, 1.0);
+    o.normal = octEncode(normalize(i.worldNormal));
+    o.material = float4(0.8, 0.0, 1.0, 0.0);
+    return o;
 }
 
 // Picking: writes the entity id instead of a color (only rendered on a click frame).

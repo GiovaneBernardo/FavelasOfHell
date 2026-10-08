@@ -1,0 +1,29 @@
+// G-buffer layout shared by the opaque pass (writes) and the deferred pass (reads).
+//   target 0  RGBA8_UNORM_SRGB  rgb = albedo (hardware sRGB encode/decode), a = unused
+//   target 1  RG16_UNORM        octahedral world-space normal
+//   target 2  RGBA8_UNORM       r = roughness, g = metallic, b = ambient occlusion, a = unused
+// Position is rebuilt from depth. Keep the formats in sync with viewport_graph.cpp.
+#pragma once
+
+float2 octEncode(float3 n)
+{
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    float2 e = n.xy;
+    if (n.z < 0.0) e = (1.0 - abs(e.yx)) * select(e.xy >= 0.0, 1.0, -1.0);
+    return e * 0.5 + 0.5;
+}
+
+float3 octDecode(float2 f)
+{
+    f = f * 2.0 - 1.0;
+    float3 n = float3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+    float t = saturate(-n.z);
+    n.xy += select(n.xy >= 0.0, -t, t);
+    return normalize(n);
+}
+
+struct GBufferOut {
+    float4 albedo : SV_Target0;
+    float2 normal : SV_Target1;
+    float4 material : SV_Target2;
+};

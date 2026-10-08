@@ -67,7 +67,7 @@ std::unique_ptr<Renderer> Renderer::create(const RendererDesc& desc) {
     s.pipelines = std::make_unique<PipelineCache>(dev);
 
     // Fail early and loudly if the shader binaries were not built.
-    if (!s.shaders->get("mesh_forward.vsMesh", nvrhi::ShaderType::Vertex) ||
+    if (!s.shaders->get("opaque.vsOpaque", nvrhi::ShaderType::Vertex) ||
         !s.shaders->get("tonemap.psTonemap", nvrhi::ShaderType::Pixel)) {
         FOH_ERROR("renderer: shader binaries missing in {} (build the 'foh_shaders' target)", shaderDir.string());
         return nullptr;
@@ -85,6 +85,20 @@ std::unique_ptr<Renderer> Renderer::create(const RendererDesc& desc) {
         tl.visibility = nvrhi::ShaderType::All;
         tl.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
         s.gpu.layoutTexture = dev->createBindingLayout(tl);
+
+        nvrhi::BindingLayoutDesc dl;
+        dl.visibility = nvrhi::ShaderType::All;
+        dl.addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(0));
+        for (u32 t = 0; t < 5; ++t) dl.addItem(nvrhi::BindingLayoutItem::Texture_SRV(t));
+        dl.addItem(nvrhi::BindingLayoutItem::Sampler(0));
+        s.gpu.layoutDeferred = dev->createBindingLayout(dl);
+
+        // NVRHI's D3D12 backend fixes the compare function of a Comparison sampler to LESS:
+        // result = (reference < stored depth), i.e. 1 = in shadow with reverse-Z.
+        nvrhi::SamplerDesc sd;
+        sd.setAllFilters(true).setAllAddressModes(nvrhi::SamplerAddressMode::Clamp);
+        sd.setReductionType(nvrhi::SamplerReductionType::Comparison);
+        s.gpu.shadowSampler = dev->createSampler(sd);
     }
 
     // Mesh vertex stream 0 + per-instance stream 1 (see mesh_forward.slang).
@@ -210,6 +224,10 @@ ViewportId Renderer::createViewport(const ViewportDesc& desc) {
     cb.maxVersions = 32;
     cb.debugName = vp->name + " (view constants)";
     vp->viewCb = m_impl->device->nvrhi()->createBuffer(cb);
+    cb.byteSize = sizeof(Mat4);
+    cb.maxVersions = 16;
+    cb.debugName = vp->name + " (shadow cascade)";
+    vp->shadowCb = m_impl->device->nvrhi()->createBuffer(cb);
 
     RenderGraphConfig gc;
     gc.jobs = m_impl->desc.jobs;

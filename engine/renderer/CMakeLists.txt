@@ -15,10 +15,12 @@ foh_add_engine_module(renderer
         src/mesh_store.cpp
         src/render_extract.cpp
         src/renderer.cpp
+        src/shadow_cascades.cpp
         src/viewport_graph.cpp
         src/rhi/graphics_device.cpp
         src/rhi/pipeline_cache.cpp
         src/rhi/render_graph.cpp
+        src/rhi/render_graph_helpers.cpp
         src/rhi/shader_library.cpp
         src/rhi/swapchain.cpp
     PUBLIC_DEPS foh::core foh::jobs foh::platform foh::ecs

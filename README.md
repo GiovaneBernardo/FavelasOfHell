@@ -275,6 +275,7 @@ flecs (MIT; ECS storage and queries, private to `engine/ecs`), glm, Jolt Physics
 | First map: Vidigal, ~1500 m x ~500 m ground plan (entire favela + some water), Av. Niemeyer to Leblon as later expansion | Decided |
 | Art direction: realistic lighting and models, dense wires/poles, tight streets, street businesses | Decided |
 | Asset format: chunked container + reflection metadata + descriptor-based bulk data (no FlatBuffers) | Decided |
+| Model import: a source file (gltf/fbx) is an asset with GUID-addressed sub-assets (mesh, material, texture, base prefab), generated base prefab + prefab variants for edits, static geometry first ([ADR 0004](docs/adr/0004-model-and-texture-import.md)) (2026-10-08) | Decided direction, parsers pending |
 | Hybrid real-data + procedural world | Decided |
 | Hardware: min RTX 2060 / RX 6600, dev RTX 5070 Ti; RT optional | Decided |
 | Hot reload goal: save code, see it live in ~1-3 s with state preserved (DLL reload baseline, Live++ optional) | Decided |

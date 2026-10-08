@@ -13,6 +13,12 @@ struct ViewConstants {
     float4 sunColor;     // rgb, already multiplied by intensity
     float4 viewport;     // xy = size in pixels, zw = 1 / size
     float4 params;       // x = exposure, y = time (s), z = near, w = far
+
+    // Sun shadows (cascaded shadow map atlas, 2x2 tiles; see foh/renderer/shadow_cascades.h).
+    float4x4 cascadeViewProj[4]; // world -> clip space of each cascade
+    float4 cascadeSplits;        // view-space depth where each cascade ends
+    float4 cascadeTexel;         // world-space size of one shadow texel, per cascade
+    float4 shadowParams;         // x = 1 / atlas size (texels), y = tile size (uv), z = unused, w = 1 if shadows are on
 };
 
 // World-space point under a pixel at the given depth (reverse-Z: near plane is depth 1).

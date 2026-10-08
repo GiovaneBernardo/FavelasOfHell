@@ -95,6 +95,9 @@ struct RendererDesc {
     // ones are split into groups recorded in parallel. 1 puts every pass in its own command
     // list (QA: exercises the cross-command-list barrier planning).
     u32 minPassesPerGroup = 4;
+    // Sun shadows: four cascades of shadowCascadeSize^2 texels (one 2x2 atlas per viewport).
+    u32 shadowCascadeSize = 2048;
+    f32 shadowDistance = 400.0f; // meters from the camera; farther surfaces are unshadowed
     std::filesystem::path shaderDirectory; // default: <exe dir>/shaders
 };
 
