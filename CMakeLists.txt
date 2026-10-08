@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(gtabr
+project(foh
     VERSION 0.0.1
     DESCRIPTION "Brazilian open-world game: custom C++ engine, editor and game"
     LANGUAGES CXX)
@@ -8,12 +8,12 @@ project(gtabr
 # ---------------------------------------------------------------------------
 # Options
 # ---------------------------------------------------------------------------
-option(GTABR_BUILD_EDITOR   "Build the editor"          ON)
-option(GTABR_BUILD_TESTS    "Build unit tests"          ON)
-option(GTABR_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+option(FOH_BUILD_EDITOR   "Build the editor"          ON)
+option(FOH_BUILD_TESTS    "Build unit tests"          ON)
+option(FOH_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-include(GtaBRHelpers)
+include(FohHelpers)
 
 # All binaries (exes, the engine DLL and the game DLL) land in one directory.
 # The hot-reload host finds the game module next to the executable, and the
@@ -51,7 +51,7 @@ find_package(nvrhi CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(zstd CONFIG REQUIRED)
 find_package(lz4 CONFIG REQUIRED)
-if(GTABR_BUILD_EDITOR)
+if(FOH_BUILD_EDITOR)
     find_package(imgui CONFIG REQUIRED)
 endif()
 
@@ -59,14 +59,15 @@ endif()
 # Layers. Dependency direction:  game -> engine <- editor / runtime
 # The engine never references editor/, runtime/ or game/.
 # ---------------------------------------------------------------------------
-add_subdirectory(engine)   # -> target gtabr::engine (shared library)
+add_subdirectory(shaders)  # -> target foh_shaders (Slang -> DXIL/SPIR-V)
+add_subdirectory(engine)   # -> target foh::engine (shared library)
 add_subdirectory(game)     # -> hot-reloadable game module (MODULE library)
 add_subdirectory(runtime)  # -> standalone player executable
-if(GTABR_BUILD_EDITOR)
+if(FOH_BUILD_EDITOR)
     add_subdirectory(editor)
 endif()
 
-if(GTABR_BUILD_TESTS)
+if(FOH_BUILD_TESTS)
     find_package(doctest CONFIG REQUIRED)
     enable_testing()
     add_subdirectory(tests)

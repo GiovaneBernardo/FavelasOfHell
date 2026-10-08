@@ -1,5 +1,5 @@
-#include "gtabr/ecs.h"
-#include "gtabr/game_module.h"
+#include "foh/ecs.h"
+#include "foh/game_module.h"
 #include "shared.h"
 
 // A minimal game-style module for the automated hot reload test: it uses every
@@ -8,7 +8,7 @@
 
 namespace {
 
-using namespace gtabr;
+using namespace foh;
 using namespace reload_test;
 
 void Tick(ResMut<Ticks> ticks, Query<Tracked&> tracked, EventWriter<Ping> ping, Commands cmd) {
@@ -18,13 +18,16 @@ void Tick(ResMut<Ticks> ticks, Query<Tracked&> tracked, EventWriter<Ping> ping, 
     if (ticks->value == 1) cmd.spawn(Tracked{});
 }
 
+void OnTracked(Trigger<Tracked>, ResMut<Observed> observed) { ++observed->count; }
+
 void Build(App& app) {
     app.registerComponent<Tracked>().registerEvent<Ping>();
     app.addSystem(Stage::Update, &Tick).name("Tick");
+    app.onSet(&OnTracked);
 }
 
 void Teardown(App&) {}
 
 } // namespace
 
-GTABR_GAME_MODULE("test_module", &Build, &Teardown)
+FOH_GAME_MODULE("test_module", &Build, &Teardown)

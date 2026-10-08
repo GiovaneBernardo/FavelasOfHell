@@ -1,6 +1,6 @@
-# Favelas Of Heel
+# Favelas of Hell
 
-> Code name used in the repository and source (`gtabr`, namespace `gtabr`, `GTABR_*` macros): see [Naming](#naming).
+> In the source the game is abbreviated **FOH** (namespace `foh`, `FOH_*` macros, `foh_*` targets): see [Naming](#naming).
 
 ## How this project is made
 
@@ -8,7 +8,9 @@ This game is **mostly written by AI** (Claude Code), directed, reviewed and deci
 
 ## Naming
 
-The game's name is **Favelas Of Heel**. The source tree still uses the early code name `gtabr` for namespaces, macros, targets and include paths. The name may still change, so a rename of the code identifiers is a mechanical, scripted change rather than something to do by hand.
+The game's name is **Favelas of Hell**, abbreviated **FOH** in code: namespace `foh`, macros `FOH_*`, CMake targets `foh_*`, include path `foh/`. The name may still change; if it does, the identifier rename is a mechanical scripted change (it was done once already, from the earlier code name `gtabr`).
+
+Namespace convention: engine code lives in `foh`, game code in `foh::game`, editor code in `foh::editor`, so the layering (game and editor depend on the engine, never the reverse) is visible in the code itself.
 
 A serious attempt at an open-world, Brazil-set crime game, built on a custom C++ engine with its own renderer, ECS, asset pipeline and editor.
 
@@ -42,29 +44,31 @@ Non-goals (for now): console builds, multiplayer, dual-contouring/voxel terrain.
 | Shaders | **[Decided] Slang** (HLSL-compatible), compiled to DXIL/SPIR-V | Hot-reloadable |
 | Physics | **[Decided] Jolt Physics** | See [Physics](#physics) |
 | ECS | **[Decided] Bevy-style layer on flecs** (storage/queries from flecs, API + parallel scheduler ours) | See [ECS](#ecs), [ADR 0001](docs/adr/0001-ecs-on-flecs.md) |
-| Editor UI | Dear ImGui (docking + viewports), custom-styled | |
-| Render orchestration | Render graph (frame graph) | |
+| Editor UI | Dear ImGui (docking), custom platform/renderer glue | See [ADR 0002](docs/adr/0002-windowing-and-input.md) |
+| Windowing/input | **[Decided] SDL3**, private to `engine/platform` | [ADR 0002](docs/adr/0002-windowing-and-input.md) |
+| Render orchestration | **[Decided] Render graph** with per-viewport instances | [ADR 0003](docs/adr/0003-renderer-render-graph-viewports.md) |
 | Assets | Custom binary formats + importer/serializer/loader | |
 
 ## Repository Layout
 
 ```
-/engine          all modules fold into ONE shared library, gtabr_engine.dll
+/engine          all modules fold into ONE shared library, foh_engine.dll
   /core          types, math (glm wrappers), logging, asserts, platform macros   [exists]
-  /platform      window (SDL3), dynamic libraries, file system                   [exists]
+  /platform      window + input events (SDL3), dynamic libraries, files, PNG     [exists]
   /jobs          job system: worker pool, fork-join counters, thread slots       [exists]
   /ecs           Bevy-style layer on flecs: World, App, plugins, Query/Res/Commands, parallel scheduler   [exists]
   /host          game-module ABI + hot-reload host                               [exists]
   /assets        asset ids/container (placeholder; zstd + lz4)                   [exists]
-  /renderer      NVRHI integration (placeholder; render graph to come)           [exists]
+  /renderer      render graph, D3D12 device/swapchain via NVRHI, scenes + viewports,
+                 shader library, ECS render extraction (ADR 0003)                 [exists]
   /physics       Jolt integration (placeholder)                                  [exists]
   /world         terrain, streaming, procedural generation, roads                [planned]
 /runtime         standalone player executable (hosts the game module)            [exists]
-/editor          ImGui editor executable (hosts engine + game module)            [exists]
+/editor          ImGui editor: dock layout, 3 render viewports, render graph panel [exists]
 /game            gameplay code, built as a hot-reloadable DLL                    [exists]
 /tests           doctest unit tests                                              [exists]
 /cmake           toolchain (vcpkg bootstrap) and CMake helpers
-/shaders         Slang/HLSL sources                                              [planned]
+/shaders         Slang sources -> DXIL/SPIR-V via slangc, hot reloadable         [exists]
 /tools         asset cooker CLI, Blender addon/scripts, data pipeline scripts
 /third_party   vendored deps not handled by vcpkg
 /docs          design docs, ADRs
@@ -105,16 +109,21 @@ Bevy-style API on top of **[flecs](https://github.com/SanderMertens/flecs)** (MI
 
 Implemented:
 
-- **Entities** are generational ids. **Components** live in flecs archetype tables; they are plain POD types identified by type name (see hot reload rules below).
-- **Systems** are plain functions with typed parameters: `Query<const T&, U&, With<V>, Without<W>, Entity>`, `Res<T>`, `ResMut<T>`, `Commands`, `EventReader<T>`, `EventWriter<T>`, or a single `World&` for exclusive systems. Parameters declare the access set.
-- **Scheduler** (ours, not the flecs pipeline): stages `Startup`, `PreUpdate`, `Update`, `PostUpdate`. Systems whose access sets do not conflict run concurrently on the job system; conflicting ones run in registration order; `after()/before()` add explicit edges. Exclusive systems are barriers.
-- **Deterministic frames:** `Commands` and events are buffered per system and applied on the main thread in registration order, so results do not depend on thread timing.
+- **Entities** are generational ids. **Components** live in flecs archetype tables (or, opt-in, sparse sets); they are plain POD types identified by type name (see the rules below).
+- **Systems** are plain functions with typed parameters: `Query<const T&, U&, With<V>, Without<W>, Entity, Parent, ChangedTables>`, `Res<T>`, `ResMut<T>`, `Commands`, `EventReader<T>`, `EventWriter<T>`, `Buffers<T>`/`BuffersMut<T>`, or a single `World&` for exclusive systems. Parameters declare the access set.
+- **Scheduler** (ours, not the flecs pipeline): stages `Startup`, `PreUpdate`, `Update`, `PostUpdate`. Systems whose access sets do not conflict run concurrently on the job system; conflicting ones run in registration order. Explicit ordering with `after()/before()` (by function) and `inSet<S>()/afterSet<S>()/beforeSet<S>()` (by label type). A system that uses `Commands`/`EventWriter` has its effects applied before anything explicitly ordered after it (automatic sync points). Exclusive systems are barriers.
+- **Deterministic frames:** `Commands` and events are buffered per system and applied on the main thread in registration order, so results do not depend on thread timing. `cmd.spawn()` returns a real, immediately usable `Entity` (ids are reserved per queue).
 - **Data parallelism:** `Query::parEach(f)` splits a query over all job threads.
-- **Plugins:** `Plugin::build(App&)` registers components, resources, events and systems; everything is owner-tagged and removed before a DLL unloads.
+- **Reflection:** `FOH_REFLECT(Type, a, b, c)` gives a data-only schema (names, kinds, offsets). Everything built on it is reload-safe: changing a component's layout (add, remove, widen, reorder, rename via a former name) **migrates the live data when the game module reloads**; worlds can be saved/loaded with `saveSnapshot`/`loadSnapshot` (self-describing binary, loads across layout changes, bounds-checked, never half-loads).
+- **Buffers:** a component can hold `BufferHandle<T>`, a variable-length array owned by an engine pool (thread-safe, freed automatically with the component/entity, survives reloads, saved in snapshots). This is the answer to "an inventory with many items" without one entity per item.
+- **Relationships:** parent/child with cascade delete (`setParent`, `Parent` query term), and custom pair relationships (`addPair<Rel>`, optional `cascadeDelete<Rel>`).
+- **Observers:** `app.onAdd/onSet/onRemove<T>(fn(Trigger<T>, ...params))`, owner-tagged like systems, with a per-frame call limit against runaway loops.
+- **Sparse components:** `static constexpr bool kSparse = true;` on a type stores it outside the archetype, so toggling it never moves the entity (markers and state flags).
+- **Plugins:** `Plugin::build(App&)` registers components, resources, events, systems and observers; everything is owner-tagged and removed before a DLL unloads.
 
-Planned (not implemented): reflection and world serialization across reload (with layout migration), relationships, observers/hooks, change detection, sparse-set opt-in, system sets and automatic sync points. The list with the order is in the ADR.
+Not implemented: exact per-entity change detection (`ChangedTables` is table-level and conservative; per-entity needs a `Mut<T>` wrapper), optional query terms, relationship-ordered iteration (cascade), world-backed `Local<T>`, field-level snapshot of engine-private state. See the ADR.
 
-Rules for components (enforced by `static_assert`): trivially copyable and trivially destructible, no owning members (`std::vector`, `std::string`, pointers into a game module). This is what keeps function pointers out of the world and makes game hot reload safe.
+Rules for components (enforced by `static_assert`): trivially copyable and trivially destructible, no owning members (`std::vector`, `std::string`, pointers into a game module). This is what keeps function pointers out of the world and makes game hot reload safe. Variable-length data goes in a `BufferHandle<T>`; text in a `char[N]`.
 
 ### Graphics API
 
@@ -141,7 +150,7 @@ Phase 1 pipeline:
 
 Foundations for later: ray tracing (acceleration structure management, BLAS/TLAS from the start in the mesh/asset layer, bindless resources, a visibility/GPU-driven path), temporal upsampling, GPU-driven culling.
 
-**Render graph:** declarative passes with resource lifetimes, automatic barriers via NVRHI, transient resource aliasing, async compute hints, and **per-viewport graph instances** (game view, editor scene view, material preview, asset thumbnails). **[Proposed]** Keep the render graph: it is the right fit for a multi-viewport editor and later RT/async compute.
+**Render graph:** **[Decided, implemented]** declarative passes with culling, pooled transient resources, automatic barriers via NVRHI, parallel command list recording, and **per-viewport graph instances** (editor scene view, game view, a debug scene's view; later material preview, asset thumbnails). Design, conventions (reverse-Z, sRGB) and the open follow-ups (Vulkan backend, heap aliasing, async compute, GPU-driven culling) are in [ADR 0003](docs/adr/0003-renderer-render-graph-viewports.md).
 
 ### Physics
 
@@ -211,9 +220,9 @@ Dear ImGui (docking + multi-viewport), custom theme and font stack. Panels: scen
 
 1. `File > Open > Folder...` and pick the repo root (do not generate a .sln).
 2. Pick the **Windows x64 Debug** configuration. Visual Studio reads `CMakePresets.json` and configures automatically; **saving any `CMakeLists.txt` re-runs CMake** and you just build/run.
-3. Choose `gtabr_editor.exe` or `gtabr_runtime.exe` as the startup item and press F5. Building either also builds the game module.
+3. Choose `foh_editor.exe` or `foh_runtime.exe` as the startup item and press F5. Building either also builds the game module.
 
-The first configure bootstraps vcpkg and builds all dependencies (about 10 minutes, once; later configures are fast). Requirements: Visual Studio 2022+ with the *Desktop development with C++* workload, and Git.
+The first configure bootstraps vcpkg and builds all dependencies (about 10 minutes, once; later configures are fast). Requirements: Visual Studio 2022+ with the *Desktop development with C++* workload, Git, and the **Vulkan SDK** (provides `slangc`, which compiles the shaders; without it CMake warns and the renderer cannot start). A GPU with D3D12 and shader model 6.2 is required (the minimum spec RTX 2060 / RX 6600 qualifies).
 
 ### Command line
 
@@ -227,15 +236,23 @@ ctest --preset windows-debug
 
 ### Hot reload loop
 
-Run `gtabr_runtime.exe` or `gtabr_editor.exe` (F5 or Ctrl+F5 in Visual Studio), edit and **save** any file in `game/`, and that is it: the host's dev builder (`engine/host/dev_builder.*`, Debug/RelWithDebInfo only) notices the save, rebuilds just the `gtabr_game` target in a child process, and the host reloads the new DLL, about 2-4 seconds in total. Build errors are printed to the game log (full log in `%TEMP%/gtabr_game_build.log`). The host loads a shadow copy from `.hotreload/`, so the build output is never locked.
+Run `foh_runtime.exe` or `foh_editor.exe` (F5 or Ctrl+F5 in Visual Studio), edit and **save** any file in `game/`, and that is it: the host's dev builder (`engine/host/dev_builder.*`, Debug/RelWithDebInfo only) notices the save, rebuilds just the `foh_game` target in a child process, and the host reloads the new DLL, about 2-4 seconds in total. Build errors are printed to the game log (full log in `%TEMP%/foh_game_build.log`). The host loads a shadow copy from `.hotreload/`, so the build output is never locked.
 
 **With the debugger attached:** it works the same way. Visual Studio disables its own Build command (Ctrl+B) during a debug session, which is exactly why the build is triggered by the host and not by the IDE. The PDB is copied next to each DLL copy so breakpoints re-bind after every reload. The game module is built into `bin/modules/` (not next to the executables) so the debugger cannot pick up and lock the build's own PDB, which would make every rebuild fail with LNK1201. Limits: only game code reloads; changing engine code still requires stopping the session (the engine DLL is locked while running, rebuild it with Ctrl+B after stopping).
 
 We deliberately compile with `/Zi`, not `/ZI`: Edit and Continue keeps the compiler databases locked while debugging, and Visual Studio's own Hot Reload button does not work with shadow-copied DLLs (it reports NEN1004). Ignore or disable that button (*Tools > Options > Debugging > .NET/C++ Hot Reload*); our reload replaces it.
 
+### Editor, runtime and shader hot reload
+
+The editor (`foh_editor`) opens with three **viewports**: *Scene* (the main world through a free-fly editor camera: hold RMB over the view, WASD, Q/E down/up, mouse wheel = speed, Shift = fast), *Game* (the same world through the camera entity the game defines) and *Animation Debug* (a second, independent world with its own camera). Each viewport's overlay can retarget it to any scene and toggle the editor camera and grid; the *Render Graph* and *Stats* panels show passes (culled/recorded, command list group), transient reuse, barriers and frame time. The layout is saved to `editor_layout.ini` next to the executable (*Settings > Reset layout* restores the default).
+
+Saving a `.slang` file under `shaders/` rebuilds the shader binaries (`foh_shaders`, about 1.5 s) and the running editor/runtime picks them up without a restart, exactly like the game code loop above. A shader that fails to compile keeps the previous version running; the compiler output is in `%TEMP%/foh_foh_shaders_build.log`.
+
+Smoke/QA flags (both executables): `--frames N` renders N frames and exits with code 2 if the graphics validation layer reported anything; `--screenshot out.png` saves the last frame. The editor also takes `--stress` (scripted resizes, scene switches, panel toggles), `--group-passes N`, `--no-vsync` and `--no-validation`.
+
 ### Dependencies (vcpkg manifest, `vcpkg.json`)
 
-flecs (MIT; ECS storage and queries, private to `engine/ecs`), glm, Jolt Physics, NVRHI (D3D12 + Vulkan), SDL3, zstd, lz4, Dear ImGui (docking, editor only), doctest (tests). Slang is available as the optional `shaders` feature (enabled when renderer work starts). vcpkg is pinned to a fixed commit (`builtin-baseline`) for reproducible builds; `cmake/toolchain.cmake` uses `$VCPKG_ROOT` if set (Visual Studio sets it) or bootstraps `.vcpkg/`. Triplet: `x64-windows-static-md` (third-party static, dynamic CRT).
+flecs (MIT; ECS storage and queries, private to `engine/ecs`), glm, Jolt Physics, NVRHI (D3D12 + Vulkan), SDL3, zstd, lz4, Dear ImGui (docking, editor only), doctest (tests). Shaders are compiled with `slangc` from the Vulkan SDK (the vcpkg `shaders` feature, which builds Slang itself, stays available as an alternative). vcpkg is pinned to a fixed commit (`builtin-baseline`) for reproducible builds; `cmake/toolchain.cmake` uses `$VCPKG_ROOT` if set (Visual Studio sets it) or bootstraps `.vcpkg/`. Triplet: `x64-windows-static-md` (third-party static, dynamic CRT).
 
 ## Decision Log
 
@@ -249,7 +266,12 @@ flecs (MIT; ECS storage and queries, private to `engine/ecs`), glm, Jolt Physics
 | Graphics API: NVRHI | Decided |
 | Shader language: Slang | Decided |
 | Physics: Jolt | Decided |
-| Render graph | Decided |
+| Render graph: declaration-ordered passes, culling, pooled transients, NVRHI barriers, parallel recording, one graph instance per viewport ([ADR 0003](docs/adr/0003-renderer-render-graph-viewports.md)) (2026-10-08) | Decided, implemented |
+| Windowing/input: SDL3 behind `foh::Window`, engine-owned event stream, own ImGui platform glue ([ADR 0002](docs/adr/0002-windowing-and-input.md)) (2026-10-08) | Decided |
+| Editor multi-viewport model: viewport = target + camera source + scene + own graph; scene = renderer snapshot of one ECS world filled by an extraction plugin (2026-10-08) | Decided |
+| Rendering conventions: reverse-Z + D32F, RH Y-up, HDR RGBA16F, sRGB RGBA8 display targets | Decided |
+| Header tiers in `engine/renderer`: `foh/renderer/` NVRHI-free API for game code, `foh/rhi/` the NVRHI adapter | Decided |
+| Renderer backends: D3D12 done, Vulkan backend not started | Open (planned) |
 | First map: Vidigal, ~1500 m x ~500 m ground plan (entire favela + some water), Av. Niemeyer to Leblon as later expansion | Decided |
 | Art direction: realistic lighting and models, dense wires/poles, tight streets, street businesses | Decided |
 | Asset format: chunked container + reflection metadata + descriptor-based bulk data (no FlatBuffers) | Decided |

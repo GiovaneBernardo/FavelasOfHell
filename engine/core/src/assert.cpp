@@ -1,11 +1,11 @@
-#include "gtabr/assert.h"
+#include "foh/assert.h"
 
-#include "gtabr/log.h"
+#include "foh/log.h"
 
-namespace gtabr {
+namespace foh {
 
 void ReportAssertFailure(const char* expr, const char* file, int line, const char* message) {
-    GTABR_FATAL("Assertion failed: {} ({}) at {}:{}", message, expr, file, line);
+    FOH_FATAL("Assertion failed: {} ({}) at {}:{}", message, expr, file, line);
 }
 
-} // namespace gtabr
+} // namespace foh

@@ -7,10 +7,10 @@
 #include <thread>
 #include <vector>
 
-#include "gtabr/ecs.h"
-#include "gtabr/jobs.h"
+#include "foh/ecs.h"
+#include "foh/jobs.h"
 
-using namespace gtabr;
+using namespace foh;
 
 namespace ecs_test {
 
@@ -29,6 +29,15 @@ AppConfig sequential() { return {.workerThreads = 0}; }
 AppConfig threaded() { return {.workerThreads = 3}; }
 
 } // namespace ecs_test
+
+FOH_REFLECT(ecs_test::Position, x, y);
+FOH_REFLECT(ecs_test::Velocity, x, y);
+FOH_REFLECT(ecs_test::Health, value);
+FOH_REFLECT(ecs_test::Score, value);
+template <int N>
+struct foh::Reflect<ecs_test::Marker<N>> {
+    static void describe(foh::SchemaBuilder<ecs_test::Marker<N>>& b) { b.field("value", &ecs_test::Marker<N>::value); }
+};
 
 using namespace ecs_test;
 

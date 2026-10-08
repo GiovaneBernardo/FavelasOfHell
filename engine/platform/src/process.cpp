@@ -1,4 +1,4 @@
-#include "gtabr/process.h"
+#include "foh/process.h"
 
 #if defined(_WIN32)
     #include <windows.h>
@@ -10,7 +10,7 @@
 extern char** environ;
 #endif
 
-namespace gtabr {
+namespace foh {
 
 Process::~Process() { closeHandle(); }
 
@@ -108,4 +108,4 @@ bool Process::isRunning() {
 
 #endif
 
-} // namespace gtabr
+} // namespace foh

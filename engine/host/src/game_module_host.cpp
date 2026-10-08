@@ -1,11 +1,11 @@
-#include "gtabr/game_module_host.h"
+#include "foh/game_module_host.h"
 
 #include <system_error>
 #include <utility>
 
-#include "gtabr/log.h"
+#include "foh/log.h"
 
-namespace gtabr {
+namespace foh {
 
 namespace fs = std::filesystem;
 
@@ -44,33 +44,33 @@ GameModuleHost::LoadResult GameModuleHost::loadShadowCopy(DynamicLibrary& lib, c
     const fs::path dllCopy = dir / m_sourceDll.filename();
     fs::copy_file(m_sourceDll, dllCopy, fs::copy_options::overwrite_existing, ec);
     if (ec) {
-        GTABR_WARN("Game module: cannot copy {} ({}), will retry", m_sourceDll.string(), ec.message());
+        FOH_WARN("Game module: cannot copy {} ({}), will retry", m_sourceDll.string(), ec.message());
         return LoadResult::Retry;
     }
 
     if (fs::exists(m_sourcePdb, ec)) {
         fs::copy_file(m_sourcePdb, dir / m_sourcePdb.filename(), fs::copy_options::overwrite_existing, ec);
         if (ec) {
-            GTABR_WARN("Game module: cannot copy {} ({}), will retry", m_sourcePdb.string(), ec.message());
+            FOH_WARN("Game module: cannot copy {} ({}), will retry", m_sourcePdb.string(), ec.message());
             return LoadResult::Retry;
         }
     } else {
-        GTABR_WARN("Game module: no PDB next to {}, debugging this build will not work",
+        FOH_WARN("Game module: no PDB next to {}, debugging this build will not work",
                    m_sourceDll.string());
     }
 
     if (!lib.load(dllCopy)) {
-        GTABR_ERROR("Game module: failed to load {}", dllCopy.string());
+        FOH_ERROR("Game module: failed to load {}", dllCopy.string());
         return LoadResult::Failed;
     }
-    auto getModule = reinterpret_cast<GetGameModuleFn>(lib.symbol("gtabr_get_game_module"));
+    auto getModule = reinterpret_cast<GetGameModuleFn>(lib.symbol("foh_get_game_module"));
     if (!getModule) {
-        GTABR_ERROR("Game module: missing export gtabr_get_game_module");
+        FOH_ERROR("Game module: missing export foh_get_game_module");
         return LoadResult::Failed;
     }
     api = getModule();
     if (!api || api->abiVersion != kGameModuleAbiVersion) {
-        GTABR_ERROR("Game module: ABI mismatch (host {}, module {})", kGameModuleAbiVersion,
+        FOH_ERROR("Game module: ABI mismatch (host {}, module {})", kGameModuleAbiVersion,
                     api ? api->abiVersion : 0u);
         api = nullptr;
         return LoadResult::Failed;
@@ -112,7 +112,7 @@ bool GameModuleHost::loadInternal(LoadResult& result) {
     m_app.setActiveOwner(kGameOwner);
     m_api->build(m_app);
     m_app.setActiveOwner(kEngineOwner);
-    GTABR_INFO("Game module '{}' loaded (generation {}, pdb {} bytes)", m_api->name, m_generation,
+    FOH_INFO("Game module '{}' loaded (generation {}, pdb {} bytes)", m_api->name, m_generation,
                stamp.pdbSize);
     return true;
 }
@@ -139,7 +139,7 @@ bool GameModuleHost::pollReload() {
     }
     if (now - m_pendingSince < kSettleTime) return false;
 
-    GTABR_INFO("Game module changed on disk, reloading...");
+    FOH_INFO("Game module changed on disk, reloading...");
     LoadResult result{};
     if (loadInternal(result)) return true;
 
@@ -164,4 +164,4 @@ void GameModuleHost::unload() {
     fs::remove_all(m_currentDir, ec);
 }
 
-} // namespace gtabr
+} // namespace foh

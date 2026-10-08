@@ -1,0 +1,17 @@
+// Oversized triangle covering the screen, generated from SV_VertexID (no vertex buffer).
+#pragma once
+
+struct FullscreenOut {
+    float4 position : SV_Position;
+    float2 ndc : TEXCOORD0;
+};
+
+[shader("vertex")]
+FullscreenOut vsFullscreen(uint id : SV_VertexID)
+{
+    float2 uv = float2((id << 1) & 2, id & 2);
+    FullscreenOut o;
+    o.ndc = uv * 2.0 - 1.0;
+    o.position = float4(o.ndc, 0.0, 1.0);
+    return o;
+}

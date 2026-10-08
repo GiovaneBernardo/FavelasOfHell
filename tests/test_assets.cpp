@@ -1,10 +1,10 @@
 #include <doctest/doctest.h>
 
-#include "gtabr/asset_container.h"
-#include "gtabr/gpu_format.h"
-#include "gtabr/physics_system.h"
+#include "foh/asset_container.h"
+#include "foh/gpu_format.h"
+#include "foh/physics_system.h"
 
-using namespace gtabr;
+using namespace foh;
 
 TEST_CASE("Compression bounds are sane") {
     CHECK(CompressBound(ChunkCodec::None, 1000) == 1000);

@@ -1,10 +1,14 @@
 # Standalone player. Hosts the game module (and hot reloads it too).
-add_executable(gtabr_runtime src/main.cpp)
-target_link_libraries(gtabr_runtime PRIVATE gtabr::engine)
-target_compile_definitions(gtabr_runtime PRIVATE
-    GTABR_GAME_MODULE_FILE="modules/$<TARGET_FILE_NAME:gtabr_game>")
-# Building the runtime always builds the current game module as well.
-add_dependencies(gtabr_runtime gtabr_game)
-set_target_properties(gtabr_runtime PROPERTIES FOLDER "apps")
-gtabr_target_defaults(gtabr_runtime)
-gtabr_enable_dev_builder(gtabr_runtime gtabr_game)
+# Links nvrhi only for the RHI-tier headers (Swapchain); it draws through Renderer.
+add_executable(foh_runtime src/main.cpp)
+target_link_libraries(foh_runtime PRIVATE foh::engine nvrhi)
+target_compile_definitions(foh_runtime PRIVATE
+    FOH_GAME_MODULE_FILE="modules/$<TARGET_FILE_NAME:foh_game>")
+# Building the runtime always builds the current game module and shaders as well.
+add_dependencies(foh_runtime foh_game)
+if(TARGET foh_shaders)
+    add_dependencies(foh_runtime foh_shaders)
+endif()
+set_target_properties(foh_runtime PROPERTIES FOLDER "apps")
+foh_target_defaults(foh_runtime)
+foh_enable_dev_builder(foh_runtime foh_game)

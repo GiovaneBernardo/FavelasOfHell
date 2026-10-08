@@ -1,4 +1,4 @@
-#include "gtabr/file_system.h"
+#include "foh/file_system.h"
 
 #include <string>
 
@@ -8,7 +8,7 @@
     #include <unistd.h>
 #endif
 
-namespace gtabr {
+namespace foh {
 
 std::filesystem::path GetExecutableDirectory() {
 #if defined(_WIN32)
@@ -24,4 +24,4 @@ std::filesystem::path GetExecutableDirectory() {
 #endif
 }
 
-} // namespace gtabr
+} // namespace foh

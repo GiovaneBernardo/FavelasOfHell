@@ -1,8 +1,8 @@
-#include "gtabr/gpu_format.h"
+#include "foh/gpu_format.h"
 
 #include <nvrhi/nvrhi.h>
 
-namespace gtabr {
+namespace foh {
 
 namespace {
 nvrhi::Format ToNvrhi(GpuFormat format) {
@@ -17,4 +17,4 @@ nvrhi::Format ToNvrhi(GpuFormat format) {
 
 u32 BytesPerBlock(GpuFormat format) { return nvrhi::getFormatInfo(ToNvrhi(format)).bytesPerBlock; }
 
-} // namespace gtabr
+} // namespace foh

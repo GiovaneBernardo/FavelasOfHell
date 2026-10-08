@@ -1,4 +1,4 @@
-#include "gtabr/log.h"
+#include "foh/log.h"
 
 #include <atomic>
 #include <cstdio>
@@ -9,7 +9,7 @@
     #include <windows.h>
 #endif
 
-namespace gtabr {
+namespace foh {
 
 namespace {
 std::atomic<LogLevel> g_minLevel{LogLevel::Trace};
@@ -42,4 +42,4 @@ void LogMessage(LogLevel level, std::string_view message) {
 #endif
 }
 
-} // namespace gtabr
+} // namespace foh

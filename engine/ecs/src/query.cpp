@@ -1,16 +1,17 @@
-#include "gtabr/ecs/query.h"
+#include "foh/ecs/query.h"
 
 #include <new>
 
-#include "gtabr/assert.h"
-#include "gtabr/jobs.h"
+#include "foh/assert.h"
+#include "foh/jobs.h"
 #include "world_impl.h"
 
-namespace gtabr::detail {
+namespace foh::detail {
 
 struct QueryCore {
     ecs_world_t* world;
     ecs_query_t* query;
+    bool detectsChanges;
 };
 
 namespace {
@@ -30,30 +31,52 @@ void QueryCoreDeleter::operator()(QueryCore* core) const {
 }
 
 QueryHandle createQuery(World& world, const TermDesc* terms, u32 count) {
-    GTABR_VERIFY(!world.inParallelPhase(), "queries cannot be created while systems run");
-    GTABR_VERIFY(count > 0 && count <= FLECS_TERM_COUNT_MAX, "invalid query term count");
+    FOH_VERIFY(!world.inParallelPhase(), "queries cannot be created while systems run");
+    FOH_VERIFY(count > 0 && count <= FLECS_TERM_COUNT_MAX + 1, "invalid query term count");
 
     ecs_query_desc_t desc{};
+    bool detectsChanges = false;
+    u32 next = 0; // index of the backend term being filled (modifiers have none)
     for (u32 i = 0; i < count; ++i) {
-        ecs_term_t& term = desc.terms[i];
+        if (terms[i].kind == TermKind::ChangedTables) {
+            detectsChanges = true;
+            continue;
+        }
+        FOH_VERIFY(next < FLECS_TERM_COUNT_MAX, "too many query terms");
+        ecs_term_t& term = desc.terms[next++];
         term.id = terms[i].id;
         switch (terms[i].kind) {
+            case TermKind::ChangedTables: break; // handled above
             case TermKind::Read: term.inout = EcsIn; break;
             case TermKind::Write: term.inout = EcsInOut; break;
             case TermKind::With: term.inout = EcsInOutNone; break;
             case TermKind::Without: term.oper = EcsNot; break;
+            case TermKind::ParentData:
+                term.id = ecs_pair(EcsChildOf, EcsWildcard);
+                term.inout = EcsInOutNone;
+                break;
+            case TermKind::ParentWith:
+                term.id = ecs_pair(EcsChildOf, EcsWildcard);
+                term.inout = EcsInOutNone;
+                break;
+            case TermKind::ParentWithout:
+                term.id = ecs_pair(EcsChildOf, EcsWildcard);
+                term.oper = EcsNot;
+                break;
         }
     }
     // Cached: the set of matching tables is maintained when tables are created
     // (a structural change, so on the main thread). Iterating from worker threads
     // then only reads it, which an uncached query could not guarantee.
     desc.cache_kind = EcsQueryCacheAuto;
+    if (detectsChanges) desc.flags |= EcsQueryDetectChanges;
+    FOH_VERIFY(next > 0, "a query needs at least one component term");
 
     ecs_world_t* raw = WorldAccess::raw(world);
     ecs_query_t* query = ecs_query_init(raw, &desc);
-    GTABR_VERIFY(query != nullptr, "ecs_query_init failed");
+    FOH_VERIFY(query != nullptr, "ecs_query_init failed");
     if (!query) return nullptr;
-    return QueryHandle(new QueryCore{raw, query});
+    return QueryHandle(new QueryCore{raw, query, detectsChanges});
 }
 
 QueryIter::QueryIter(const QueryCore& core, void* stage) {
@@ -94,6 +117,27 @@ void* QueryIter::field(u32 term, u32 elemSize) const {
     return ecs_field_w_size(it, elemSize, static_cast<i8>(term));
 }
 
+void* QueryIter::fieldAt(u32 term, u32 elemSize, u32 row) const {
+    auto* it = reinterpret_cast<const ecs_iter_t*>(m_storage + (m_worker ? kIterSize : 0));
+    return ecs_field_at_w_size(it, elemSize, static_cast<i8>(term), static_cast<i32>(row));
+}
+
+Entity QueryIter::pairTarget(u32 term) const {
+    auto* it = reinterpret_cast<const ecs_iter_t*>(m_storage + (m_worker ? kIterSize : 0));
+    const ecs_id_t id = ecs_field_id(it, static_cast<i8>(term));
+    return Entity{ecs_pair_second(it->real_world, id)};
+}
+
+bool QueryIter::changed() const {
+    auto* it = reinterpret_cast<ecs_iter_t*>(const_cast<unsigned char*>(m_storage) + (m_worker ? kIterSize : 0));
+    return ecs_iter_changed(it);
+}
+
+void QueryIter::skip() {
+    auto* it = reinterpret_cast<ecs_iter_t*>(m_storage + (m_worker ? kIterSize : 0));
+    ecs_iter_skip(it);
+}
+
 namespace {
 
 struct Slice {
@@ -132,4 +176,4 @@ void parallelQuery(const QueryCore& core, const RunContext& ctx, ParallelQueryFn
     ctx.jobs->wait(counter);
 }
 
-} // namespace gtabr::detail
+} // namespace foh::detail

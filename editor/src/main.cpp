@@ -1,53 +1,33 @@
-#include <chrono>
-#include <optional>
-#include <thread>
+#include <cstdlib>
+#include <cstring>
 
-#include <imgui.h>
+#include "editor.h"
+#include "foh/log.h"
 
-#include "gtabr/dev_build_defaults.h"
-#include "gtabr/ecs.h"
-#include "gtabr/file_system.h"
-#include "gtabr/game_module_host.h"
-#include "gtabr/log.h"
-#include "gtabr/window.h"
-
-// Editor skeleton: window + ImGui context + hot-reloading game module. The
-// ImGui backends/renderer integration arrive with the renderer.
-int main() {
-    using Clock = std::chrono::steady_clock;
-
-    auto window = gtabr::Window::create({.title = "gtaBR Editor", .width = 1920, .height = 1080});
-    if (!window) return 1;
-
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-
-    gtabr::App app;
-    const auto exeDir = gtabr::GetExecutableDirectory();
-    gtabr::GameModuleHost game(app, exeDir / GTABR_GAME_MODULE_FILE, exeDir / ".hotreload");
-    if (!game.load()) {
-        GTABR_ERROR("Could not load the game module");
-        ImGui::DestroyContext();
-        return 1;
+// Usage: foh_editor [--frames N] [--screenshot out.png] [--no-validation] [--no-vsync] [--stress]
+//   --frames N       render N frames, then exit (smoke test; exit code 2 on graphics API errors)
+//   --screenshot f   with --frames: save the last frame as a PNG
+//   --group-passes N passes per command list before a graph is split (1: one list per pass, QA)
+//   --stress         scripted resizes / scene switches / panel toggles (QA)
+int main(int argc, char** argv) {
+    foh::EditorOptions options;
+    for (int i = 1; i < argc; ++i) {
+        if (!std::strcmp(argv[i], "--frames") && i + 1 < argc) {
+            options.frames = static_cast<foh::u32>(std::atoi(argv[++i]));
+        } else if (!std::strcmp(argv[i], "--screenshot") && i + 1 < argc) {
+            options.screenshot = argv[++i];
+        } else if (!std::strcmp(argv[i], "--no-validation")) {
+            options.validation = false;
+        } else if (!std::strcmp(argv[i], "--no-vsync")) {
+            options.vsync = false;
+        } else if (!std::strcmp(argv[i], "--group-passes") && i + 1 < argc) {
+            options.minPassesPerGroup = static_cast<foh::u32>(std::atoi(argv[++i]));
+        } else if (!std::strcmp(argv[i], "--stress")) {
+            options.stress = true;
+        } else {
+            FOH_WARN("unknown argument '{}'", argv[i]);
+        }
     }
-
-    // Dev only: rebuild the game module when game/ sources are saved.
-    std::optional<gtabr::DevBuilder> devBuilder;
-    if (const auto cfg = gtabr::DefaultDevBuilderConfig(); cfg.isValid()) devBuilder.emplace(cfg);
-
-    auto last = Clock::now();
-    while (window->pollEvents() && !window->isKeyDown(gtabr::Key::Escape)) {
-        const auto now = Clock::now();
-        const float dt = std::chrono::duration<float>(now - last).count();
-        last = now;
-
-        if (devBuilder) devBuilder->poll();
-        game.pollReload();
-        app.update(dt);
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
-
-    ImGui::DestroyContext();
-    return 0;
+    foh::Editor editor(options);
+    return editor.run();
 }

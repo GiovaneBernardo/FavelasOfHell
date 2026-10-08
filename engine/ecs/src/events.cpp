@@ -1,9 +1,9 @@
-#include "gtabr/ecs/events.h"
+#include "foh/ecs/events.h"
 
 #include <algorithm>
 #include <cstring>
 
-namespace gtabr {
+namespace foh {
 
 void EventChannel::append(const void* data, u32 count) {
     if (count == 0) return;
@@ -39,4 +39,4 @@ void EventChannel::clear() {
     m_curStart = 0;
 }
 
-} // namespace gtabr
+} // namespace foh

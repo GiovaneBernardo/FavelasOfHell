@@ -1,4 +1,4 @@
-#include "gtabr/jobs.h"
+#include "foh/jobs.h"
 
 #include <algorithm>
 #include <condition_variable>
@@ -7,9 +7,9 @@
 #include <thread>
 #include <vector>
 
-#include "gtabr/assert.h"
+#include "foh/assert.h"
 
-namespace gtabr {
+namespace foh {
 
 namespace {
 thread_local u32 t_threadSlot = 0;
@@ -81,7 +81,7 @@ JobSystem::~JobSystem() {
 }
 
 void JobSystem::submit(JobFn fn, void* arg, JobCounter& counter) {
-    GTABR_ASSERT(fn != nullptr, "null job function");
+    FOH_ASSERT(fn != nullptr, "null job function");
     // Count before enqueueing so a fast job cannot drive the counter to zero early.
     counter.pending.fetch_add(1, std::memory_order_relaxed);
     {
@@ -107,4 +107,4 @@ void JobSystem::wait(JobCounter& counter) {
     }
 }
 
-} // namespace gtabr
+} // namespace foh

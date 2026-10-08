@@ -1,4 +1,4 @@
-#include "gtabr/dynamic_library.h"
+#include "foh/dynamic_library.h"
 
 #include <utility>
 
@@ -8,7 +8,7 @@
     #include <dlfcn.h>
 #endif
 
-namespace gtabr {
+namespace foh {
 
 DynamicLibrary::~DynamicLibrary() { unload(); }
 
@@ -52,4 +52,4 @@ void* DynamicLibrary::symbol(const char* name) const {
 #endif
 }
 
-} // namespace gtabr
+} // namespace foh

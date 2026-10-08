@@ -1,8 +1,8 @@
 #include <doctest/doctest.h>
 
-#include "gtabr/math.h"
+#include "foh/math.h"
 
-using namespace gtabr;
+using namespace foh;
 
 TEST_CASE("Math aliases wrap glm") {
     const Vec3 a{1.0f, 2.0f, 3.0f};

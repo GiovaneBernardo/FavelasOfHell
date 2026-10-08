@@ -1,11 +1,11 @@
-#include "gtabr/physics_system.h"
+#include "foh/physics_system.h"
 
 #include <Jolt/Jolt.h>
 
 #include <Jolt/Core/Factory.h>
 #include <Jolt/RegisterTypes.h>
 
-namespace gtabr {
+namespace foh {
 
 void PhysicsSystem::Init() {
     JPH::RegisterDefaultAllocator();
@@ -19,4 +19,4 @@ void PhysicsSystem::Shutdown() {
     JPH::Factory::sInstance = nullptr;
 }
 
-} // namespace gtabr
+} // namespace foh

@@ -4,11 +4,11 @@
 #include <filesystem>
 #include <thread>
 
-#include "gtabr/ecs.h"
-#include "gtabr/game_module_host.h"
+#include "foh/ecs.h"
+#include "foh/game_module_host.h"
 #include "test_module/shared.h"
 
-using namespace gtabr;
+using namespace foh;
 using namespace reload_test;
 namespace fs = std::filesystem;
 
@@ -16,8 +16,8 @@ namespace fs = std::filesystem;
 // reload, run, unload. The ECS contract under test: the module's systems are
 // removed before its code is unloaded, and the data in the world is untouched.
 TEST_CASE("Game module hot reload keeps world state and swaps systems") {
-    const fs::path built = GTABR_TEST_MODULE_PATH;
-    const fs::path dir = fs::temp_directory_path() / "gtabr_hot_reload_test";
+    const fs::path built = FOH_TEST_MODULE_PATH;
+    const fs::path dir = fs::temp_directory_path() / "foh_hot_reload_test";
     std::error_code ec;
     fs::remove_all(dir, ec);
     fs::create_directories(dir);
@@ -28,7 +28,7 @@ TEST_CASE("Game module hot reload keeps world state and swaps systems") {
     if (fs::exists(pdb)) fs::copy_file(pdb, dir / pdb.filename());
 
     App app({.workerThreads = 2});
-    app.insertResource(Ticks{});
+    app.insertResource(Ticks{}).insertResource(Observed{});
 
     {
         GameModuleHost host(app, dll, dir / "shadow");
@@ -39,6 +39,7 @@ TEST_CASE("Game module hot reload keeps world state and swaps systems") {
         app.update(0.016f);
         app.update(0.016f);
         CHECK(app.world().resource<Ticks>()->value == 2);
+        CHECK(app.world().resource<Observed>()->count == 1); // the module's observer saw the spawn
 
         // Simulate a rebuild: the host reloads when the files change and settle.
         const auto later = fs::file_time_type::clock::now() + std::chrono::seconds(2);
@@ -63,10 +64,17 @@ TEST_CASE("Game module hot reload keeps world state and swaps systems") {
         OwnedQuery<const Tracked&> q(app.world());
         q.each([&](const Tracked& t) { seen = t.seen; });
         CHECK(seen == 3);
+
+        // Exactly one observer is live after the reload (the old one was removed).
+        CHECK(app.world().resource<Observed>()->count == 1);
+        app.world().spawn(Tracked{});
+        CHECK(app.world().resource<Observed>()->count == 2);
     } // host destroyed: unload() removes the module's systems before the DLL goes away
 
     CHECK(app.systemCount() == 0);
     app.update(0.016f);
     CHECK(app.world().resource<Ticks>()->value == 4);
+    app.world().spawn(reload_test::Tracked{}); // the unloaded module's observer must be gone
+    CHECK(app.world().resource<Observed>()->count == 2);
     fs::remove_all(dir, ec);
 }

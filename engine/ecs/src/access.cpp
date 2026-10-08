@@ -1,6 +1,6 @@
-#include "gtabr/ecs/access.h"
+#include "foh/ecs/access.h"
 
-namespace gtabr {
+namespace foh {
 
 namespace {
 bool intersects(const std::vector<ComponentId>& a, const std::vector<ComponentId>& b) {
@@ -17,4 +17,4 @@ bool AccessSet::conflictsWith(const AccessSet& other) const {
     return intersects(writes, other.writes) || intersects(writes, other.reads) || intersects(reads, other.writes);
 }
 
-} // namespace gtabr
+} // namespace foh

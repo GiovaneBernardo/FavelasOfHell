@@ -1,4 +1,4 @@
-gtabr_add_engine_module(jobs
+foh_add_engine_module(jobs
     SOURCES
         src/jobs.cpp
-    PUBLIC_DEPS gtabr::core)
+    PUBLIC_DEPS foh::core)

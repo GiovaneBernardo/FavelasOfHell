@@ -1,0 +1,23 @@
+// Per-view constants. MIRRORED by foh::ViewConstants in
+// engine/renderer/src/gpu_structs.h: change both together (the C++ side has
+// static_asserts on size and offsets).
+#pragma once
+
+struct ViewConstants {
+    float4x4 view;
+    float4x4 proj;
+    float4x4 viewProj;
+    float4x4 invViewProj;
+    float4 cameraPos;    // xyz
+    float4 sunDirection; // xyz = direction the light travels (normalized), w = 1 if a sun exists
+    float4 sunColor;     // rgb, already multiplied by intensity
+    float4 viewport;     // xy = size in pixels, zw = 1 / size
+    float4 params;       // x = exposure, y = time (s), z = near, w = far
+};
+
+// World-space point under a pixel at the given depth (reverse-Z: near plane is depth 1).
+float3 worldPointAt(float4x4 invViewProj, float2 ndc, float depth)
+{
+    float4 p = mul(invViewProj, float4(ndc, depth, 1.0));
+    return p.xyz / p.w;
+}

@@ -1,0 +1,125 @@
+#pragma once
+
+// Private state of foh::Renderer, shared by renderer.cpp (lifecycle, scenes,
+// viewports) and viewport_graph.cpp (the per-viewport render graph).
+
+#include <chrono>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <nvrhi/nvrhi.h>
+
+#include "foh/jobs.h"
+#include "foh/renderer/renderer.h"
+#include "foh/rhi/graphics_device.h"
+#include "foh/rhi/pipeline_cache.h"
+#include "foh/rhi/render_graph.h"
+#include "foh/rhi/shader_library.h"
+#include "foh/rhi/swapchain.h"
+#include "gpu_structs.h"
+#include "mesh_store.h"
+
+namespace foh {
+
+// A scene's instances packed for the GPU, shared by every viewport that shows it.
+struct SceneGpu {
+    struct Batch {
+        u32 mesh;
+        u32 first; // first instance in `instances`
+        u32 count;
+    };
+    std::vector<GpuInstance> instances; // sorted by mesh
+    std::vector<Batch> batches;
+};
+
+struct SceneSlot {
+    u32 id = 0;
+    std::string name;
+    std::unique_ptr<RenderScene> scene;
+    SceneGpu gpu;
+    bool inUse = false; // some active viewport shows it this frame
+};
+
+// Everything a pass body reads. Lives in the Viewport, so its address is stable
+// for the frame and pass lambdas can capture a pointer to it.
+struct ViewFrame {
+    ViewConstants constants{};
+    const SceneGpu* scene = nullptr;
+    nvrhi::IBuffer* viewCb = nullptr;
+    u32 width = 0;
+    u32 height = 0;
+    ViewportFlags flags = ViewportFlags::None;
+};
+
+struct Viewport {
+    u32 id = 0;
+    std::string name;
+    u32 width = 1280, height = 720;
+    u32 pendingWidth = 1280, pendingHeight = 720;
+    SceneId scene;
+    u64 cameraEntity = 0;
+    ViewportFlags flags = ViewportFlags::Sky;
+    bool active = true;
+    bool hasCameraOverride = false;
+    RenderViewParams cameraOverride;
+
+    nvrhi::TextureHandle output; // RGBA8, sRGB-encoded; ShaderResource between frames
+    // Outputs replaced by a resize stay alive for one more frame: the UI built before
+    // beginFrame() still holds raw pointers to them in this frame's draw data.
+    std::vector<nvrhi::TextureHandle> retired;
+    nvrhi::BufferHandle viewCb;  // volatile constant buffer
+    std::unique_ptr<RenderGraph> graph;
+    ViewFrame frame;
+    bool graphReady = false; // compiled this frame and waiting to be recorded/submitted
+
+    ViewportDebugInfo debug;
+};
+
+// Shared immutable GPU objects.
+struct GpuResources {
+    nvrhi::BindingLayoutHandle layoutView;       // b0
+    nvrhi::BindingLayoutHandle layoutViewTexture; // b0 + t0
+    nvrhi::BindingLayoutHandle layoutTexture;     // t0
+    nvrhi::InputLayoutHandle meshInput;
+    MeshStore meshes;
+};
+
+struct Renderer::Impl {
+    RendererDesc desc;
+    std::unique_ptr<GraphicsDevice> device;
+    std::unique_ptr<ShaderLibrary> shaders;
+    std::unique_ptr<PipelineCache> pipelines;
+    GpuResources gpu;
+    std::unique_ptr<RenderGraph> windowGraph;
+
+    std::vector<SceneSlot> scenes;
+    std::vector<std::unique_ptr<Viewport>> viewports; // creation order = submit order
+    u32 nextId = 1;
+    u64 frame = 0;
+
+    // Per-frame job argument scratch (stable addresses while jobs run; no per-frame allocation).
+    struct SceneJob {
+        Impl* impl;
+        SceneSlot* slot;
+    };
+    struct RecordJobArg {
+        Viewport* vp;
+        nvrhi::IDevice* dev;
+    };
+    std::vector<SceneJob> sceneJobs;
+    std::vector<RecordJobArg> recordJobs;
+    std::vector<Viewport*> readyViewports;
+    std::chrono::steady_clock::time_point startTime = std::chrono::steady_clock::now();
+
+    Viewport* findViewport(ViewportId id);
+    const Viewport* findViewport(ViewportId id) const;
+    SceneSlot* findScene(SceneId id);
+
+    void createViewportTargets(Viewport& vp);
+    void prepareScene(SceneSlot& slot);
+    // Resolve camera + constants, build and compile the viewport's graph (main thread).
+    void buildViewportGraph(Viewport& vp);
+};
+
+} // namespace foh

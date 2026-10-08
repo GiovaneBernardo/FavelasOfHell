@@ -1,9 +1,9 @@
-#include "gtabr/asset_container.h"
+#include "foh/asset_container.h"
 
 #include <lz4.h>
 #include <zstd.h>
 
-namespace gtabr {
+namespace foh {
 
 size_t CompressBound(ChunkCodec codec, size_t srcSize) {
     switch (codec) {
@@ -14,4 +14,4 @@ size_t CompressBound(ChunkCodec codec, size_t srcSize) {
     return srcSize;
 }
 
-} // namespace gtabr
+} // namespace foh
