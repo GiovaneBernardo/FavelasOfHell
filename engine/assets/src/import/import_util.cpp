@@ -82,7 +82,9 @@ void generateTangents(ImportedMesh& mesh) {
     }
 }
 
-bool decodeImage(const u8* data, size_t size, ImportedImage& out, std::string& error) {
+void StbFree::operator()(u8* p) const { stbi_image_free(p); }
+
+bool decodeImage(const u8* data, size_t size, DecodedImage& out, std::string& error) {
     if (size > static_cast<size_t>(INT32_MAX)) {
         error = "image too large";
         return false;
@@ -95,8 +97,20 @@ bool decodeImage(const u8* data, size_t size, ImportedImage& out, std::string& e
     }
     out.width = static_cast<u32>(w);
     out.height = static_cast<u32>(h);
-    out.pixels.assign(pixels, pixels + static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
-    stbi_image_free(pixels);
+    out.pixels.reset(pixels);
+    return true;
+}
+
+bool probeImage(const u8* data, size_t size, std::string& error) {
+    int w = 0, h = 0, channels = 0;
+    if (size > static_cast<size_t>(INT32_MAX) || !stbi_info_from_memory(data, static_cast<int>(size), &w, &h, &channels)) {
+        error = std::string("unsupported or corrupt image: ") + stbi_failure_reason();
+        return false;
+    }
+    if (w <= 0 || h <= 0 || w > (1 << 15) || h > (1 << 15)) {
+        error = "image size out of range (" + std::to_string(w) + "x" + std::to_string(h) + ")";
+        return false;
+    }
     return true;
 }
 

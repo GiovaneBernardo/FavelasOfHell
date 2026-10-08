@@ -270,6 +270,12 @@ void World::setComponent(Entity e, ComponentId component, const void* data, u32 
     }
 }
 
+void World::markModified(Entity e, ComponentId component) {
+    FOH_VERIFY(!m_parallel, "markModified during the parallel phase");
+    if (!isAlive(e) || component == 0 || !ecs_has_id(m_impl->world, e.id, component)) return;
+    ecs_modified_id(m_impl->world, e.id, component);
+}
+
 void World::removeComponent(Entity e, ComponentId component) {
     FOH_VERIFY(!m_parallel, "structural change during the parallel phase: use Commands");
     if (!isAlive(e) || component == 0) return;

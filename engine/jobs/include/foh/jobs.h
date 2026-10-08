@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <memory>
+#include <type_traits>
 
 #include "foh/platform.h"
 #include "foh/types.h"
@@ -17,7 +18,13 @@ struct JobCounter {
     std::atomic<u32> pending{0};
 };
 
-// Minimal job system: a worker pool behind one shared queue.
+// Low priority jobs (imports, asset decoding) only run on pool workers that have no normal job
+// to take, and the main thread never executes them while it waits: a frame that waits for its own
+// jobs can therefore never get stuck behind a multi-second texture compression. Jobs submitted
+// from inside a low priority job (nested fork-join) inherit the priority automatically.
+enum class JobPriority : u8 { Normal, Low };
+
+// Minimal job system: a worker pool behind two shared queues.
 //
 // Thread-safety: submit() and wait() may be called from any thread, including
 // from inside a running job (nested fork-join). wait() never blocks idle: the
@@ -50,13 +57,38 @@ public:
     // Slots in use: workers + the calling thread.
     u32 threadCount() const { return m_workerCount + 1; }
 
+    // `priority` defaults to the priority of the job being run by the calling thread (Normal elsewhere).
+    // At most this many pool workers run low priority jobs at once (default: a quarter of them, at least one). A job
+    // that waits for its own nested low priority jobs helps with them on top of that.
+    void setLowPriorityLimit(u32 threads);
+
     void submit(JobFn fn, void* arg, JobCounter& counter);
+    void submit(JobFn fn, void* arg, JobCounter& counter, JobPriority priority);
     void wait(JobCounter& counter);
+
+    // Splits [0, count) into chunks of at least `grain` items and runs fn(begin, end, arg) on the pool;
+    // returns when all are done. Runs inline for small counts or without workers. The calling thread
+    // takes part, so this is safe from inside a job.
+    using RangeFn = void (*)(u32 begin, u32 end, void* arg);
+    void parallelFor(u32 count, u32 grain, RangeFn fn, void* arg);
 
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
     u32 m_workerCount;
 };
+
+// Convenience wrapper: body(begin, end) over [0, count). Not for hot per-item lambdas that capture a lot:
+// the callable is invoked once per chunk, not once per item.
+template <class F>
+void ParallelFor(JobSystem* jobs, u32 count, u32 grain, F&& body) {
+    if (!jobs || jobs->workerCount() == 0 || count <= grain) {
+        if (count) body(0u, count);
+        return;
+    }
+    jobs->parallelFor(count, grain,
+                      [](u32 begin, u32 end, void* arg) { (*static_cast<std::remove_reference_t<F>*>(arg))(begin, end); },
+                      &body);
+}
 
 } // namespace foh

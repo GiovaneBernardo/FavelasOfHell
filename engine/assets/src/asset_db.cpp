@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <deque>
 #include <fstream>
 #include <sstream>
 
@@ -66,7 +67,6 @@ bool sameBytes(const fs::path& file, const std::vector<u8>& bytes) {
 
 } // namespace
 
-AssetDb::AssetDb(AssetDbDesc desc) : m_desc(std::move(desc)) {}
 
 fs::path AssetDb::cachedFile(AssetId id, AssetKind kind) const {
     return m_desc.cacheRoot / (ToString(id) + "." + AssetKindExtension(kind));
@@ -84,6 +84,7 @@ void AssetDb::saveMeta(const SourceRecord& r) const {
     out << "stamp " << hex64(r.stamp) << '\n';
     out << "setting generatePrefab " << (r.settings.generatePrefab ? 1 : 0) << '\n';
     out << "setting generateMips " << (r.settings.generateMips ? 1 : 0) << '\n';
+    out << "setting compressTextures " << (r.settings.compressTextures ? 1 : 0) << '\n';
     out << "setting maxTextureSize " << r.settings.maxTextureSize << '\n';
     out << "setting textureRole " << r.settings.textureRole << '\n';
     for (const std::string& f : r.files) out << "file " << f << '\n';
@@ -142,6 +143,7 @@ bool AssetDb::loadMeta(const fs::path& metaFile, SourceRecord& out) const {
             const std::string name = value.substr(0, sp2), v = value.substr(sp2 + 1);
             if (name == "generatePrefab") r.settings.generatePrefab = v != "0";
             else if (name == "generateMips") r.settings.generateMips = v != "0";
+            else if (name == "compressTextures") r.settings.compressTextures = v != "0";
             else if (name == "maxTextureSize") r.settings.maxTextureSize = static_cast<u32>(std::strtoul(v.c_str(), nullptr, 10));
             else if (name == "textureRole") r.settings.textureRole = v;
         }
@@ -220,43 +222,87 @@ u64 AssetDb::computeStamp(const SourceRecord& r) const {
     return stamp;
 }
 
-// ---- import --------------------------------------------------------------------------------
+// ---- import ----------------------------------------------------------------------------------
+//
+// An import has two halves. The worker half (runImport/runCopy) is a pure function of its inputs: it gets a
+// snapshot of the source's record and writes only cooked files that belong to that source. The main thread
+// half (commit) is the only place the database changes. That is what lets imports run on worker threads
+// without locking anything.
 
-ImportResult AssetDb::importFile(const fs::path& file, bool force) {
-    std::error_code ec;
-    if (file.is_relative()) {
-        ImportResult r = importSource(toUtf8(file), force);
-        return r;
-    }
-    const fs::path root = fs::weakly_canonical(m_desc.sourceRoot, ec);
-    const fs::path abs = fs::weakly_canonical(file, ec);
-    const fs::path rel = abs.lexically_relative(root);
-    if (!rel.empty() && *rel.begin() != "..") return importSource(toUtf8(rel), force);
-    return copyIn(abs, force);
+namespace {
+
+struct ImportContext {
+    fs::path sourceRoot;
+    fs::path cacheRoot;
+    JobSystem* jobs = nullptr;
+};
+
+fs::path cacheFileOf(const fs::path& cacheRoot, AssetId id, AssetKind kind) {
+    return cacheRoot / (ToString(id) + "." + AssetKindExtension(kind));
 }
 
-ImportResult AssetDb::copyIn(const fs::path& file, bool force) {
+u64 stampOf(const fs::path& sourceRoot, const SourceRecord& r) {
+    const fs::path main = sourceRoot / PathFromUtf8(r.path);
+    u64 stamp = fileStamp(main);
+    for (const std::string& f : r.files) stamp = HashBytes(&stamp, sizeof(stamp), fileStamp(main.parent_path() / PathFromUtf8(f)));
+    return stamp;
+}
+
+u64 contentHashOf(const fs::path& sourceRoot, const SourceRecord& r) {
+    const fs::path main = sourceRoot / PathFromUtf8(r.path);
+    std::vector<u8> bytes;
+    ReadFileBytes(main, bytes);
+    u64 h = HashBytes(bytes, 0);
+    for (const std::string& f : r.files) {
+        ReadFileBytes(main.parent_path() / PathFromUtf8(f), bytes);
+        h = HashBytes(bytes, h);
+    }
+    return h;
+}
+
+} // namespace
+
+// What a finished worker hands back to the main thread.
+struct AssetDb::Outcome {
     ImportResult result;
+    SourceRecord record; // the new record when `store`
+    bool store = false;  // commit: replace the stored record, write the .meta, refresh the index
+    bool failed = false;
+    u64 failedStamp = 0;
+};
+
+namespace {
+
+struct CopyOutcome {
+    bool ok = false;
+    std::string error;
+    std::string destRel;
+};
+
+// Copies a dropped file and the files it references into <sourceRoot>/imported/<name>/.
+CopyOutcome runCopy(const ImportContext& ctx, const fs::path& file) {
+    CopyOutcome out;
     const SourceFormat fmt = DetectSourceFormat(file);
     if (fmt == SourceFormat::Unknown) {
-        result.error = "unsupported file type: " + toUtf8(file.filename());
-        return result;
+        out.error = "unsupported file type: " + PathToUtf8(file.filename());
+        return out;
     }
     std::error_code ec;
     if (!fs::exists(file, ec)) {
-        result.error = "file not found: " + toUtf8(file);
-        return result;
+        out.error = "file not found: " + PathToUtf8(file);
+        return out;
     }
 
-    // Parse once at the original location to learn which files the source references.
+    // Parse once at the original location to learn which files the source references. (Images stay
+    // encoded in the parse, so this is cheap: no decoding, no cooking.)
     std::vector<fs::path> files{file};
     if (fmt != SourceFormat::Image) {
         ImportedScene scene;
         std::string error;
         const bool ok = fmt == SourceFormat::Gltf ? ImportGltf(file, scene, error) : ImportFbx(file, scene, error);
         if (!ok) {
-            result.error = error;
-            return result;
+            out.error = error;
+            return out;
         }
         for (const fs::path& f : scene.externalFiles) files.push_back(fs::weakly_canonical(f, ec));
     }
@@ -276,46 +322,44 @@ ImportResult AssetDb::copyIn(const fs::path& file, bool force) {
         }
     }
     if (base.empty()) {
-        result.error = "the file and the files it references share no common folder";
-        return result;
+        out.error = "the file and the files it references share no common folder";
+        return out;
     }
 
-    const fs::path destDir = m_desc.sourceRoot / "imported" / file.stem();
+    const fs::path destDir = ctx.sourceRoot / "imported" / file.stem();
     fs::path destMain;
     for (const fs::path& f : files) {
         const fs::path dest = destDir / f.lexically_relative(base);
         fs::create_directories(dest.parent_path(), ec);
         fs::copy_file(f, dest, fs::copy_options::overwrite_existing, ec);
         if (ec) {
-            result.error = "cannot copy " + toUtf8(f) + ": " + ec.message();
-            return result;
+            out.error = "cannot copy " + PathToUtf8(f) + ": " + ec.message();
+            return out;
         }
         if (f == files.front()) destMain = dest;
     }
-    return importSource(toUtf8(destMain.lexically_relative(m_desc.sourceRoot)), force);
+    out.destRel = PathToUtf8(destMain.lexically_relative(ctx.sourceRoot));
+    out.ok = true;
+    return out;
 }
 
-ImportResult AssetDb::importSource(const std::string& relPath, bool force) {
-    ImportResult result;
+AssetDb::Outcome runImport(const ImportContext& ctx, const std::string& relPath, SourceRecord record, bool known, bool force) {
+    AssetDb::Outcome outcome;
+    ImportResult& result = outcome.result;
     result.sourcePath = relPath;
-    const fs::path full = m_desc.sourceRoot / fromUtf8(relPath);
+    const fs::path full = ctx.sourceRoot / PathFromUtf8(relPath);
     const SourceFormat fmt = DetectSourceFormat(full);
     if (fmt == SourceFormat::Unknown) {
         result.error = "unsupported file type: " + relPath;
-        return result;
+        return outcome;
     }
     std::error_code ec;
     if (!fs::exists(full, ec)) {
         result.error = "file not found: " + relPath;
-        return result;
+        return outcome;
     }
 
-    SourceRecord record;
-    const auto existing = m_sources.find(relPath);
-    const bool known = existing != m_sources.end();
-    if (known) {
-        record = existing->second;
-    } else {
+    if (!known) {
         record.guid = GenerateAssetId();
         record.path = relPath;
         record.settings.textureRole = "auto";
@@ -331,35 +375,23 @@ ImportResult AssetDb::importSource(const std::string& relPath, bool force) {
             if (s.kind == AssetKind::Prefab) result.prefab = s.guid;
         }
     };
-    auto contentHash = [&](const SourceRecord& r) {
-        const fs::path main = m_desc.sourceRoot / fromUtf8(r.path);
-        std::vector<u8> bytes;
-        u64 h = 0;
-        ReadFileBytes(main, bytes);
-        h = HashBytes(bytes, h);
-        for (const std::string& f : r.files) {
-            ReadFileBytes(main.parent_path() / fromUtf8(f), bytes);
-            h = HashBytes(bytes, h);
-        }
-        return h;
-    };
 
     // Up to date? Cheap checks first: stamp, then content hash.
     if (known && !force && record.importerVersion == kImporterVersion) {
         bool cooked = true;
         for (const SubAssetRecord& s : record.subAssets)
-            if (!s.tombstone && !fs::exists(cachedFile(s.guid, s.kind), ec)) cooked = false;
+            if (!s.tombstone && !fs::exists(cacheFileOf(ctx.cacheRoot, s.guid, s.kind), ec)) cooked = false;
         if (cooked) {
-            const u64 stamp = computeStamp(record);
-            if (stamp == record.stamp || contentHash(record) == record.contentHash) {
+            const u64 stamp = stampOf(ctx.sourceRoot, record);
+            if (stamp == record.stamp || contentHashOf(ctx.sourceRoot, record) == record.contentHash) {
                 if (stamp != record.stamp) {
                     record.stamp = stamp;
-                    saveMeta(record);
-                    existing->second.stamp = stamp;
+                    outcome.record = record;
+                    outcome.store = true;
                 }
                 fillResult(record);
                 result.upToDate = true;
-                return result;
+                return outcome;
             }
         }
     }
@@ -371,17 +403,18 @@ ImportResult AssetDb::importSource(const std::string& relPath, bool force) {
                                                    : ImportImageFile(full, scene, error);
     if (!parsed) {
         result.error = error;
-        m_failedStamps[relPath] = computeStamp(record);
-        return result;
+        outcome.failed = true;
+        outcome.failedStamp = stampOf(ctx.sourceRoot, record);
+        return outcome;
     }
-    m_failedStamps.erase(relPath);
 
     auto idFor = [&](AssetKind kind, const std::string& key) {
         for (const SubAssetRecord& s : record.subAssets)
             if (s.kind == kind && s.key == key) return s.guid;
         return DeriveAssetId(record.guid, std::string(AssetKindName(kind)) + ":" + key);
     };
-    std::vector<CookedAsset> cooked = CookScene(scene, record.settings, idFor, fmt == SourceFormat::Image);
+    std::vector<std::string> cookWarnings;
+    std::vector<CookedAsset> cooked = CookScene(scene, record.settings, idFor, fmt == SourceFormat::Image, ctx.jobs, &cookWarnings);
 
     // Update the sub-asset table: reuse records by (kind, key); anything not produced this time becomes a tombstone.
     std::vector<SubAssetRecord> previous = std::move(record.subAssets);
@@ -402,54 +435,257 @@ ImportResult AssetDb::importSource(const std::string& relPath, bool force) {
                                             [&](const SubAssetRecord& s) { return s.kind == old.kind && s.key == old.key; });
         if (stillThere) continue;
         if (!old.tombstone) {
-            fs::remove(cachedFile(old.guid, old.kind), ec);
+            fs::remove(cacheFileOf(ctx.cacheRoot, old.guid, old.kind), ec);
             result.changed.push_back(old.guid);
         }
         old.tombstone = true;
         record.subAssets.push_back(std::move(old));
-        m_assets.erase(record.subAssets.back().guid);
-        m_deps.erase(record.subAssets.back().guid);
     }
 
     for (const CookedAsset& c : cooked) {
-        const fs::path out = cachedFile(c.guid, c.kind);
+        const fs::path out = cacheFileOf(ctx.cacheRoot, c.guid, c.kind);
         if (sameBytes(out, c.bytes)) continue;
         if (!WriteFileBytes(out, c.bytes)) {
-            result.error = "cannot write " + toUtf8(out);
-            return result;
+            result.error = "cannot write " + PathToUtf8(out);
+            outcome.failed = true;
+            return outcome;
         }
         result.changed.push_back(c.guid);
     }
 
     record.files.clear();
-    for (const fs::path& f : scene.externalFiles) record.files.push_back(toUtf8(f.lexically_relative(full.parent_path())));
+    for (const fs::path& f : scene.externalFiles) record.files.push_back(PathToUtf8(f.lexically_relative(full.parent_path())));
     record.importerVersion = kImporterVersion;
-    record.contentHash = contentHash(record);
-    record.stamp = computeStamp(record);
-    saveMeta(record);
-    indexSource(record);
+    record.contentHash = contentHashOf(ctx.sourceRoot, record);
+    record.stamp = stampOf(ctx.sourceRoot, record);
     fillResult(record);
     result.warnings = std::move(scene.warnings);
-    m_sources[relPath] = std::move(record);
-    return result;
+    result.warnings.insert(result.warnings.end(), cookWarnings.begin(), cookWarnings.end());
+    outcome.record = std::move(record);
+    outcome.store = true;
+    return outcome;
+}
+
+} // namespace
+
+// ---- the queue ------------------------------------------------------------------------------------
+
+struct AssetDb::Async {
+    struct Task {
+        ImportTicket ticket = 0;
+        enum class Stage { Copy, Import } stage = Stage::Import;
+        fs::path external;   // Copy: the dropped file
+        std::string relPath; // Import: source-root relative
+        bool force = false;
+        std::string display;
+    };
+    struct Running {
+        Task task;
+        ImportContext ctx;
+        SourceRecord snapshot; // Import
+        bool known = false;
+        CopyOutcome copy;
+        Outcome outcome;
+        JobCounter counter;
+    };
+
+    std::deque<Task> queue;
+    std::unique_ptr<Running> running; // one import at a time: each one is already parallel inside
+    std::vector<ImportResult> finished;
+    ImportTicket nextTicket = 1;
+};
+
+AssetDb::AssetDb(AssetDbDesc desc) : m_desc(std::move(desc)), m_async(std::make_unique<Async>()) {}
+
+AssetDb::~AssetDb() {
+    if (m_async && m_async->running && m_desc.jobs) m_desc.jobs->wait(m_async->running->counter);
+}
+
+ImportTicket AssetDb::enqueue(const fs::path& external, const std::string& relPath, bool force, std::string display) {
+    Async::Task t;
+    t.ticket = m_async->nextTicket++;
+    t.stage = external.empty() ? Async::Task::Stage::Import : Async::Task::Stage::Copy;
+    t.external = external;
+    t.relPath = relPath;
+    t.force = force;
+    t.display = std::move(display);
+    const ImportTicket ticket = t.ticket;
+    m_async->queue.push_back(std::move(t));
+    dispatch();
+    return ticket;
+}
+
+// Starts the next queued task if nothing is running.
+void AssetDb::dispatch() {
+    Async& a = *m_async;
+    if (a.running || a.queue.empty()) return;
+    a.running = std::make_unique<Async::Running>();
+    Async::Running& r = *a.running;
+    r.task = std::move(a.queue.front());
+    a.queue.pop_front();
+    r.ctx = {m_desc.sourceRoot, m_desc.cacheRoot, m_desc.jobs};
+    if (r.task.stage == Async::Task::Stage::Import) {
+        const auto it = m_sources.find(r.task.relPath);
+        r.known = it != m_sources.end();
+        if (r.known) r.snapshot = it->second;
+    }
+    auto body = [](void* p) {
+        auto* run = static_cast<Async::Running*>(p);
+        if (run->task.stage == Async::Task::Stage::Copy) run->copy = runCopy(run->ctx, run->task.external);
+        else run->outcome = runImport(run->ctx, run->task.relPath, run->snapshot, run->known, run->task.force);
+    };
+    if (m_desc.jobs && m_desc.jobs->workerCount() > 0) {
+        m_desc.jobs->submit(body, &r, r.counter, JobPriority::Low);
+    } else {
+        body(&r); // no workers: inline, finished by the next poll
+    }
+}
+
+void AssetDb::commit(Outcome& o, ImportResult& result) {
+    result = std::move(o.result);
+    const std::string& rel = result.sourcePath;
+    if (o.failed) {
+        m_failedStamps[rel] = o.failedStamp;
+        return;
+    }
+    if (!result.ok) return;
+    m_failedStamps.erase(rel);
+    if (!o.store) return;
+    // Entries of the previous record leave the index first: sub-assets that became tombstones must disappear.
+    if (const auto old = m_sources.find(rel); old != m_sources.end())
+        for (const SubAssetRecord& s : old->second.subAssets) {
+            m_assets.erase(s.guid);
+            m_deps.erase(s.guid);
+        }
+    saveMeta(o.record);
+    indexSource(o.record);
+    m_sources[rel] = std::move(o.record);
+}
+
+std::vector<ImportResult> AssetDb::pollImports() {
+    Async& a = *m_async;
+    std::vector<ImportResult> done = std::move(a.finished);
+    a.finished.clear();
+    // Several tasks can finish within one poll (Copy -> Import chain, inline mode), so loop.
+    for (;;) {
+        if (!a.running) {
+            if (a.queue.empty()) break;
+            dispatch();
+            if (!a.running) break;
+        }
+        if (a.running->counter.pending.load(std::memory_order_acquire) != 0) break;
+        std::unique_ptr<Async::Running> r = std::move(a.running);
+        if (r->task.stage == Async::Task::Stage::Copy) {
+            if (r->copy.ok) {
+                // Second half: import the copy, same ticket, ahead of anything queued.
+                Async::Task next;
+                next.ticket = r->task.ticket;
+                next.stage = Async::Task::Stage::Import;
+                next.relPath = r->copy.destRel;
+                next.force = r->task.force;
+                next.display = r->task.display;
+                a.queue.push_front(std::move(next));
+            } else {
+                ImportResult res;
+                res.ticket = r->task.ticket;
+                res.displayName = r->task.display;
+                res.error = r->copy.error;
+                done.push_back(std::move(res));
+            }
+        } else {
+            ImportResult res;
+            commit(r->outcome, res);
+            res.ticket = r->task.ticket;
+            res.displayName = r->task.display;
+            done.push_back(std::move(res));
+        }
+    }
+    return done;
+}
+
+bool AssetDb::importsPending() const { return m_async->running || !m_async->queue.empty(); }
+
+std::vector<std::string> AssetDb::pendingImportNames() const {
+    std::vector<std::string> names;
+    if (m_async->running) names.push_back(m_async->running->task.display);
+    for (const Async::Task& t : m_async->queue) names.push_back(t.display);
+    return names;
+}
+
+ImportResult AssetDb::waitFor(ImportTicket ticket) {
+    Async& a = *m_async;
+    for (;;) {
+        std::vector<ImportResult> done = pollImports();
+        ImportResult mine;
+        bool found = false;
+        for (ImportResult& r : done) {
+            if (!found && r.ticket == ticket) {
+                mine = std::move(r);
+                found = true;
+            } else {
+                a.finished.push_back(std::move(r));
+            }
+        }
+        if (found) return mine;
+        if (!a.running && a.queue.empty()) {
+            mine.ticket = ticket;
+            mine.error = "import was lost"; // cannot happen; keeps the loop finite
+            return mine;
+        }
+        if (a.running && m_desc.jobs) m_desc.jobs->wait(a.running->counter);
+    }
+}
+
+std::vector<ImportResult> AssetDb::waitForImports() {
+    Async& a = *m_async;
+    std::vector<ImportResult> all;
+    for (;;) {
+        for (ImportResult& r : pollImports()) all.push_back(std::move(r));
+        if (!a.running && a.queue.empty()) break;
+        if (a.running && m_desc.jobs) m_desc.jobs->wait(a.running->counter);
+    }
+    return all;
+}
+
+ImportTicket AssetDb::beginImport(const fs::path& file, bool force) {
+    const std::string display = PathToUtf8(file.filename());
+    if (file.is_relative()) return enqueue({}, PathToUtf8(file), force, display);
+    std::error_code ec;
+    const fs::path root = fs::weakly_canonical(m_desc.sourceRoot, ec);
+    const fs::path abs = fs::weakly_canonical(file, ec);
+    const fs::path rel = abs.lexically_relative(root);
+    if (!rel.empty() && *rel.begin() != "..") return enqueue({}, PathToUtf8(rel), force, display);
+    return enqueue(abs, {}, force, display);
+}
+
+ImportResult AssetDb::importFile(const fs::path& file, bool force) { return waitFor(beginImport(file, force)); }
+
+ImportResult AssetDb::importSourceBlocking(const std::string& relPath, bool force) {
+    return waitFor(enqueue({}, relPath, force, relPath));
+}
+
+std::vector<ImportTicket> AssetDb::beginReimportChanged() {
+    std::vector<ImportTicket> tickets;
+    std::error_code ec;
+    for (const auto& [path, record] : m_sources) {
+        if (!fs::exists(m_desc.sourceRoot / PathFromUtf8(path), ec)) continue;
+        const u64 stamp = stampOf(m_desc.sourceRoot, record);
+        if (stamp == record.stamp) continue;
+        if (const auto failed = m_failedStamps.find(path); failed != m_failedStamps.end() && failed->second == stamp) continue;
+        // Already queued or running for this source: that import reads the newest files when it starts,
+        // so do not pile up duplicates.
+        bool busy = m_async->running && m_async->running->task.relPath == path;
+        for (const Async::Task& t : m_async->queue) busy = busy || t.relPath == path;
+        if (!busy) tickets.push_back(enqueue({}, path, false, path));
+    }
+    return tickets;
 }
 
 std::vector<ImportResult> AssetDb::reimportChanged() {
+    beginReimportChanged();
     std::vector<ImportResult> results;
-    std::vector<std::string> paths;
-    paths.reserve(m_sources.size());
-    for (const auto& [path, record] : m_sources) paths.push_back(path);
-    std::error_code ec;
-    for (const std::string& path : paths) {
-        const SourceRecord& record = m_sources.at(path);
-        if (!fs::exists(m_desc.sourceRoot / fromUtf8(path), ec)) continue;
-        const u64 stamp = computeStamp(record);
-        if (stamp == record.stamp) continue;
-        if (const auto failed = m_failedStamps.find(path); failed != m_failedStamps.end() && failed->second == stamp) continue;
-        ImportResult r = importSource(path, false);
-        if (!r.ok) m_failedStamps[path] = stamp;
+    for (ImportResult& r : waitForImports())
         if (!r.upToDate) results.push_back(std::move(r));
-    }
     return results;
 }
 
@@ -460,8 +696,9 @@ ImportResult AssetDb::setImportSettings(const std::string& sourcePath, const Imp
         r.error = "unknown source: " + sourcePath;
         return r;
     }
+    waitForImports(); // nothing may be in flight for the record we are about to edit
     it->second.settings = settings;
-    return importSource(sourcePath, true);
+    return importSourceBlocking(sourcePath, true);
 }
 
 ImportResult AssetDb::remapSubAsset(const std::string& sourcePath, const std::string& oldKey, const std::string& newKey) {
@@ -471,6 +708,7 @@ ImportResult AssetDb::remapSubAsset(const std::string& sourcePath, const std::st
         r.error = "unknown source: " + sourcePath;
         return r;
     }
+    waitForImports();
     SourceRecord& record = it->second;
     auto find = [&](const std::string& key, bool tombstone) {
         return std::find_if(record.subAssets.begin(), record.subAssets.end(),
@@ -489,7 +727,7 @@ ImportResult AssetDb::remapSubAsset(const std::string& sourcePath, const std::st
     newIt->guid = oldIt->guid; // the reimport below cooks everything again against this id
     record.subAssets.erase(oldIt);
     saveMeta(record);
-    return importSource(sourcePath, true);
+    return importSourceBlocking(sourcePath, true);
 }
 
 void AssetDb::pruneTombstones(const std::string& sourcePath) {

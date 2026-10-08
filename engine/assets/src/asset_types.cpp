@@ -18,7 +18,7 @@ constexpr u32 kMaxMips = 24;
 constexpr u32 kMeshVersion = 1;
 constexpr u32 kMaterialVersion = 1;
 constexpr u32 kTextureVersion = 1;
-constexpr u32 kPrefabVersion = 1;
+constexpr u32 kPrefabVersion = 2; // 2: nodes carry submeshSlots
 constexpr u32 kVariantVersion = 1;
 
 u32 mipTag(u32 level) { return FourCC('M', 'I', 'P', static_cast<char>(level)); }
@@ -269,7 +269,11 @@ std::vector<u8> SerializeTexture(const TextureAsset& t, AssetId id) {
 
     ContainerWriter c(static_cast<u32>(AssetKind::Texture), kTextureVersion, id);
     c.addChunk(kTagMeta, w.bytes());
-    for (size_t i = 0; i < t.mips.size() && i < kMaxMips; ++i) c.addChunk(mipTag(static_cast<u32>(i)), t.mips[i].data, ChunkCodec::Lz4);
+    // Block compressed data is already dense (LZ4 gains a few percent at best and costs a full extra copy of
+    // every mip); only raw RGBA8 mips are worth compressing.
+    const bool block = t.format != TexelFormat::Rgba8Unorm && t.format != TexelFormat::Rgba8Srgb;
+    for (size_t i = 0; i < t.mips.size() && i < kMaxMips; ++i)
+        c.addChunk(mipTag(static_cast<u32>(i)), t.mips[i].data, block ? ChunkCodec::None : ChunkCodec::Lz4);
     c.addChunk(kTagDeps, deps({}));
     return c.finish();
 }
@@ -314,6 +318,25 @@ bool DeserializeTexture(const ContainerReader& reader, TextureAsset& out, u32 fi
     return true;
 }
 
+bool ReadTextureInfo(const ContainerReader& reader, TextureInfo& out) {
+    if (!checkHeader(reader, AssetKind::Texture, kTextureVersion, nullptr)) return false;
+    std::vector<u8> meta;
+    if (!readMeta(reader, meta, nullptr)) return false;
+    ByteReader r(meta);
+    r.getString();
+    const u8 role = r.get<u8>();
+    const u8 format = r.get<u8>();
+    TextureInfo info;
+    info.width = r.get<u32>();
+    info.height = r.get<u32>();
+    info.mipCount = r.get<u32>();
+    if (!r.ok() || role > static_cast<u8>(TextureRole::Data) || format > static_cast<u8>(TexelFormat::Bc4Unorm)) return false;
+    info.role = static_cast<TextureRole>(role);
+    info.format = static_cast<TexelFormat>(format);
+    out = info;
+    return true;
+}
+
 // ---- prefab --------------------------------------------------------------------------------
 
 std::string PrefabAsset::nodePath(u32 index) const {
@@ -352,6 +375,8 @@ std::vector<u8> SerializePrefab(const PrefabAsset& p, AssetId id) {
         w.putId(n.mesh);
         w.put<u32>(static_cast<u32>(n.materials.size()));
         for (const AssetId& m : n.materials) w.putId(m);
+        w.put<u32>(static_cast<u32>(n.submeshSlots.size()));
+        for (u32 slot : n.submeshSlots) w.put<u32>(slot);
         refs.push_back(n.mesh);
         refs.insert(refs.end(), n.materials.begin(), n.materials.end());
     }
@@ -379,6 +404,10 @@ bool DeserializePrefab(const ContainerReader& reader, PrefabAsset& out, std::str
         n.mesh = r.getId();
         const u32 slots = r.getCount(16);
         for (u32 s = 0; s < slots; ++s) n.materials.push_back(r.getId());
+        if (reader.typeVersion() >= 2) {
+            const u32 subs = r.getCount(4);
+            for (u32 s = 0; s < subs; ++s) n.submeshSlots.push_back(r.get<u32>());
+        }
         if (!r.ok()) break;
         if (n.parent >= static_cast<i32>(i) || n.parent < -1) return setError(error, "prefab node parent out of order");
         p.nodes.push_back(std::move(n));

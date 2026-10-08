@@ -57,7 +57,8 @@ private:
         } else {
             ImportedImage image;
             std::string error;
-            if (import_util::decodeImage(bytes.data(), bytes.size(), image, error)) {
+            if (import_util::probeImage(bytes.data(), bytes.size(), error)) {
+                image.encoded = std::move(bytes);
                 image.name = PathFromUtf8(label).stem().string();
                 if (image.name.empty()) image.name = "image" + std::to_string(m_out.images.size());
                 image.key = import_util::uniqueKey(m_imageKeys, image.name, "image" + std::to_string(m_out.images.size()));

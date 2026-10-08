@@ -3,6 +3,7 @@
 // Helpers shared by the importers and the cook step. Private to the assets module.
 
 #include <filesystem>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -22,8 +23,22 @@ void generateNormals(ImportedMesh& mesh);
 // Per-vertex tangents from UV derivatives (needs normals); handedness in w.
 void generateTangents(ImportedMesh& mesh);
 
-// Decodes an encoded image (png/jpg/tga/bmp/...) to RGBA8. False with `error` on failure.
-bool decodeImage(const u8* data, size_t size, ImportedImage& out, std::string& error);
+struct StbFree {
+    void operator()(u8* p) const;
+};
+
+// Decoded pixels stay in the buffer the decoder allocated: a 4K image is 64 MB, and copying it into a vector
+// would double the allocation traffic (and the page-fault storm that comes with it) for nothing.
+struct DecodedImage {
+    u32 width = 0;
+    u32 height = 0;
+    std::unique_ptr<u8, StbFree> pixels; // RGBA8, width * height * 4 bytes
+};
+
+// Decodes an encoded image (png/jpg/tga/bmp/...) to RGBA8. False with `error` on failure. Thread safe.
+bool decodeImage(const u8* data, size_t size, DecodedImage& out, std::string& error);
+// Checks that the header is a supported image without decoding it (importers use this to fail early).
+bool probeImage(const u8* data, size_t size, std::string& error);
 
 // Merges identical vertices (FBX gives one vertex per face corner).
 void weldVertices(ImportedMesh& mesh);

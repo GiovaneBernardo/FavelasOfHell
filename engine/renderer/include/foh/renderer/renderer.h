@@ -38,12 +38,48 @@ class ShaderLibrary;
 class Swapchain;
 struct RgTexture;
 
+// Texel formats of cooked textures (same values as foh::TexelFormat in the asset system).
+enum class TextureFormat : u8 { Rgba8Unorm, Rgba8Srgb, Bc7Unorm, Bc7Srgb, Bc5Unorm, Bc4Unorm };
+
+// A cooked texture on its way to the GPU: the whole mip chain, largest first, each mip exactly as the format
+// stores it (BC blocks or RGBA8 rows). Block formats need a width and height that are multiples of 4.
+struct TextureUpload {
+    AssetId id;
+    TextureFormat format = TextureFormat::Rgba8Unorm;
+    u32 width = 0;
+    u32 height = 0;
+    std::vector<std::vector<u8>> mips;
+};
+
+struct TextureStats {
+    u32 resident = 0;
+    u32 queued = 0;
+    u64 residentBytes = 0;
+    u64 queuedBytes = 0;
+};
+
+// glTF metallic-roughness material. Texture references are asset ids; a texture that is not resident yet
+// (or was never uploaded) shows as white / flat normal until it arrives.
+struct MaterialParams {
+    Vec4 baseColor{1.0f};
+    Vec3 emissive{0.0f}; // reserved: the G-buffer has no emissive target yet
+    f32 metallic = 0.0f;
+    f32 roughness = 0.8f;
+    f32 normalScale = 1.0f;
+    f32 occlusionStrength = 1.0f;
+    f32 alphaCutoff = 0.5f;
+    bool alphaMask = false; // alpha-tested (also used for blended materials: there is no transparent pass yet)
+    bool doubleSided = false;
+    AssetId baseColorTexture, normalTexture, metalRoughTexture, occlusionTexture, emissiveTexture;
+};
+
 // CPU geometry of an imported mesh. All spans index the same vertices; normals and uvs
 // may be empty (up vector / zero).
 struct MeshGeometry {
     std::span<const Vec3> positions;
     std::span<const Vec3> normals;
     std::span<const Vec2> uvs;
+    std::span<const Vec4> tangents; // xyz + bitangent sign; may be empty (normal maps then look flat-shaded)
     std::span<const u32> indices;
 };
 // A draw range inside MeshGeometry::indices (one per submesh; MeshRenderer::submesh picks it).
@@ -110,6 +146,8 @@ struct RendererDesc {
     // ones are split into groups recorded in parallel. 1 puts every pass in its own command
     // list (QA: exercises the cross-command-list barrier planning).
     u32 minPassesPerGroup = 4;
+    // Imported textures are uploaded in the background: at most this many bytes of texture data per frame.
+    u64 textureUploadBudget = 32ull << 20;
     // Sun shadows: four cascades of shadowCascadeSize^2 texels (one 2x2 atlas per viewport).
     u32 shadowCascadeSize = 2048;
     f32 shadowDistance = 400.0f; // meters from the camera; farther surfaces are unshadowed
@@ -150,6 +188,18 @@ public:
     bool uploadMeshAsset(const AssetId& asset, const MeshGeometry& geometry, std::span<const MeshIndexRange> submeshes);
     void releaseMeshAsset(const AssetId& asset);
     bool hasMeshAsset(const AssetId& asset) const;
+
+    // ---- imported textures and materials ----
+    // Queues a texture for upload (replaces an earlier one with the same id: hot reload). It becomes visible
+    // once fully resident, a few frames later for big textures. False if the data is malformed.
+    bool uploadTexture(TextureUpload&& upload);
+    void releaseTexture(const AssetId& id);
+    bool hasTexture(const AssetId& id) const; // resident (usable), not merely queued
+    // Creates or updates a material. MeshRenderer::material = `id` then draws with it.
+    void setMaterial(const AssetId& id, const MaterialParams& params);
+    void releaseMaterial(const AssetId& id);
+    bool hasMaterial(const AssetId& id) const;
+    TextureStats textureStats() const;
 
     // ---- scenes ----
     SceneId createScene(const char* name);

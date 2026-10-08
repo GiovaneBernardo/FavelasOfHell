@@ -38,6 +38,9 @@ A serious open-world Brazilian crime game on a custom C++20 engine (own renderer
 - Logging/asserts: use engine logging macros; assert on invariants; no `printf`/`std::cout`.
 - Comments explain *why*, not *what*. Match the density of surrounding code.
 - Shaders live in `/shaders` (Slang; every entry point is compiled by `shaders/CMakeLists.txt` into `<bin>/shaders`, register new ones there), are hot reloaded by `ShaderLibrary`, and share common headers for structs mirrored on the CPU (keep layouts in sync with static asserts, see `ViewConstants`).
+- Transforms: write `Transform` (local to the parent), read `GlobalTransform` (world, computed every frame). Code that writes component data in place through `World::get` must call `World::markModified<T>(entity)`, otherwise change-driven systems (transform propagation) do not see it. Writes through `Query` references and `insert` are tracked automatically.
+- Background work (imports, decoding, anything over a few milliseconds that is not needed this frame) goes on the job system with `JobPriority::Low`; never run it on the main thread, and mind memory churn: allocating and freeing hundreds of MB while the game runs stalls the other threads (see ADR 0006).
+- Materials and textures reach the GPU through `Renderer::setMaterial` / `uploadTexture` (queued under a byte budget) and are referenced by asset id (`MeshRenderer::material`), never by renderer-local ids.
 - Rendering: scene data reaches the renderer only through ECS extraction plugins into `RenderScene` snapshots. New render features add passes to the viewport graph (declare every resource a pass touches; pass bodies must be safe to run on any recording thread) instead of calling NVRHI from elsewhere. Depth is reverse-Z (ADR 0003).
 
 ## Build and test

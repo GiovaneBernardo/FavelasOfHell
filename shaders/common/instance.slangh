@@ -1,5 +1,5 @@
 // Position-only view of the instanced mesh vertex streams, for the depth-only passes.
-// The normal/uv/color/entity attributes of the shared input layout are not read.
+// The normal/tangent/color/entity attributes of the shared input layout are not read.
 #pragma once
 
 struct DepthVSIn {
@@ -11,6 +11,28 @@ struct DepthVSIn {
 };
 
 float4 instanceWorldPosition(DepthVSIn i)
+{
+    float4 p = float4(i.position, 1.0);
+    return float4(dot(i.row0, p), dot(i.row1, p), dot(i.row2, p), 1.0);
+}
+
+// Alpha-masked geometry additionally needs the uv and the material to test the texture alpha.
+struct MaskedVSIn {
+    float3 position : POSITION;
+    float2 uv : TEXCOORD0;
+    float4 row0 : INSTANCE0;
+    float4 row1 : INSTANCE1;
+    float4 row2 : INSTANCE2;
+    uint material : MATERIAL;
+};
+
+struct MaskedVSOut {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    nointerpolation uint material : TEXCOORD1;
+};
+
+float4 maskedWorldPosition(MaskedVSIn i)
 {
     float4 p = float4(i.position, 1.0);
     return float4(dot(i.row0, p), dot(i.row1, p), dot(i.row2, p), 1.0);

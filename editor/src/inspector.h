@@ -63,6 +63,7 @@ private:
     unsigned m_eulerId = 0;
     Vec3 m_euler{0.0f};
     std::vector<ComponentId> m_scratchIds;
+    std::vector<std::byte> m_editBefore; // component bytes before the widgets ran (edit detection)
 };
 
 } // namespace foh

@@ -322,12 +322,17 @@ void EntityInspector::drawComponent(World& world, Entity entity, ComponentId id,
             ImGui::TextDisabled("no FOH_REFLECT: %u bytes, not editable", schema.size);
         } else if (auto* data = static_cast<std::byte*>(world.componentPtr(entity, id))) {
             FieldContext ctx{&world, scenes, &selection, selection.scene, &m_eulerId, &m_euler};
+            // The widgets write straight into component storage. Compare before/after so that ONLY a real edit
+            // is announced (World::markModified): announcing every frame would mark the whole archetype table of
+            // the selected entity as changed and make change-driven systems (transform propagation) redo it.
+            m_editBefore.assign(data, data + schema.size);
             if (ImGui::BeginTable("##fields", 2, ImGuiTableFlags_SizingFixedFit)) {
                 ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthFixed, 110.0f);
                 ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch);
                 for (const SchemaField& f : schema.fields) drawField(ctx, f, data, "", 0);
                 ImGui::EndTable();
             }
+            if (std::memcmp(m_editBefore.data(), data, schema.size) != 0) world.markModified(entity, id);
         }
     }
     ImGui::PopID();

@@ -174,6 +174,7 @@ std::unique_ptr<GraphicsDevice> GraphicsDevice::create(const GraphicsDeviceDesc&
     dd.errorCB = &s.messages;
     dd.pDevice = s.d3dDevice.Get();
     dd.pGraphicsCommandQueue = s.queue.Get();
+    dd.shaderResourceViewHeapSize = 65536; // the bindless texture table alone takes 8192; the default is 16384 in total
     s.rawDevice = nvrhi::d3d12::createDevice(dd);
     if (!s.rawDevice) {
         FOH_ERROR("nvrhi::d3d12::createDevice failed");

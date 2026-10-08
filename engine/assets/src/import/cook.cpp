@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <set>
 
@@ -9,55 +10,6 @@
 namespace foh {
 
 namespace {
-
-// ---- color space ---------------------------------------------------------------------------
-
-const f32* srgbToLinearTable() {
-    static const std::vector<f32> table = [] {
-        std::vector<f32> t(256);
-        for (int i = 0; i < 256; ++i) {
-            const f32 c = static_cast<f32>(i) / 255.0f;
-            t[static_cast<size_t>(i)] = c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
-        }
-        return t;
-    }();
-    return table.data();
-}
-
-u8 linearToSrgb8(f32 v) {
-    v = std::clamp(v, 0.0f, 1.0f);
-    const f32 c = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
-    return static_cast<u8>(c * 255.0f + 0.5f);
-}
-
-TextureMip downsample(const TextureMip& src, bool srgb) {
-    TextureMip dst;
-    dst.width = std::max(src.width / 2, 1u);
-    dst.height = std::max(src.height / 2, 1u);
-    dst.data.resize(static_cast<size_t>(dst.width) * dst.height * 4);
-    const f32* lut = srgbToLinearTable();
-    for (u32 y = 0; y < dst.height; ++y) {
-        for (u32 x = 0; x < dst.width; ++x) {
-            const u32 x0 = std::min(2 * x, src.width - 1), x1 = std::min(2 * x + 1, src.width - 1);
-            const u32 y0 = std::min(2 * y, src.height - 1), y1 = std::min(2 * y + 1, src.height - 1);
-            const u8* taps[4] = {&src.data[(static_cast<size_t>(y0) * src.width + x0) * 4],
-                                 &src.data[(static_cast<size_t>(y0) * src.width + x1) * 4],
-                                 &src.data[(static_cast<size_t>(y1) * src.width + x0) * 4],
-                                 &src.data[(static_cast<size_t>(y1) * src.width + x1) * 4]};
-            u8* out = &dst.data[(static_cast<size_t>(y) * dst.width + x) * 4];
-            for (int c = 0; c < 3; ++c) {
-                if (srgb) {
-                    const f32 sum = lut[taps[0][c]] + lut[taps[1][c]] + lut[taps[2][c]] + lut[taps[3][c]];
-                    out[c] = linearToSrgb8(sum * 0.25f);
-                } else {
-                    out[c] = static_cast<u8>((taps[0][c] + taps[1][c] + taps[2][c] + taps[3][c] + 2) / 4);
-                }
-            }
-            out[3] = static_cast<u8>((taps[0][3] + taps[1][3] + taps[2][3] + taps[3][3] + 2) / 4); // alpha is always linear
-        }
-    }
-    return dst;
-}
 
 // ---- cooking helpers -----------------------------------------------------------------------
 
@@ -69,35 +21,6 @@ TextureRole roleFromSetting(const std::string& setting, const std::string& fileN
 }
 
 const char* roleSuffix(TextureRole r) { return r == TextureRole::Color ? "color" : r == TextureRole::Normal ? "normal" : "data"; }
-
-CookedAsset cookTexture(const ImportedImage& image, TextureRole role, const std::string& key, const ImportSettings& settings,
-                        AssetId guid) {
-    const bool srgb = role == TextureRole::Color;
-    // The full chain is always built: the size cap is "drop the largest mips", and the
-    // no-mips option keeps only the first remaining level.
-    std::vector<TextureMip> chain = BuildMipChain(image.pixels.data(), image.width, image.height, srgb);
-    size_t drop = 0;
-    if (settings.maxTextureSize != 0)
-        while (drop + 1 < chain.size() && std::max(chain[drop].width, chain[drop].height) > settings.maxTextureSize) ++drop;
-    const size_t last = settings.generateMips ? chain.size() : drop + 1;
-
-    TextureAsset tex;
-    tex.name = image.name;
-    tex.role = role;
-    tex.format = srgb ? TexelFormat::Rgba8Srgb : TexelFormat::Rgba8Unorm;
-    tex.mips.assign(std::make_move_iterator(chain.begin() + static_cast<std::ptrdiff_t>(drop)),
-                    std::make_move_iterator(chain.begin() + static_cast<std::ptrdiff_t>(last)));
-    tex.width = tex.mips.front().width;
-    tex.height = tex.mips.front().height;
-
-    CookedAsset out;
-    out.key = key;
-    out.name = image.name;
-    out.kind = AssetKind::Texture;
-    out.guid = guid;
-    out.bytes = SerializeTexture(tex, guid);
-    return out;
-}
 
 struct MeshCook {
     MeshAsset asset;
@@ -149,17 +72,6 @@ MeshCook cookMesh(const ImportedMesh& src) {
 
 } // namespace
 
-std::vector<TextureMip> BuildMipChain(const u8* rgba, u32 width, u32 height, bool srgb) {
-    std::vector<TextureMip> chain;
-    TextureMip base;
-    base.width = width;
-    base.height = height;
-    base.data.assign(rgba, rgba + static_cast<size_t>(width) * height * 4);
-    chain.push_back(std::move(base));
-    while (chain.back().width > 1 || chain.back().height > 1) chain.push_back(downsample(chain.back(), srgb));
-    return chain;
-}
-
 TextureRole GuessTextureRole(const std::string& fileName) {
     std::string s = std::filesystem::path(fileName).stem().string();
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -172,12 +84,23 @@ TextureRole GuessTextureRole(const std::string& fileName) {
 }
 
 std::vector<CookedAsset> CookScene(const ImportedScene& scene, const ImportSettings& settings, const SubAssetIdFn& idFor,
-                                   bool sourceIsTexture) {
+                                   bool sourceIsTexture, JobSystem* jobs, std::vector<std::string>* warnings) {
     std::vector<CookedAsset> out;
 
     // ---- textures ----
-    // One cooked texture per (image, role): the same image can serve as color in one slot and
-    // as data in another, and the two need different formats and mip filtering.
+    // One cooked texture per (image, role): the same image can serve as color in one slot and as data
+    // in another, and the two need different formats and mip filtering. References are resolved first
+    // (cheap, sequential, deterministic); the expensive cooking happens afterwards in one parallel batch.
+    struct TextureJob {
+        i32 image;
+        TextureRole role;
+        std::string key;
+        AssetId guid;
+        CookedAsset result;
+        std::string warning;
+        bool ok = false;
+    };
+    std::vector<TextureJob> textureJobs;
     std::map<std::pair<i32, TextureRole>, AssetId> textureIds;
     auto textureFor = [&](const ImportedTextureRef& ref, TextureRole role) -> TextureRef {
         TextureRef r;
@@ -186,22 +109,58 @@ std::vector<CookedAsset> CookScene(const ImportedScene& scene, const ImportSetti
         const auto key = std::make_pair(ref.image, role);
         auto it = textureIds.find(key);
         if (it == textureIds.end()) {
-            const ImportedImage& image = scene.images[static_cast<size_t>(ref.image)];
-            const std::string subKey = image.key + ":" + roleSuffix(role);
+            const std::string subKey = scene.images[static_cast<size_t>(ref.image)].key + ":" + roleSuffix(role);
             const AssetId guid = idFor(AssetKind::Texture, subKey);
-            out.push_back(cookTexture(image, role, subKey, settings, guid));
+            textureJobs.push_back({ref.image, role, subKey, guid, {}, {}, false});
             it = textureIds.emplace(key, guid).first;
         }
         r.texture = it->second;
         return r;
     };
+    if (sourceIsTexture) {
+        for (size_t i = 0; i < scene.images.size(); ++i) {
+            const ImportedImage& image = scene.images[i];
+            textureJobs.push_back({static_cast<i32>(i), roleFromSetting(settings.textureRole, image.name), image.key,
+                                   idFor(AssetKind::Texture, image.key), {}, {}, false});
+        }
+    }
+
+    // Cooked after the materials below have registered their references.
+    auto cookTextures = [&] {
+        auto cookOne = [&](TextureJob& job) {
+            const ImportedImage& image = scene.images[static_cast<size_t>(job.image)];
+            import_util::DecodedImage decoded;
+            std::string error;
+            if (!import_util::decodeImage(image.encoded.data(), image.encoded.size(), decoded, error)) {
+                job.warning = "image '" + image.name + "': " + error;
+                return;
+            }
+            TextureAsset tex;
+            if (!CookTexture(decoded.pixels.get(), decoded.width, decoded.height, image.name, job.role, settings, jobs, tex,
+                             &job.warning))
+                return;
+            job.result.key = job.key;
+            job.result.name = image.name;
+            job.result.kind = AssetKind::Texture;
+            job.result.guid = job.guid;
+            job.result.bytes = SerializeTexture(tex, job.guid);
+            job.ok = true;
+        };
+        // At most two textures are decoded/compressed at the same time (each one is parallel inside): a 4K image
+        // is 64 MB decoded plus its mips, and a scene with fifty of them must neither hold them all in memory nor
+        // fault in gigabytes of fresh pages at once (which stalls every other thread of the process, the game's too).
+        const u32 count = static_cast<u32>(textureJobs.size());
+        ParallelFor(jobs, count, std::max(1u, (count + 1) / 2), [&](u32 begin, u32 end) {
+            for (u32 i = begin; i < end; ++i) cookOne(textureJobs[i]);
+        });
+        for (TextureJob& job : textureJobs) {
+            if (!job.warning.empty() && warnings) warnings->push_back(job.warning);
+            if (job.ok) out.push_back(std::move(job.result));
+        }
+    };
 
     if (sourceIsTexture) {
-        for (const ImportedImage& image : scene.images) {
-            const TextureRole role = roleFromSetting(settings.textureRole, image.name);
-            const AssetId guid = idFor(AssetKind::Texture, image.key);
-            out.push_back(cookTexture(image, role, image.key, settings, guid));
-        }
+        cookTextures();
         return out;
     }
 
@@ -238,9 +197,12 @@ std::vector<CookedAsset> CookScene(const ImportedScene& scene, const ImportSetti
         out.push_back(std::move(c));
     }
 
+    cookTextures();
+
     // ---- meshes ----
     std::vector<AssetId> meshIds(scene.meshes.size());
     std::vector<std::vector<AssetId>> meshSlotMaterials(scene.meshes.size());
+    std::vector<std::vector<u32>> meshSubmeshSlots(scene.meshes.size());
     for (size_t i = 0; i < scene.meshes.size(); ++i) {
         MeshCook cook = cookMesh(scene.meshes[i]);
         CookedAsset c;
@@ -250,6 +212,7 @@ std::vector<CookedAsset> CookScene(const ImportedScene& scene, const ImportSetti
         c.guid = idFor(AssetKind::Mesh, c.key);
         c.bytes = SerializeMesh(cook.asset, c.guid);
         meshIds[i] = c.guid;
+        for (const SubMesh& sm : cook.asset.subMeshes) meshSubmeshSlots[i].push_back(sm.materialSlot);
         for (i32 mat : cook.slotMaterials)
             meshSlotMaterials[i].push_back(mat >= 0 && static_cast<size_t>(mat) < materialIds.size() ? materialIds[static_cast<size_t>(mat)] : AssetId{});
         out.push_back(std::move(c));
@@ -272,6 +235,7 @@ std::vector<CookedAsset> CookScene(const ImportedScene& scene, const ImportSetti
             if (n.mesh >= 0 && static_cast<size_t>(n.mesh) < scene.meshes.size()) {
                 node.mesh = meshIds[static_cast<size_t>(n.mesh)];
                 node.materials = meshSlotMaterials[static_cast<size_t>(n.mesh)];
+                node.submeshSlots = meshSubmeshSlots[static_cast<size_t>(n.mesh)];
                 c.dependencies.push_back(node.mesh);
                 for (const AssetId& m : node.materials)
                     if (m.isValid()) c.dependencies.push_back(m);

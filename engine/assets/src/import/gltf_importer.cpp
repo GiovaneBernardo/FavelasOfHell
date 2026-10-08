@@ -96,7 +96,8 @@ private:
         if (loadImageBytes(*texture->image, encoded)) {
             ImportedImage image;
             std::string error;
-            if (import_util::decodeImage(encoded.data(), encoded.size(), image, error)) {
+            if (import_util::probeImage(encoded.data(), encoded.size(), error)) {
+                image.encoded = std::move(encoded);
                 image.name = imageName(*texture->image, gltfIndex);
                 image.key = import_util::uniqueKey(m_imageKeys, image.name, "image" + std::to_string(gltfIndex));
                 result = static_cast<i32>(m_out.images.size());

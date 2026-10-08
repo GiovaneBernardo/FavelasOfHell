@@ -93,6 +93,26 @@ std::unique_ptr<Renderer> Renderer::create(const RendererDesc& desc) {
         dl.addItem(nvrhi::BindingLayoutItem::Sampler(0));
         s.gpu.layoutDeferred = dev->createBindingLayout(dl);
 
+        // Passes that sample materials: view constants, the material buffer and one sampler (register space 0),
+        // plus the bindless texture table (register space 1, a layout of its own).
+        nvrhi::BindingLayoutDesc ml;
+        ml.visibility = nvrhi::ShaderType::All;
+        ml.addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(0));
+        ml.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(0));
+        ml.addItem(nvrhi::BindingLayoutItem::Sampler(0));
+        s.gpu.layoutMaterial = dev->createBindingLayout(ml);
+
+        nvrhi::BindlessLayoutDesc bl;
+        bl.setVisibility(nvrhi::ShaderType::All)
+            .setFirstSlot(0)
+            .setMaxCapacity(TextureStore::kCapacity)
+            .addRegisterSpace(nvrhi::BindingLayoutItem::Texture_SRV(1)); // slot = register space
+        s.gpu.layoutBindless = dev->createBindlessLayout(bl);
+
+        nvrhi::SamplerDesc msd;
+        msd.setAllFilters(true).setAllAddressModes(nvrhi::SamplerAddressMode::Wrap).setMaxAnisotropy(8.0f);
+        s.gpu.materialSampler = dev->createSampler(msd);
+
         // NVRHI's D3D12 backend fixes the compare function of a Comparison sampler to LESS:
         // result = (reference < stored depth), i.e. 1 = in shadow with reverse-Z.
         nvrhi::SamplerDesc sd;
@@ -103,7 +123,7 @@ std::unique_ptr<Renderer> Renderer::create(const RendererDesc& desc) {
 
     // Mesh vertex stream 0 + per-instance stream 1 (see mesh_forward.slang).
     {
-        nvrhi::VertexAttributeDesc attrs[5];
+        nvrhi::VertexAttributeDesc attrs[7];
         attrs[0].name = "POSITION";
         attrs[0].format = nvrhi::Format::RGB32_FLOAT;
         attrs[0].offset = offsetof(MeshVertex, position);
@@ -132,9 +152,27 @@ std::unique_ptr<Renderer> Renderer::create(const RendererDesc& desc) {
         attrs[4].bufferIndex = 1;
         attrs[4].elementStride = sizeof(GpuInstance);
         attrs[4].isInstanced = true;
-        s.gpu.meshInput = dev->createInputLayout(attrs, 5, nullptr);
+        attrs[5].name = "TANGENT";
+        attrs[5].format = nvrhi::Format::RGBA8_SNORM;
+        attrs[5].offset = offsetof(MeshVertex, tangent);
+        attrs[5].bufferIndex = 0;
+        attrs[5].elementStride = sizeof(MeshVertex);
+        attrs[6].name = "MATERIAL";
+        attrs[6].format = nvrhi::Format::R32_UINT;
+        attrs[6].offset = offsetof(GpuInstance, material);
+        attrs[6].bufferIndex = 1;
+        attrs[6].elementStride = sizeof(GpuInstance);
+        attrs[6].isInstanced = true;
+        s.gpu.meshInput = dev->createInputLayout(attrs, 7, nullptr);
     }
     s.gpu.meshes = MeshStore::create(dev);
+    if (!s.gpu.textures.init(dev, s.gpu.layoutBindless)) {
+        FOH_ERROR("renderer: cannot create the bindless texture table (descriptor indexing needs D3D12 resource binding tier 3)");
+        return nullptr;
+    }
+    s.gpu.materials.init(dev);
+    s.gpu.materials.upload(dev);
+    s.warmPipelines();
 
     RenderGraphConfig gc;
     gc.jobs = desc.jobs;
@@ -169,6 +207,7 @@ SceneId Renderer::createScene(const char* name) {
     slot.name = name;
     slot.scene = std::make_unique<RenderScene>();
     slot.scene->meshLookup = &m_impl->meshLookup;
+    slot.scene->materialLookup = &m_impl->gpu.materials.lookup();
     m_impl->scenes.push_back(std::move(slot));
     return {m_impl->scenes.back().id};
 }
@@ -193,6 +232,7 @@ bool Renderer::uploadMeshAsset(const AssetId& asset, const MeshGeometry& geometr
     if (!asset.isValid() || vertexCount == 0 || geometry.indices.empty() || submeshes.empty()) return false;
     if (!geometry.normals.empty() && geometry.normals.size() != vertexCount) return false;
     if (!geometry.uvs.empty() && geometry.uvs.size() != vertexCount) return false;
+    if (!geometry.tangents.empty() && geometry.tangents.size() != vertexCount) return false;
     for (const u32 index : geometry.indices) {
         if (index >= vertexCount) return false;
     }
@@ -205,6 +245,14 @@ bool Renderer::uploadMeshAsset(const AssetId& asset, const MeshGeometry& geometr
         vertices[i].position = geometry.positions[i];
         vertices[i].normal = geometry.normals.empty() ? Vec3(0.0f, 1.0f, 0.0f) : geometry.normals[i];
         vertices[i].uv = geometry.uvs.empty() ? Vec2(0.0f) : geometry.uvs[i];
+        if (!geometry.tangents.empty()) {
+            vertices[i].tangent = PackTangent(geometry.tangents[i]);
+        } else {
+            // No tangents: any vector perpendicular to the normal keeps the TBN frame valid.
+            const Vec3 n = vertices[i].normal;
+            const Vec3 axis = std::abs(n.x) < 0.9f ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
+            vertices[i].tangent = PackTangent(Vec4(glm::normalize(axis - n * glm::dot(n, axis)), 1.0f));
+        }
     }
 
     // Replacing (hot reload): the new ranges become visible together, then the old ones are released.
@@ -227,6 +275,24 @@ void Renderer::releaseMeshAsset(const AssetId& asset) {
 }
 
 bool Renderer::hasMeshAsset(const AssetId& asset) const { return m_impl->meshLookup.ids(asset) != nullptr; }
+
+// ---- imported textures and materials ----------------------------------------------------------
+
+bool Renderer::uploadTexture(TextureUpload&& upload) { return m_impl->gpu.textures.enqueue(std::move(upload)); }
+void Renderer::releaseTexture(const AssetId& id) {
+    Impl& s = *m_impl;
+    s.gpu.textures.release(id, s.frame);
+    s.gpu.materials.texturesChanged({id}, s.gpu.textures); // materials fall back to the stand-in
+}
+bool Renderer::hasTexture(const AssetId& id) const { return m_impl->gpu.textures.resident(id); }
+TextureStats Renderer::textureStats() const { return m_impl->gpu.textures.stats(); }
+
+void Renderer::setMaterial(const AssetId& id, const MaterialParams& params) {
+    Impl& s = *m_impl;
+    s.gpu.materials.set(id, params, s.gpu.textures);
+}
+void Renderer::releaseMaterial(const AssetId& id) { m_impl->gpu.materials.remove(id); }
+bool Renderer::hasMaterial(const AssetId& id) const { return m_impl->gpu.materials.contains(id); }
 
 // ---- viewports ----------------------------------------------------------------------------------
 
@@ -367,7 +433,8 @@ GpuInstance packInstance(const ExtractedMesh& m) {
     g.color = m.color;
     g.entityLo = static_cast<u32>(m.entity);
     g.entityHi = static_cast<u32>(m.entity >> 32);
-    g.pad[0] = g.pad[1] = 0;
+    g.material = m.material;
+    g.pad = 0;
     return g;
 }
 
@@ -378,22 +445,32 @@ GpuInstance packInstance(const ExtractedMesh& m) {
 void Renderer::Impl::prepareScene(SceneSlot& slot) {
     const u32 meshCount = gpu.meshes.rangeCount();
     const auto& meshes = slot.scene->read().meshes;
-    auto meshOf = [meshCount](const ExtractedMesh& m) { return m.mesh < meshCount ? m.mesh : 0u; };
+    // One bucket per (draw class, mesh). The class comes from the instance's material.
+    auto keyOf = [&](const ExtractedMesh& m) {
+        const u32 mesh = m.mesh < meshCount ? m.mesh : 0u;
+        return static_cast<u32>(gpu.materials.classOf(m.material)) * meshCount + mesh;
+    };
 
     SceneGpu& packed = slot.gpu;
-    packed.counts.assign(meshCount, 0u);
-    packed.cursor.assign(meshCount, 0u);
-    for (const ExtractedMesh& m : meshes) ++packed.counts[meshOf(m)];
+    const u32 buckets = kDrawClassCount * meshCount;
+    packed.counts.assign(buckets, 0u);
+    packed.cursor.assign(buckets, 0u);
+    for (const ExtractedMesh& m : meshes) ++packed.counts[keyOf(m)];
 
     packed.batches.clear();
     u32 offset = 0;
-    for (u32 mesh = 0; mesh < meshCount; ++mesh) {
-        packed.cursor[mesh] = offset;
-        if (packed.counts[mesh]) packed.batches.push_back({mesh, offset, packed.counts[mesh]});
-        offset += packed.counts[mesh];
+    for (u32 cls = 0; cls < kDrawClassCount; ++cls) {
+        packed.classBegin[cls] = static_cast<u32>(packed.batches.size());
+        for (u32 mesh = 0; mesh < meshCount; ++mesh) {
+            const u32 key = cls * meshCount + mesh;
+            packed.cursor[key] = offset;
+            if (packed.counts[key]) packed.batches.push_back({mesh, offset, packed.counts[key]});
+            offset += packed.counts[key];
+        }
     }
+    packed.classBegin[kDrawClassCount] = static_cast<u32>(packed.batches.size());
     packed.instances.resize(meshes.size());
-    for (const ExtractedMesh& m : meshes) packed.instances[packed.cursor[meshOf(m)]++] = packInstance(m);
+    for (const ExtractedMesh& m : meshes) packed.instances[packed.cursor[keyOf(m)]++] = packInstance(m);
 }
 
 void Renderer::beginFrame() {
@@ -401,7 +478,14 @@ void Renderer::beginFrame() {
     s.device->beginFrame();
     s.frame = s.device->frameNumber();
     s.shaders->pollReload();
-    s.pipelines->collect(s.frame);
+    s.pipelines->collect(s.frame, 3600); // a minute: rarely used variants (masked, double-sided) must not recompile on every use
+    {
+        // Background texture uploads under a byte budget; materials then pick up the new slots.
+        std::vector<AssetId> ready;
+        s.gpu.textures.pump(s.device->nvrhi(), s.frame, s.desc.textureUploadBudget, ready);
+        s.gpu.materials.texturesChanged(ready, s.gpu.textures);
+        s.gpu.materials.upload(s.device->nvrhi());
+    }
     std::erase_if(s.retiredMeshes, [&](const Impl::RetiredMesh& r) {
         if (r.frame + 4 > s.frame) return false;
         s.gpu.meshes.releaseRange(r.id);

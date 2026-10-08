@@ -27,6 +27,22 @@ private:
     const T* m_value;
 };
 
+// State owned by ONE system: default constructed when the system is registered, kept between
+// frames, destroyed with the system. Not part of the world (not saved, not visible to other
+// systems), and any type works (no POD requirement), which makes it the place for caches and
+// scratch memory that must not be reallocated every frame. Declares no access.
+template <class T>
+class Local {
+public:
+    explicit Local(T* value) : m_value(value) {}
+    T& operator*() const { return *m_value; }
+    T* operator->() const { return m_value; }
+    T* get() const { return m_value; }
+
+private:
+    T* m_value;
+};
+
 // Exclusive access to the resource T: no other system touching T runs at the
 // same time.
 template <class T>
@@ -83,6 +99,18 @@ struct SystemParam<Query<Terms...>> {
     }
     static std::string_view prepare(State&, World&) { return {}; }
     static Query<Terms...> fetch(State& s, const RunContext& ctx) { return Query<Terms...>(*s, ctx); }
+    static void finish(State&, World&) {}
+};
+
+template <class T>
+struct SystemParam<Local<T>> {
+    static constexpr bool kDeferred = false;
+    struct State {
+        T value{};
+    };
+    static State init(SystemInit&) { return {}; }
+    static std::string_view prepare(State&, World&) { return {}; }
+    static Local<T> fetch(State& s, const RunContext&) { return Local<T>(&s.value); }
     static void finish(State&, World&) {}
 };
 

@@ -20,7 +20,7 @@ struct ExtractedMesh {
     Mat4 world;
     Vec4 color;
     u32 mesh;
-    u32 pad;
+    u32 material; // renderer material index (0 = default material)
     u64 entity; // Entity::id, for picking
 };
 
@@ -68,6 +68,24 @@ private:
     std::unordered_map<AssetId, std::vector<u32>, AssetIdHash> m_meshes;
 };
 
+// Imported material -> renderer material index. Filled by Renderer::setMaterial, read by the extraction
+// system. An unknown material (not uploaded yet) maps to the default material 0.
+//
+// Thread-safety: same as MeshLookup.
+class FOH_API MaterialLookup {
+public:
+    u32 find(const AssetId& asset) const {
+        const auto it = m_materials.find(asset);
+        return it != m_materials.end() ? it->second : 0u;
+    }
+    bool contains(const AssetId& asset) const { return m_materials.contains(asset); }
+    void set(const AssetId& asset, u32 index) { m_materials[asset] = index; }
+    void erase(const AssetId& asset) { m_materials.erase(asset); }
+
+private:
+    std::unordered_map<AssetId, u32, AssetIdHash> m_materials;
+};
+
 // The renderer's copy of one ECS World's render data. The ECS never exposes its
 // storage to the renderer: a plugin (RenderExtractPlugin) copies what is needed
 // into this object once per frame, and the renderer only ever reads the
@@ -95,6 +113,7 @@ public:
 
     // Set by the renderer that owns this scene; null for scenes without one (tests).
     const MeshLookup* meshLookup = nullptr;
+    const MaterialLookup* materialLookup = nullptr;
 
     // Per-job-thread staging used by the parallel extraction.
     std::vector<ExtractedMesh>& staging(u32 threadSlot) { return m_staging[threadSlot]; }
@@ -117,6 +136,16 @@ struct RenderSceneLink {
 // every App whose world should be renderable; it belongs to the engine, not to a
 // game module.
 FOH_API void RegisterRenderExtract(App& app);
+
+// Registers Transform/GlobalTransform and the systems that keep GlobalTransform current
+// (PostUpdate, before extraction): adds it to entities that have a Transform, then recomputes
+// it for entities whose Transform changed and for everything below them in the hierarchy.
+// RegisterRenderExtract calls this; it is separate so tools and tests can use it alone.
+//
+// Change detection: static entities cost nothing. Writes through Query references and insert()
+// are tracked per archetype table; code that writes in place through World::get must call
+// World::markModified<Transform>(entity) (the editor does).
+FOH_API void RegisterTransformPropagation(App& app);
 
 class RenderExtractPlugin final : public Plugin {
 public:

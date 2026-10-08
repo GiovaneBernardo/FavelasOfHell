@@ -14,6 +14,7 @@
 
 #include "foh/asset_container.h"
 #include "foh/asset_types.h"
+#include "foh/jobs.h"
 #include "foh/math.h"
 #include "foh/platform.h"
 #include "foh/types.h"
@@ -24,6 +25,8 @@ namespace foh {
 struct ImportSettings {
     bool generatePrefab = true; // false: meshes/materials/textures only (kit pieces)
     bool generateMips = true;
+    // BC7 (color, data) / BC5 (normals); falls back to RGBA8 when a side is not a multiple of 4.
+    bool compressTextures = true;
     u32 maxTextureSize = 0;     // 0 = unlimited; larger images are box-filtered down
     // Standalone textures only. "auto" decides from the file name (_n/_normal, _orm/_rough/_ao/...).
     std::string textureRole = "auto";
@@ -38,12 +41,12 @@ struct ImportedVertex {
     Vec2 uv0{0.0f};
 };
 
+// Images stay encoded until the cook step: decoding, mip generation and compression of every
+// texture then run in parallel instead of one after another while the file is parsed.
 struct ImportedImage {
     std::string key;  // stable within the source (file/uri name, else index)
     std::string name;
-    u32 width = 0;
-    u32 height = 0;
-    std::vector<u8> pixels; // RGBA8, as stored in the file (no color space conversion yet)
+    std::vector<u8> encoded; // png/jpg/tga/bmp bytes, decoded by the cook step
 };
 
 struct ImportedTextureRef {
@@ -122,15 +125,24 @@ struct CookedAsset {
 using SubAssetIdFn = std::function<AssetId(AssetKind kind, const std::string& key)>;
 
 // Turns an ImportedScene into container files. `sourceIsTexture` marks a standalone
-// image import (no prefab, role from settings or file name).
+// image import (no prefab, role from settings or file name). With a job system the heavy parts
+// (image decode, mips, block compression) run in parallel; the result does not depend on it.
+// Problems that do not fail the import (an undecodable image) are appended to `warnings`.
 FOH_API std::vector<CookedAsset> CookScene(const ImportedScene& scene, const ImportSettings& settings,
-                                           const SubAssetIdFn& idFor, bool sourceIsTexture);
+                                           const SubAssetIdFn& idFor, bool sourceIsTexture, JobSystem* jobs = nullptr,
+                                           std::vector<std::string>* warnings = nullptr);
 
 // ---- texture processing (exposed for tests and the editor) ---------------------------------
 
 // Builds the full mip chain from RGBA8 pixels. Color textures are averaged in linear
 // light; other roles average the stored values.
-FOH_API std::vector<TextureMip> BuildMipChain(const u8* rgba, u32 width, u32 height, bool srgb);
+FOH_API std::vector<TextureMip> BuildMipChain(const u8* rgba, u32 width, u32 height, bool srgb, JobSystem* jobs = nullptr);
+
+// Cooks one decoded RGBA8 image into a texture asset: size cap, mip chain (normal maps are
+// renormalized per level), then BC7 (color: perceptual weights, data: linear) / BC5 (normals).
+// Deterministic whatever the job system does. `warning` receives a note when it had to fall back to RGBA8.
+FOH_API bool CookTexture(const u8* rgba, u32 width, u32 height, const std::string& name, TextureRole role,
+                         const ImportSettings& settings, JobSystem* jobs, TextureAsset& out, std::string* warning = nullptr);
 FOH_API TextureRole GuessTextureRole(const std::string& fileName);
 
 } // namespace foh

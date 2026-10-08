@@ -168,17 +168,28 @@ struct TonemapData {
 
 // ---- pass bodies ----
 
-// One instanced draw per mesh batch. Shared by the pre-pass, shadows, G-buffer and picking.
-void drawMeshBatches(Impl& s, const nvrhi::ViewportState& viewport, nvrhi::IFramebuffer* fb,
-                     nvrhi::IGraphicsPipeline* pso, nvrhi::IBindingSet* set, nvrhi::ICommandList* cmd,
-                     nvrhi::IBuffer* instances, const SceneGpu& scene) {
+// Batches are grouped by draw class (see material_store.h): opaque single-sided geometry takes the cheapest path
+// everywhere (depth passes without a pixel shader), alpha-masked and double-sided materials get their own pipelines.
+constexpr DrawClass kAllClasses[kDrawClassCount] = {DrawClass::Opaque, DrawClass::Masked, DrawClass::OpaqueDoubleSided,
+                                                    DrawClass::MaskedDoubleSided};
+
+nvrhi::RasterCullMode cullOf(DrawClass cls) { return IsDoubleSided(cls) ? nvrhi::RasterCullMode::None : nvrhi::RasterCullMode::Back; }
+
+// One instanced draw per mesh batch in [begin, end). Shared by the pre-pass, shadows, G-buffer and picking.
+// `table` is the bindless texture table for passes that sample materials (null otherwise).
+void drawBatches(Impl& s, const nvrhi::ViewportState& viewport, nvrhi::IFramebuffer* fb, nvrhi::IGraphicsPipeline* pso,
+                 nvrhi::IBindingSet* set, nvrhi::IBindingSet* table, nvrhi::ICommandList* cmd, nvrhi::IBuffer* instances,
+                 const SceneGpu& scene, u32 begin, u32 end) {
+    if (begin >= end) return;
     nvrhi::GraphicsState gs;
     gs.setPipeline(pso).setFramebuffer(fb).setViewport(viewport).addBindingSet(set);
+    if (table) gs.addBindingSet(table);
     gs.addVertexBuffer({s.gpu.meshes.vertexBuffer(), 0, 0});
     gs.addVertexBuffer({instances, 1, 0});
     gs.setIndexBuffer({s.gpu.meshes.indexBuffer(), nvrhi::Format::R32_UINT, 0});
     cmd->setGraphicsState(gs);
-    for (const SceneGpu::Batch& b : scene.batches) {
+    for (u32 i = begin; i < end; ++i) {
+        const SceneGpu::Batch& b = scene.batches[i];
         const MeshRange& r = s.gpu.meshes.range(b.mesh);
         cmd->drawIndexed(nvrhi::DrawArguments()
                              .setVertexCount(r.indexCount)
@@ -189,15 +200,18 @@ void drawMeshBatches(Impl& s, const nvrhi::ViewportState& viewport, nvrhi::IFram
     }
 }
 
-// Pipeline for the instanced meshes: depth-only when `ps` is empty.
+// Pipeline for the instanced meshes: depth-only when `ps` is empty. `materials` adds the material buffer and the
+// bindless texture table to the binding layouts (for pixel shaders that sample materials).
 nvrhi::IGraphicsPipeline* meshPipeline(Impl& s, nvrhi::IFramebuffer* fb, const ShaderRef& vs, const ShaderRef& ps,
-                                       u64 variant, bool depthWrite, nvrhi::RasterCullMode cull) {
-    return s.pipelines->graphics(shaderKey(vs, ps, variant), fb, [&] {
+                                       u64 variant, bool depthWrite, nvrhi::RasterCullMode cull, bool materials) {
+    const u64 key = shaderKey(vs, ps, variant * 4 + (cull == nvrhi::RasterCullMode::None ? 1 : 0) + (materials ? 2 : 0));
+    return s.pipelines->graphics(key, fb, [&] {
         nvrhi::GraphicsPipelineDesc pd;
         pd.inputLayout = s.gpu.meshInput;
         pd.VS = vs.shader;
         if (ps) pd.PS = ps.shader;
-        pd.bindingLayouts = {s.gpu.layoutView.Get()};
+        if (materials) pd.bindingLayouts = {s.gpu.layoutMaterial.Get(), s.gpu.layoutBindless.Get()};
+        else pd.bindingLayouts = {s.gpu.layoutView.Get()};
         pd.renderState.depthStencilState.depthTestEnable = true;
         pd.renderState.depthStencilState.depthWriteEnable = depthWrite;
         pd.renderState.depthStencilState.depthFunc = nvrhi::ComparisonFunc::GreaterOrEqual; // reverse-Z
@@ -207,6 +221,54 @@ nvrhi::IGraphicsPipeline* meshPipeline(Impl& s, nvrhi::IFramebuffer* fb, const S
     });
 }
 
+// Binding set for passes that sample materials: `constants` (view or shadow constants), the material buffer and the
+// sampler. The constant buffer itself must already have been written in this pass's command list.
+nvrhi::IBindingSet* materialBindings(RgPassContext& ctx, Impl& s, nvrhi::IBuffer* constants) {
+    nvrhi::BindingSetDesc bd;
+    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, constants));
+    bd.addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(0, s.gpu.materials.buffer()));
+    bd.addItem(nvrhi::BindingSetItem::Sampler(0, s.gpu.materialSampler));
+    return ctx.bindingSet(bd, s.gpu.layoutMaterial);
+}
+
+// Which mesh pass a pipeline is for. One place decides shaders, layouts and cull mode per (pass, draw class), so the
+// pass bodies and the start-up warm-up cannot drift apart.
+enum class MeshPass { Depth, Shadow, GBuffer, Pick };
+
+nvrhi::IGraphicsPipeline* classPipeline(Impl& s, MeshPass pass, DrawClass cls, nvrhi::IFramebuffer* fb) {
+    const bool masked = IsMasked(cls);
+    switch (pass) {
+        case MeshPass::Depth: {
+            // Opaque: vertex shader only. Masked: + a pixel shader that tests the texture alpha.
+            const ShaderRef vs = s.shaders->get(masked ? "depth.vsDepthMasked" : "depth.vsDepth", nvrhi::ShaderType::Vertex);
+            const ShaderRef ps = masked ? s.shaders->get("depth.psDepthMasked", nvrhi::ShaderType::Pixel) : ShaderRef{};
+            if (!vs || (masked && !ps)) return nullptr;
+            return meshPipeline(s, fb, vs, ps, masked ? 9 : 7, true, cullOf(cls), masked);
+        }
+        case MeshPass::Shadow: {
+            // No culling: single-sided casters (roofs, sheet metal) must still shadow from behind. Single- and
+            // double-sided materials therefore share a pipeline.
+            const ShaderRef vs = s.shaders->get(masked ? "shadow.vsShadowMasked" : "shadow.vsShadow", nvrhi::ShaderType::Vertex);
+            const ShaderRef ps = masked ? s.shaders->get("shadow.psShadowMasked", nvrhi::ShaderType::Pixel) : ShaderRef{};
+            if (!vs || (masked && !ps)) return nullptr;
+            return meshPipeline(s, fb, vs, ps, masked ? 10 : 8, true, nvrhi::RasterCullMode::None, masked);
+        }
+        case MeshPass::GBuffer: {
+            const ShaderRef vs = s.shaders->get("opaque.vsOpaque", nvrhi::ShaderType::Vertex);
+            const ShaderRef ps = s.shaders->get(masked ? "opaque.psOpaqueMasked" : "opaque.psOpaque", nvrhi::ShaderType::Pixel);
+            if (!vs || !ps) return nullptr;
+            return meshPipeline(s, fb, vs, ps, 2, false, cullOf(cls), true);
+        }
+        case MeshPass::Pick: {
+            const ShaderRef vs = s.shaders->get("opaque.vsOpaque", nvrhi::ShaderType::Vertex);
+            const ShaderRef ps = s.shaders->get(masked ? "opaque.psPickMasked" : "opaque.psPick", nvrhi::ShaderType::Pixel);
+            if (!vs || !ps) return nullptr;
+            return meshPipeline(s, fb, vs, ps, 6, true, cullOf(cls), true);
+        }
+    }
+    return nullptr;
+}
+
 void recordDepthPrepass(Impl& s, const ViewFrame& vf, const DepthPrepassData& d, RgPassContext& ctx) {
     nvrhi::ICommandList* cmd = ctx.cmd();
     // Reverse-Z: far is 0.
@@ -214,12 +276,20 @@ void recordDepthPrepass(Impl& s, const ViewFrame& vf, const DepthPrepassData& d,
     if (!vf.scene || vf.scene->batches.empty() || !d.instances.valid()) return;
 
     nvrhi::IFramebuffer* fb = ctx.framebuffer();
-    const ShaderRef vs = s.shaders->get("depth.vsDepth", nvrhi::ShaderType::Vertex);
-    if (!vs) return;
-    nvrhi::IGraphicsPipeline* pso = meshPipeline(s, fb, vs, {}, 7, true, nvrhi::RasterCullMode::Back);
-    if (!pso) return;
-    drawMeshBatches(s, fullViewport(vf), fb, pso, viewBindings(ctx, s, vf, nullptr, nvrhi::Format::UNKNOWN), cmd,
-                    ctx.buffer(d.instances), *vf.scene);
+    const SceneGpu& scene = *vf.scene;
+    nvrhi::IBuffer* instances = ctx.buffer(d.instances);
+    // viewBindings writes the view constants into this command list; the masked binding set uses the same buffer.
+    nvrhi::IBindingSet* viewSet = viewBindings(ctx, s, vf, nullptr, nvrhi::Format::UNKNOWN);
+    nvrhi::IBindingSet* materialSet = nullptr;
+    for (DrawClass cls : kAllClasses) {
+        const u32 c = static_cast<u32>(cls);
+        if (scene.classBegin[c] >= scene.classBegin[c + 1]) continue;
+        nvrhi::IGraphicsPipeline* pso = classPipeline(s, MeshPass::Depth, cls, fb);
+        if (!pso) continue;
+        if (IsMasked(cls) && !materialSet) materialSet = materialBindings(ctx, s, vf.viewCb);
+        drawBatches(s, fullViewport(vf), fb, pso, IsMasked(cls) ? materialSet : viewSet, IsMasked(cls) ? s.gpu.textures.table() : nullptr, cmd,
+                    instances, scene, scene.classBegin[c], scene.classBegin[c + 1]);
+    }
 }
 
 // All cascades share one depth atlas (2x2 tiles); each is drawn with its own viewport.
@@ -229,23 +299,34 @@ void recordShadows(Impl& s, const ViewFrame& vf, const ShadowData& d, RgPassCont
     if (!vf.shadowsOn || !vf.scene || vf.scene->batches.empty() || !d.instances.valid()) return;
 
     nvrhi::IFramebuffer* fb = ctx.framebuffer();
-    const ShaderRef vs = s.shaders->get("shadow.vsShadow", nvrhi::ShaderType::Vertex);
-    if (!vs) return;
-    // No culling: single-sided casters (roofs, sheet metal) must still shadow from behind.
-    nvrhi::IGraphicsPipeline* pso = meshPipeline(s, fb, vs, {}, 8, true, nvrhi::RasterCullMode::None);
-    if (!pso) return;
-
+    const SceneGpu& scene = *vf.scene;
+    nvrhi::IBuffer* instances = ctx.buffer(d.instances);
     nvrhi::BindingSetDesc bd;
     bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, vf.shadowCb));
-    nvrhi::IBindingSet* set = ctx.bindingSet(bd, s.gpu.layoutView);
+    nvrhi::IBindingSet* viewSet = ctx.bindingSet(bd, s.gpu.layoutView);
+    nvrhi::IBindingSet* materialSet = nullptr;
+
+    // Pipelines resolved once, outside the cascade loop.
+    nvrhi::IGraphicsPipeline* pso[kDrawClassCount];
+    for (DrawClass cls : kAllClasses) {
+        const u32 c = static_cast<u32>(cls);
+        pso[c] = scene.classBegin[c] < scene.classBegin[c + 1] ? classPipeline(s, MeshPass::Shadow, cls, fb) : nullptr;
+        if (pso[c] && IsMasked(cls) && !materialSet) materialSet = materialBindings(ctx, s, vf.shadowCb);
+    }
+
     const f32 tile = static_cast<f32>(vf.shadowTile);
-    for (u32 c = 0; c < kShadowCascades; ++c) {
-        cmd->writeBuffer(vf.shadowCb, &vf.cascades.viewProj[c], sizeof(Mat4));
-        const f32 x = static_cast<f32>(c & 1) * tile;
-        const f32 y = static_cast<f32>(c >> 1) * tile;
+    for (u32 cascade = 0; cascade < kShadowCascades; ++cascade) {
+        cmd->writeBuffer(vf.shadowCb, &vf.cascades.viewProj[cascade], sizeof(Mat4));
+        const f32 x = static_cast<f32>(cascade & 1) * tile;
+        const f32 y = static_cast<f32>(cascade >> 1) * tile;
         const nvrhi::ViewportState viewport =
             nvrhi::ViewportState().addViewportAndScissorRect(nvrhi::Viewport(x, x + tile, y, y + tile, 0.0f, 1.0f));
-        drawMeshBatches(s, viewport, fb, pso, set, cmd, ctx.buffer(d.instances), *vf.scene);
+        for (DrawClass cls : kAllClasses) {
+            const u32 c = static_cast<u32>(cls);
+            if (!pso[c]) continue;
+            drawBatches(s, viewport, fb, pso[c], IsMasked(cls) ? materialSet : viewSet, IsMasked(cls) ? s.gpu.textures.table() : nullptr, cmd,
+                        instances, scene, scene.classBegin[c], scene.classBegin[c + 1]);
+        }
     }
 }
 
@@ -254,13 +335,18 @@ void recordShadows(Impl& s, const ViewFrame& vf, const ShadowData& d, RgPassCont
 void recordOpaque(Impl& s, const ViewFrame& vf, const OpaqueData& d, RgPassContext& ctx) {
     if (!vf.scene || vf.scene->batches.empty() || !d.instances.valid()) return;
     nvrhi::IFramebuffer* fb = ctx.framebuffer();
-    const ShaderRef vs = s.shaders->get("opaque.vsOpaque", nvrhi::ShaderType::Vertex);
-    const ShaderRef ps = s.shaders->get("opaque.psOpaque", nvrhi::ShaderType::Pixel);
-    if (!vs || !ps) return;
-    nvrhi::IGraphicsPipeline* pso = meshPipeline(s, fb, vs, ps, 2, false, nvrhi::RasterCullMode::Back);
-    if (!pso) return;
-    drawMeshBatches(s, fullViewport(vf), fb, pso, viewBindings(ctx, s, vf, nullptr, nvrhi::Format::UNKNOWN),
-                    ctx.cmd(), ctx.buffer(d.instances), *vf.scene);
+    const SceneGpu& scene = *vf.scene;
+    nvrhi::ICommandList* cmd = ctx.cmd();
+    cmd->writeBuffer(vf.viewCb, &vf.constants, sizeof(ViewConstants));
+    nvrhi::IBindingSet* set = materialBindings(ctx, s, vf.viewCb);
+    nvrhi::IBuffer* instances = ctx.buffer(d.instances);
+    for (DrawClass cls : kAllClasses) {
+        const u32 c = static_cast<u32>(cls);
+        if (scene.classBegin[c] >= scene.classBegin[c + 1]) continue;
+        nvrhi::IGraphicsPipeline* pso = classPipeline(s, MeshPass::GBuffer, cls, fb);
+        if (!pso) continue;
+        drawBatches(s, fullViewport(vf), fb, pso, set, s.gpu.textures.table(), cmd, instances, scene, scene.classBegin[c], scene.classBegin[c + 1]);
+    }
 }
 
 nvrhi::IBindingSet* deferredBindings(Impl& s, const ViewFrame& vf, const DeferredData& d, RgPassContext& ctx) {
@@ -282,16 +368,61 @@ void recordPick(Impl& s, const ViewFrame& vf, const PickData& d, RgPassContext& 
     nvrhi::IFramebuffer* fb = ctx.framebuffer();
     cmd->clearTextureUInt(ctx.texture(d.ids), nvrhi::AllSubresources, 0);
     cmd->clearDepthStencilTexture(ctx.texture(d.depth), nvrhi::AllSubresources, true, 0.0f, false, 0);
-    const ShaderRef vs = s.shaders->get("opaque.vsOpaque", nvrhi::ShaderType::Vertex);
-    const ShaderRef ps = s.shaders->get("opaque.psPick", nvrhi::ShaderType::Pixel);
-    if (!vs || !ps) return;
-    nvrhi::IGraphicsPipeline* pso = meshPipeline(s, fb, vs, ps, 6, true, nvrhi::RasterCullMode::Back);
-    if (!pso) return;
-    drawMeshBatches(s, fullViewport(vf), fb, pso, viewBindings(ctx, s, vf, nullptr, nvrhi::Format::UNKNOWN), cmd,
-                    ctx.buffer(d.instances), *vf.scene);
+    if (!vf.scene || vf.scene->batches.empty() || !d.instances.valid()) return;
+    const SceneGpu& scene = *vf.scene;
+    cmd->writeBuffer(vf.viewCb, &vf.constants, sizeof(ViewConstants));
+    nvrhi::IBindingSet* set = materialBindings(ctx, s, vf.viewCb);
+    nvrhi::IBuffer* instances = ctx.buffer(d.instances);
+    for (DrawClass cls : kAllClasses) {
+        const u32 c = static_cast<u32>(cls);
+        if (scene.classBegin[c] >= scene.classBegin[c + 1]) continue;
+        nvrhi::IGraphicsPipeline* pso = classPipeline(s, MeshPass::Pick, cls, fb);
+        if (!pso) continue;
+        drawBatches(s, fullViewport(vf), fb, pso, set, s.gpu.textures.table(), cmd, instances, scene, scene.classBegin[c], scene.classBegin[c + 1]);
+    }
 }
 
 } // namespace
+
+// Creates every mesh pipeline variant up front, against dummy framebuffers with the formats the viewport graphs use.
+// Pipelines are keyed by framebuffer FORMATS, so these are the ones the real passes hit later. Without it the first
+// masked / double-sided material that appears in a scene stalls the frame for the PSO compile (tens of ms, 160 in a
+// Debug build) while a model is streaming in.
+void Renderer::Impl::warmPipelines() {
+    nvrhi::IDevice* dev = device->nvrhi();
+    auto target = [&](nvrhi::Format format, bool depth) {
+        nvrhi::TextureDesc td;
+        td.width = td.height = 4;
+        td.format = format;
+        td.isRenderTarget = true;
+        td.initialState = depth ? nvrhi::ResourceStates::DepthWrite : nvrhi::ResourceStates::RenderTarget;
+        td.keepInitialState = true;
+        td.debugName = "PipelineWarmup";
+        return dev->createTexture(td);
+    };
+    nvrhi::TextureHandle depth = target(kDepthFormat, true);
+    nvrhi::TextureHandle albedo = target(nvrhi::Format::SRGBA8_UNORM, false);
+    nvrhi::TextureHandle normal = target(nvrhi::Format::RG16_UNORM, false);
+    nvrhi::TextureHandle material = target(nvrhi::Format::RGBA8_UNORM, false);
+    nvrhi::TextureHandle ids = target(nvrhi::Format::RG32_UINT, false);
+
+    nvrhi::FramebufferHandle depthFb = dev->createFramebuffer(nvrhi::FramebufferDesc().setDepthAttachment(depth));
+    nvrhi::FramebufferHandle gbufferFb = dev->createFramebuffer(nvrhi::FramebufferDesc()
+                                                                    .addColorAttachment(albedo)
+                                                                    .addColorAttachment(normal)
+                                                                    .addColorAttachment(material)
+                                                                    .setDepthAttachment(depth));
+    nvrhi::FramebufferHandle pickFb = dev->createFramebuffer(nvrhi::FramebufferDesc().addColorAttachment(ids).setDepthAttachment(depth));
+
+    u32 created = 0;
+    for (DrawClass cls : kAllClasses) {
+        for (auto [pass, fb] : {std::pair{MeshPass::Depth, depthFb.Get()}, std::pair{MeshPass::Shadow, depthFb.Get()},
+                                std::pair{MeshPass::GBuffer, gbufferFb.Get()}, std::pair{MeshPass::Pick, pickFb.Get()}}) {
+            if (classPipeline(*this, pass, cls, fb)) ++created;
+        }
+    }
+    FOH_DEBUG("renderer: warmed {} mesh pipeline lookups", created);
+}
 
 void Renderer::addPresentPass(RenderGraph& graph, RgTexture backbuffer, ViewportId viewport) {
     struct PresentData {

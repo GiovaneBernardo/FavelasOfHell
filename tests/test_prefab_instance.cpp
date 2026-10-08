@@ -3,6 +3,7 @@
 #include "foh/ecs.h"
 #include "foh/ecs/inspect.h"
 #include "foh/ecs/snapshot.h"
+#include "foh/renderer/render_scene.h"
 #include "foh/scene/prefab_instance.h"
 
 using namespace foh;
@@ -25,7 +26,9 @@ struct Fixture {
         w.component<Name>();
         w.component<Transform>();
         w.component<MeshRenderer>();
+        RegisterTransformPropagation(app);
     }
+    void step() { app.update(0.016f); }
     App app;
 };
 
@@ -43,16 +46,13 @@ TEST_CASE("instantiating a prefab builds the hierarchy with composed world trans
     prefab.nodes[0].scale = Vec3(2.0f);
     prefab.nodes.push_back(node("Door", 0, Vec3(0, 1, 0), kBody, {kWall, kGlass}));
     prefab.nodes.push_back(node("Lamp", 1, Vec3(0, 0, 3), kLamp, {kWall}));
+    prefab.nodes[1].submeshSlots = {0, 1}; // Body has two submeshes (slots 0 and 1)
+    prefab.nodes[2].submeshSlots = {0};
     prefab.nodes[1].rotation = glm::angleAxis(glm::half_pi<f32>(), Vec3(0, 1, 0)); // 90 degrees around Y
-
-    // Body has two submeshes (slots 0 and 1), the lamp one.
-    const MeshInfo body{{0, 1}}, lamp{{0}};
-    auto info = [&](const AssetId& id) -> const MeshInfo* { return id == kBody ? &body : id == kLamp ? &lamp : nullptr; };
-    auto color = [](const AssetId& id) { return id == kWall ? Vec4(1, 0, 0, 1) : id == kGlass ? Vec4(0, 0, 1, 1) : Vec4(0.5f); };
 
     Transform at;
     at.position = Vec3(10, 0, 0);
-    const PrefabInstanceResult r = InstantiatePrefab(w, prefab, info, color, at);
+    const PrefabInstanceResult r = InstantiatePrefab(w, prefab, at);
 
     // root + 3 nodes + 1 extra submesh entity
     REQUIRE(r.entities.size() == 5);
@@ -66,15 +66,30 @@ TEST_CASE("instantiating a prefab builds the hierarchy with composed world trans
     CHECK(w.parentOf(doorSub) == door);
     CHECK(w.parentOf(lampE) == door);
 
-    // World transforms: Root = at + (1,0,0)*1 -> (11,0,0), scale 2. Door = Root + scale * (0,1,0) -> (11,2,0).
-    CHECK(w.get<Transform>(rootNode)->position == Vec3(11, 0, 0));
-    CHECK(w.get<Transform>(rootNode)->scale == Vec3(2));
-    CHECK(w.get<Transform>(door)->position == Vec3(11, 2, 0));
+    // Entities keep LOCAL transforms: moving the instance root moves everything.
+    CHECK(w.get<Transform>(rootNode)->position == Vec3(1, 0, 0));
+    CHECK(w.get<Transform>(door)->position == Vec3(0, 1, 0));
+    CHECK(w.get<Transform>(doorSub)->position == Vec3(0, 0, 0));
+
+    // World transforms after propagation: Root = at + (1,0,0) -> (11,0,0), scale 2. Door = Root + scale * (0,1,0) -> (11,2,0).
+    f.step();
+    auto worldPos = [&](Entity e) { return w.get<GlobalTransform>(e)->position(); };
+    CHECK(worldPos(r.root) == Vec3(10, 0, 0));
+    CHECK(worldPos(rootNode) == Vec3(11, 0, 0));
+    CHECK(worldPos(door) == Vec3(11, 2, 0));
+    CHECK(worldPos(doorSub) == Vec3(11, 2, 0));
     // Lamp: Door's rotation (90 deg about Y) turns local +Z into world +X, scaled by 2: (11,2,0) + (6,0,0).
-    const Vec3 lampPos = w.get<Transform>(lampE)->position;
+    const Vec3 lampPos = worldPos(lampE);
     CHECK(lampPos.x == doctest::Approx(17.0f).epsilon(1e-4));
     CHECK(lampPos.y == doctest::Approx(2.0f));
     CHECK(lampPos.z == doctest::Approx(0.0f).epsilon(1e-4));
+
+    // Moving the instance root carries the whole instance along.
+    w.get<Transform>(r.root)->position += Vec3(0, 0, 5);
+    w.markModified<Transform>(r.root);
+    f.step();
+    CHECK(worldPos(door) == Vec3(11, 2, 5));
+    CHECK(worldPos(doorSub) == Vec3(11, 2, 5));
 
     // Mesh renderers: first submesh on the node, extra submeshes on children; colors from materials.
     const MeshRenderer* a = w.get<MeshRenderer>(door);
@@ -82,25 +97,22 @@ TEST_CASE("instantiating a prefab builds the hierarchy with composed world trans
     CHECK(a->asset == kBody);
     CHECK(a->submesh == 0);
     CHECK(a->material == kWall);
-    CHECK(a->color == Vec4(1, 0, 0, 1));
+    CHECK(a->color == Vec4(1)); // the material provides the color; the component only tints
     const MeshRenderer* b = w.get<MeshRenderer>(doorSub);
     REQUIRE(b);
     CHECK(b->submesh == 1);
     CHECK(b->material == kGlass);
-    CHECK(b->color == Vec4(0, 0, 1, 1));
     CHECK(w.get<MeshRenderer>(rootNode) == nullptr);
     CHECK(w.get<MeshRenderer>(lampE)->asset == kLamp);
 }
 
-TEST_CASE("a node whose mesh is unknown is created without a renderer") {
+TEST_CASE("a node without submesh data is created without a renderer") {
     Fixture f;
     World& w = f.app.world();
     PrefabAsset prefab;
     prefab.name = "Broken";
-    prefab.nodes.push_back(node("Missing", -1, Vec3(0), kBody, {kWall}));
-    auto none = [](const AssetId&) -> const MeshInfo* { return nullptr; };
-    auto color = [](const AssetId&) { return Vec4(1); };
-    const PrefabInstanceResult r = InstantiatePrefab(w, prefab, none, color, Transform{});
+    prefab.nodes.push_back(node("Missing", -1, Vec3(0), kBody, {kWall})); // no submeshSlots (a prefab from before format 2)
+    const PrefabInstanceResult r = InstantiatePrefab(w, prefab, Transform{});
     REQUIRE(r.entities.size() == 2);
     CHECK(w.get<MeshRenderer>(r.entities[1]) == nullptr);
 }

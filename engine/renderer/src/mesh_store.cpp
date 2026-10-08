@@ -28,10 +28,11 @@ MeshData makeCube() {
     for (const Face& f : faces) {
         const u32 base = static_cast<u32>(m.vertices.size());
         const Vec3 c = f.normal * 0.5f;
-        m.vertices.push_back({c - f.u * 0.5f - f.v * 0.5f, f.normal, {0, 1}});
-        m.vertices.push_back({c + f.u * 0.5f - f.v * 0.5f, f.normal, {1, 1}});
-        m.vertices.push_back({c + f.u * 0.5f + f.v * 0.5f, f.normal, {1, 0}});
-        m.vertices.push_back({c - f.u * 0.5f + f.v * 0.5f, f.normal, {0, 0}});
+        const PackedTangent t = PackTangent(Vec4(f.u, 1.0f));
+        m.vertices.push_back({c - f.u * 0.5f - f.v * 0.5f, f.normal, {0, 1}, t});
+        m.vertices.push_back({c + f.u * 0.5f - f.v * 0.5f, f.normal, {1, 1}, t});
+        m.vertices.push_back({c + f.u * 0.5f + f.v * 0.5f, f.normal, {1, 0}, t});
+        m.vertices.push_back({c - f.u * 0.5f + f.v * 0.5f, f.normal, {0, 0}, t});
         for (u32 i : {0u, 1u, 2u, 0u, 2u, 3u}) m.indices.push_back(base + i);
     }
     return m;
@@ -40,10 +41,11 @@ MeshData makeCube() {
 // Unit quad in the XZ plane facing +Y.
 MeshData makePlane() {
     MeshData m;
-    m.vertices = {{{-0.5f, 0, 0.5f}, {0, 1, 0}, {0, 1}},
-                  {{0.5f, 0, 0.5f}, {0, 1, 0}, {1, 1}},
-                  {{0.5f, 0, -0.5f}, {0, 1, 0}, {1, 0}},
-                  {{-0.5f, 0, -0.5f}, {0, 1, 0}, {0, 0}}};
+    const PackedTangent t = PackTangent(Vec4(1, 0, 0, 1));
+    m.vertices = {{{-0.5f, 0, 0.5f}, {0, 1, 0}, {0, 1}, t},
+                  {{0.5f, 0, 0.5f}, {0, 1, 0}, {1, 1}, t},
+                  {{0.5f, 0, -0.5f}, {0, 1, 0}, {1, 0}, t},
+                  {{-0.5f, 0, -0.5f}, {0, 1, 0}, {0, 0}, t}};
     m.indices = {0, 1, 2, 0, 2, 3};
     return m;
 }
@@ -59,7 +61,7 @@ MeshData makeSphere() {
             const f32 u = static_cast<f32>(s) / kSegments;
             const f32 theta = u * 2.0f * math::kPi;
             const Vec3 n{std::sin(phi) * std::cos(theta), std::cos(phi), std::sin(phi) * std::sin(theta)};
-            m.vertices.push_back({n * 0.5f, n, {u, v}});
+            m.vertices.push_back({n * 0.5f, n, {u, v}, PackTangent(Vec4(-std::sin(theta), 0.0f, std::cos(theta), 1.0f))});
         }
     }
     for (u32 r = 0; r < kRings; ++r) {

@@ -1,6 +1,7 @@
 #include "editor.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <thread>
@@ -16,6 +17,7 @@
 #include "foh/rhi/pipeline_cache.h"
 #include "foh/rhi/render_graph.h"
 #include "foh/png.h"
+#include "foh/shell.h"
 #include "foh/utf8_path.h"
 
 namespace foh::editor {
@@ -48,30 +50,6 @@ void animateDebugRig(Res<Time> time, Query<Transform&, const DebugBob&> bobbers)
     });
 }
 
-ImVec4 col(float r, float g, float b, float a = 1.0f) { return ImVec4(r, g, b, a); }
-
-void applyStyle() {
-    ImGui::StyleColorsDark();
-    ImGuiStyle& s = ImGui::GetStyle();
-    s.WindowRounding = 0.0f;
-    s.FrameRounding = 3.0f;
-    s.TabRounding = 3.0f;
-    s.WindowBorderSize = 1.0f;
-    s.FramePadding = ImVec2(6, 3);
-    s.ItemSpacing = ImVec2(8, 4);
-    ImVec4* c = s.Colors;
-    c[ImGuiCol_WindowBg] = col(0.10f, 0.105f, 0.11f);
-    c[ImGuiCol_TitleBg] = col(0.08f, 0.085f, 0.09f);
-    c[ImGuiCol_TitleBgActive] = col(0.12f, 0.13f, 0.14f);
-    c[ImGuiCol_Tab] = col(0.13f, 0.14f, 0.15f);
-    c[ImGuiCol_TabSelected] = col(0.22f, 0.30f, 0.38f);
-    c[ImGuiCol_TabHovered] = col(0.28f, 0.42f, 0.55f);
-    c[ImGuiCol_TabDimmed] = col(0.11f, 0.12f, 0.13f);
-    c[ImGuiCol_TabDimmedSelected] = col(0.17f, 0.22f, 0.28f);
-    c[ImGuiCol_Header] = col(0.20f, 0.28f, 0.36f, 0.6f);
-    c[ImGuiCol_FrameBg] = col(0.16f, 0.17f, 0.18f);
-}
-
 } // namespace
 
 Editor::Editor(EditorOptions options) : m_options(std::move(options)), m_vsync(m_options.vsync) {}
@@ -83,8 +61,8 @@ Editor::~Editor() { shutdown(); }
 bool Editor::init() {
     WindowDesc wd;
     wd.title = "Favelas of Hell - Editor";
-    wd.width = 1600;
-    wd.height = 900;
+    wd.width = m_options.windowWidth;
+    wd.height = m_options.windowHeight;
     wd.maximized = m_options.frames == 0; // smoke runs keep a deterministic size
     m_window = Window::create(wd);
     if (!m_window) return false;
@@ -114,9 +92,10 @@ bool Editor::init() {
     m_imgui = ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_NavEnableKeyboard;
-    m_iniPath = (GetExecutableDirectory() / "editor_layout_v2.ini").string();
+    m_iniPath = (GetExecutableDirectory() / "editor_layout_v3.ini").string();
     io.IniFilename = m_iniPath.c_str();
-    applyStyle();
+    m_prefs.load(GetExecutableDirectory() / "editor_prefs.txt");
+    m_theme.init(*m_window);
     m_platform.init(*m_window);
     if (!m_imguiRenderer.init(*m_renderer)) return false;
     m_dockLayoutBuilt = fs::exists(m_iniPath); // a saved layout wins over the default one
@@ -164,6 +143,9 @@ bool Editor::init() {
     addViewport("Animation Debug", 1, true, true);
     m_viewports[2].camera.position = Vec3(0.0f, 3.0f, 9.0f);
 
+    m_thumbs.init(*m_renderer, *m_jobs);
+    m_showWorkshop = m_options.openWorkshop;
+    if (m_options.workshopTest) m_workshop.enableSelfTest();
     initAssets();
     return true;
 }
@@ -175,11 +157,41 @@ void Editor::initAssets() {
     AssetDbDesc desc;
     desc.sourceRoot = root / "assets";
     desc.cacheRoot = root / "cache" / "imported";
+    desc.jobs = m_jobs.get(); // imports and asset loads run on the job system (low priority)
     m_assets = std::make_unique<AssetDb>(desc);
     m_assets->scan();
-    m_assetBridge = std::make_unique<AssetSceneBridge>(*m_assets, *m_renderer);
+    m_assetBridge = std::make_unique<AssetSceneBridge>(*m_assets, *m_renderer, m_jobs.get());
     FOH_INFO("asset database: {} source(s) in {}", m_assets->sources().size(), PathToUtf8(desc.sourceRoot));
     logAsset("Drop a .gltf / .glb / .fbx model or a texture onto the window to import it.");
+
+    ContentBrowserActions actions;
+    actions.importFile = [this](const fs::path& file) { importFile(file, 0, 0, false, false); };
+    actions.placeModel = [this](const std::string& rel) { placeAssetByPath(rel, 0, 0, false); };
+    actions.openWorkshop = [this] { m_showWorkshop = true; };
+    m_browser.init(*m_assets, m_thumbs, m_prefs, m_assetLog, std::move(actions));
+
+    WorkshopHost host;
+    host.assetRoot = m_assets->sourceRoot();
+    host.importFile = [this](const fs::path& file) { importFile(file, 0, 0, false, false); };
+    host.placeModel = [this](const std::string& rel) { placeAssetByPath(rel, 0, 0, false); };
+    host.refreshBrowser = [this] { m_browser.refresh(); };
+    m_workshop.init(*m_jobs, m_thumbs, m_prefs, std::move(host));
+}
+
+void Editor::placeAssetByPath(const std::string& relPath, float x, float y, bool hasPosition) {
+    const SourceRecord* rec = m_assets->findSource(relPath);
+    AssetId prefab;
+    if (rec) {
+        for (const SubAssetRecord& s : rec->subAssets)
+            if (!s.tombstone && s.kind == AssetKind::Prefab) prefab = s.guid;
+    }
+    if (!prefab.isValid()) {
+        importFile(m_assets->sourceRoot() / PathFromUtf8(relPath), x, y, hasPosition, true); // imports and places
+        return;
+    }
+    size_t sceneIndex = 0;
+    const Transform at = dropPlacement(x, y, hasPosition, sceneIndex);
+    instantiateAsset(prefab, sceneIndex, at);
 }
 
 void Editor::logAsset(std::string message) {
@@ -240,98 +252,89 @@ void Editor::instantiateAsset(AssetId prefab, size_t sceneIndex, const Transform
     logAsset("Placed " + std::to_string(inst.entities.size()) + " entities into '" + m_scenes[sceneIndex].name + "'.");
 }
 
-void Editor::importFile(const fs::path& file, float dropX, float dropY, bool hasDropPosition) {
-    const SourceFormat format = DetectSourceFormat(file);
+void Editor::importFile(const fs::path& file, float dropX, float dropY, bool hasDropPosition, bool place) {
     const std::string name = PathToUtf8(file.filename());
-    if (format == SourceFormat::Unknown) {
+    if (DetectSourceFormat(file) == SourceFormat::Unknown) {
         logAsset("Cannot import '" + name + "': supported are .gltf, .glb, .fbx, .png, .jpg, .tga, .bmp.");
         return;
     }
+    // Returns at once: parsing, texture decoding, mips and BC compression run on the worker threads.
+    Placement p;
+    p.ticket = m_assets->beginImport(file);
+    p.x = dropX;
+    p.y = dropY;
+    p.hasPosition = hasDropPosition;
+    p.place = place;
+    p.started = std::chrono::steady_clock::now();
+    m_placements.push_back(p);
+    logAsset("Importing '" + name + "'...");
+}
 
-    const auto begin = std::chrono::steady_clock::now();
-    const ImportResult result = m_assets->importFile(file);
+void Editor::handleImportResult(const ImportResult& result) {
+    Placement placement;
+    bool dropped = false;
+    if (const auto it = std::find_if(m_placements.begin(), m_placements.end(), [&](const Placement& p) { return p.ticket == result.ticket; });
+        it != m_placements.end()) {
+        placement = *it;
+        dropped = true;
+        m_placements.erase(it);
+    }
+    const std::string name = result.displayName.empty() ? result.sourcePath : result.displayName;
     if (!result.ok) {
         logAsset("Import of '" + name + "' failed: " + result.error);
         return;
     }
-    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
-    logAsset("Imported '" + name + "': " + std::to_string(result.assets.size()) + " asset(s) in " +
-             std::to_string(static_cast<int>(ms)) + " ms" + (result.upToDate ? " (unchanged)" : ""));
+    if (dropped) {
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - placement.started).count();
+        logAsset("Imported '" + name + "': " + std::to_string(result.assets.size()) + " asset(s) in " + std::to_string(static_cast<int>(ms)) +
+                 " ms" + (result.upToDate ? " (unchanged)" : ""));
+    } else if (!result.upToDate) {
+        logAsset("Reimported '" + result.sourcePath + "' (" + std::to_string(result.changed.size()) + " asset(s) changed)");
+    }
     for (const std::string& w : result.warnings) logAsset("  warning: " + w);
 
-    std::vector<World*> worlds;
-    for (SceneEntry& sc : m_scenes) worlds.push_back(&sc.app->world());
-    m_assetBridge->assetsChanged(result.changed, worlds);
+    m_assetBridge->assetsChanged(result.changed);
 
+    m_browser.refresh();
+    if (!dropped || !placement.place) return;
+    const SourceFormat format = DetectSourceFormat(PathFromUtf8(result.sourcePath));
     if (format == SourceFormat::Image) return;
     if (!result.prefab.isValid()) {
         logAsset("  no prefab was generated (meshes only).");
         return;
     }
     size_t sceneIndex = 0;
-    const Transform at = dropPlacement(dropX, dropY, hasDropPosition, sceneIndex);
+    const Transform at = dropPlacement(placement.x, placement.y, placement.hasPosition, sceneIndex);
     instantiateAsset(result.prefab, sceneIndex, at);
 }
 
-void Editor::pollAssetChanges(float dt) {
+void Editor::updateAssets(float dt) {
+    // Once a second: look for sources that changed on disk (stat calls only) and start their reimports.
     m_sinceAssetPoll += dt;
-    if (m_sinceAssetPoll < 1.0f) return;
-    m_sinceAssetPoll = 0.0f;
-    std::vector<World*> worlds;
-    for (SceneEntry& sc : m_scenes) worlds.push_back(&sc.app->world());
-    for (const ImportResult& r : m_assets->reimportChanged()) {
-        if (!r.ok) {
-            logAsset("Reimport of '" + r.sourcePath + "' failed: " + r.error);
-            continue;
-        }
-        logAsset("Reimported '" + r.sourcePath + "' (" + std::to_string(r.changed.size()) + " asset(s) changed)");
-        m_assetBridge->assetsChanged(r.changed, worlds);
+    if (m_sinceAssetPoll >= 1.0f) {
+        m_sinceAssetPoll = 0.0f;
+        m_assets->beginReimportChanged();
     }
-}
+    for (const ImportResult& r : m_assets->pollImports()) handleImportResult(r);
+    m_assetBridge->pump(); // loaded meshes/materials/textures -> renderer, a few ms per frame at most
 
-void Editor::drawAssetsPanel() {
-    if (!ImGui::Begin("Assets", &m_showAssets)) {
-        ImGui::End();
-        return;
+    // Frame-time bookkeeping while anything is still streaming: the point of all this is that it stays smooth.
+    const TextureStats ts = m_renderer->textureStats();
+    const bool busy = m_assets->importsPending() || !m_assetBridge->loader().idle() || ts.queued > 0;
+    if (busy) {
+        const double ms = static_cast<double>(dt) * 1000.0;
+        m_streaming.active = true;
+        ++m_streaming.frames;
+        m_streaming.sumMs += ms;
+        m_streaming.worstMs = std::max(m_streaming.worstMs, ms);
+    } else if (m_streaming.active) {
+        logAsset("Streaming finished: " + std::to_string(m_streaming.frames) + " frames, average " +
+                 std::to_string(static_cast<int>(m_streaming.sumMs / std::max(1u, m_streaming.frames) * 10.0) / 10.0).substr(0, 5) + " ms, worst " +
+                 std::to_string(static_cast<int>(m_streaming.worstMs * 10.0) / 10.0).substr(0, 5) + " ms; " + std::to_string(ts.resident) +
+                 " textures resident (" + std::to_string(ts.residentBytes >> 20) + " MB). Slowest phase: " +
+                 m_streaming.worstPhase + " " + std::to_string(static_cast<int>(m_streaming.worstPhaseMs)) + " ms.");
+        m_streaming = {};
     }
-    ImGui::TextDisabled("Drop .gltf / .glb / .fbx or images onto the window. Sources live in %s",
-                        PathToUtf8(m_assets->sourceRoot()).c_str());
-    if (ImGui::BeginChild("##sources", ImVec2(0, -ImGui::GetTextLineHeightWithSpacing() * 6.5f), ImGuiChildFlags_Borders)) {
-        for (const SourceRecord* src : m_assets->sources()) {
-            u32 live = 0, dead = 0;
-            for (const SubAssetRecord& s : src->subAssets) (s.tombstone ? dead : live)++;
-            const std::string label = src->path + "  (" + std::to_string(live) + " assets" +
-                                      (dead ? ", " + std::to_string(dead) + " removed" : std::string()) + ")###" + src->path;
-            const bool open = ImGui::TreeNode(label.c_str());
-            AssetId prefab;
-            for (const SubAssetRecord& s : src->subAssets)
-                if (!s.tombstone && s.kind == AssetKind::Prefab) prefab = s.guid;
-            if (prefab.isValid()) {
-                ImGui::SameLine();
-                ImGui::PushID(src->path.c_str());
-                if (ImGui::SmallButton("Place")) {
-                    size_t sceneIndex = 0;
-                    const Transform at = dropPlacement(0, 0, false, sceneIndex);
-                    instantiateAsset(prefab, sceneIndex, at);
-                }
-                ImGui::PopID();
-            }
-            if (!open) continue;
-            for (const SubAssetRecord& s : src->subAssets) {
-                const char* kind = AssetKindName(s.kind);
-                if (s.tombstone) ImGui::TextDisabled("%s  %s  (removed from the source)", kind, s.key.c_str());
-                else ImGui::Text("%s  %s", kind, s.name.c_str());
-            }
-            ImGui::TreePop();
-        }
-    }
-    ImGui::EndChild();
-    if (ImGui::BeginChild("##log", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
-        for (const std::string& line : m_assetLog) ImGui::TextUnformatted(line.c_str());
-        if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f) ImGui::SetScrollHereY(1.0f);
-    }
-    ImGui::EndChild();
-    ImGui::End();
 }
 
 void Editor::createDebugScene() {
@@ -372,6 +375,9 @@ void Editor::createDebugScene() {
 
 void Editor::shutdown() {
     if (m_renderer) m_renderer->device().waitIdle();
+    m_prefs.save();
+    m_workshop.shutdown();
+    m_thumbs.shutdown();
     m_gameBuilder.reset();
     m_shaderBuilder.reset();
     m_game.reset();
@@ -442,6 +448,9 @@ bool Editor::frame(float dt) {
     if (m_options.stress) runStress();
 
     // 1. UI (also decides viewport sizes, activity and cameras).
+    m_theme.update(*m_window);
+    m_workshop.update();
+    m_thumbs.beginFrame();
     m_platform.newFrame(dt);
     ImGui::NewFrame();
     ImGuizmo::BeginFrame();
@@ -451,20 +460,39 @@ bool Editor::frame(float dt) {
     buildUi(dt);
     ImGui::Render();
     m_platform.endFrame();
+    m_thumbs.endFrame(); // finished thumbnails reach the GPU before the UI is drawn
+    m_prefs.saveIfDirty(ImGui::GetTime());
 
     // 2. Simulation: game hot reload, then every world. Extraction systems fill the
     //    renderer's scene snapshots at the end of each update.
+    // Phase timer: while assets stream in, the slowest single phase is reported with the streaming summary.
+    auto lapStart = std::chrono::steady_clock::now();
+    auto lap = [&](const char* name) {
+        const auto now = std::chrono::steady_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(now - lapStart).count();
+        lapStart = now;
+        if (m_streaming.active && ms > m_streaming.worstPhaseMs) {
+            m_streaming.worstPhaseMs = ms;
+            m_streaming.worstPhase = name;
+        }
+    };
     if (m_gameBuilder) m_gameBuilder->poll();
     if (m_shaderBuilder) m_shaderBuilder->poll();
     if (m_game) m_game->pollReload();
-    pollAssetChanges(dt);
+    lap("hot reload polls");
+    updateAssets(dt);
+    lap("asset import/load pump");
     for (SceneEntry& s : m_scenes) s.app->update(dt);
+    lap("world update");
 
     // 3. Render: viewports first (parallel graphs), then the window graph with the UI.
     m_renderer->beginFrame();
+    lap("renderer beginFrame (texture/mesh uploads)");
     m_renderer->renderViewports();
+    lap("render viewports");
     m_imguiRenderer.prepare(ImGui::GetDrawData(), m_externalTextures);
     m_renderer->renderWindow(*m_swapchain, &Editor::buildWindowPasses, this);
+    lap("render window");
 
     ++m_frameCount;
     if (m_options.frames && !m_options.screenshot.empty() && m_frameCount == m_options.frames) saveScreenshot();
@@ -505,7 +533,7 @@ void Editor::buildWindowPasses(RenderGraph& graph, RgTexture backbuffer, void* u
 void Editor::drawMenuBar() {
     if (!ImGui::BeginMainMenuBar()) return;
     if (ImGui::BeginMenu("File")) {
-        if (ImGui::MenuItem("Quit")) m_quit = true;
+        if (ImGui::MenuItem("Quit", "Alt+F4")) m_quit = true;
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("View")) {
@@ -513,7 +541,8 @@ void Editor::drawMenuBar() {
         ImGui::Separator();
         ImGui::MenuItem("Entities", nullptr, &m_showEntities);
         ImGui::MenuItem("Inspector", nullptr, &m_showInspector);
-        ImGui::MenuItem("Assets", nullptr, &m_showAssets);
+        ImGui::MenuItem("Content Browser", nullptr, &m_showAssets);
+        ImGui::MenuItem("Assets Workshop", nullptr, &m_showWorkshop);
         ImGui::MenuItem("Render Graph", nullptr, &m_showRenderGraph);
         ImGui::MenuItem("Stats", nullptr, &m_showStats);
         ImGui::EndMenu();
@@ -541,15 +570,15 @@ void Editor::buildDockLayout(unsigned int dockspaceId) {
     sideBottom = ImGui::DockBuilderSplitNode(side, ImGuiDir_Down, 0.58f, nullptr, &sideTop);
     ImGui::DockBuilderDockWindow("Entities", sideTop);
     ImGui::DockBuilderDockWindow("Inspector", sideBottom);
-    bottom = ImGui::DockBuilderSplitNode(main, ImGuiDir_Down, 0.34f, nullptr, &top);
-    right = ImGui::DockBuilderSplitNode(top, ImGuiDir_Right, 0.5f, nullptr, &left);
-    bottomRight = ImGui::DockBuilderSplitNode(bottom, ImGuiDir_Right, 0.55f, nullptr, &bottomLeft);
+    bottom = ImGui::DockBuilderSplitNode(main, ImGuiDir_Down, 0.44f, nullptr, &top);
+    right = ImGui::DockBuilderSplitNode(top, ImGuiDir_Right, 0.34f, nullptr, &left);
+    bottomRight = ImGui::DockBuilderSplitNode(bottom, ImGuiDir_Right, 0.24f, nullptr, &bottomLeft);
     ImGui::DockBuilderDockWindow("Scene", left);
     ImGui::DockBuilderDockWindow("Game", right);
-    ImGui::DockBuilderDockWindow("Animation Debug", bottomLeft);
+    ImGui::DockBuilderDockWindow("Animation Debug", right);
+    ImGui::DockBuilderDockWindow("Content Browser", bottomLeft);
     ImGui::DockBuilderDockWindow("Render Graph", bottomRight);
     ImGui::DockBuilderDockWindow("Stats", bottomRight);
-    ImGui::DockBuilderDockWindow("Assets", bottomRight);
     ImGui::DockBuilderFinish(dockspaceId);
 }
 
@@ -564,7 +593,8 @@ void Editor::buildUi(float dt) {
     for (ViewportPanel& p : m_viewports) drawViewport(p, dt);
     if (m_showEntities) m_inspector.drawEntities(m_sceneRefs, m_selection, &m_showEntities);
     if (m_showInspector) m_inspector.drawInspector(m_sceneRefs, m_selection, &m_showInspector);
-    if (m_showAssets) drawAssetsPanel();
+    if (m_showAssets) m_browser.draw(&m_showAssets, m_theme.scale());
+    if (m_showWorkshop) m_workshop.draw(&m_showWorkshop, m_theme.scale());
     if (m_showRenderGraph) drawRenderGraphPanel();
     if (m_showStats) drawStatsPanel(dt);
 }
@@ -613,6 +643,21 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
         p.imageY = origin.y;
         p.imageW = avail.x;
         p.imageH = avail.y;
+        // Assets dragged out of the content browser land where they are dropped.
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kAssetDragPayload)) {
+                const std::string rel(static_cast<const char*>(payload->Data));
+                const ImVec2 mouse = ImGui::GetMousePos();
+                const FileTypeInfo type = ClassifyExtension([&] {
+                    std::string ext = PathToUtf8(PathFromUtf8(rel).extension());
+                    for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                    return ext.empty() ? ext : ext.substr(1);
+                }());
+                if (type.category == FileCategory::Model) placeAssetByPath(rel, mouse.x, mouse.y, true);
+                else logAsset("'" + rel + "' cannot be placed in a scene (only models can).");
+            }
+            ImGui::EndDragDropTarget();
+        }
 
         // Camera: RMB captures the mouse for fly navigation (editor cameras only).
         if (p.useEditorCamera) {
@@ -642,10 +687,11 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.04f, 0.045f, 0.05f, 0.72f));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6, 4));
         ImGui::PushID(p.title.c_str());
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(5.0f * m_theme.scale(), 2.0f * m_theme.scale()));
         if (ImGui::BeginChild("##overlay", ImVec2(0, 0),
                               ImGuiChildFlags_AutoResizeX | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding,
                               ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
-            ImGui::SetNextItemWidth(150);
+            ImGui::SetNextItemWidth(150.0f * m_theme.scale());
             if (ImGui::BeginCombo("##scene", m_scenes[p.sceneIndex].name.c_str())) {
                 for (size_t i = 0; i < m_scenes.size(); ++i) {
                     if (ImGui::Selectable(m_scenes[i].name.c_str(), i == p.sceneIndex)) {
@@ -676,6 +722,7 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
             }
         }
         ImGui::EndChild();
+        ImGui::PopStyleVar();
         ImGui::PopID();
         ImGui::PopStyleVar();
         ImGui::PopStyleColor();
@@ -743,16 +790,23 @@ void Editor::drawStatsPanel(float) {
 
 namespace {
 
-// ImGuizmo gives back a world matrix; split it into the Transform components.
-void applyMatrix(Transform& t, const Mat4& m) {
-    t.position = Vec3(m[3]);
-    Vec3 axes[3] = {Vec3(m[0]), Vec3(m[1]), Vec3(m[2])};
-    for (int i = 0; i < 3; ++i) {
-        const f32 len = glm::length(axes[i]);
-        t.scale[i] = len;
-        if (len > 1e-6f) axes[i] /= len;
-    }
-    t.rotation = glm::normalize(glm::quat_cast(Mat3(axes[0], axes[1], axes[2])));
+// ImGuizmo works on world matrices; Transform is local to the parent. Converts the manipulated world
+// matrix back through the parent chain (the parent's GlobalTransform is current: it is computed every frame).
+Mat4 worldMatrixOf(const World& world, Entity e) {
+    if (const GlobalTransform* g = world.get<GlobalTransform>(e)) return g->matrix();
+    const Transform* t = world.get<Transform>(e);
+    return t ? t->matrix() : Mat4(1.0f);
+}
+
+void applyWorldMatrix(World& world, Entity e, const Mat4& newWorld) {
+    Transform* t = world.get<Transform>(e);
+    if (!t) return;
+    Mat4 local = newWorld;
+    const Entity parent = world.parentOf(e);
+    if (!parent.isNull() && world.has<GlobalTransform>(parent))
+        local = glm::inverse(world.get<GlobalTransform>(parent)->matrix()) * newWorld;
+    *t = Transform::FromMatrix(local);
+    world.markModified<Transform>(e); // in-place write: tell the propagation system
 }
 
 } // namespace
@@ -763,8 +817,10 @@ void applyMatrix(Transform& t, const Mat4& m) {
 void Editor::drawGizmo(ViewportPanel& p, const ImVec2& origin, const ImVec2& size, int panelIndex) {
     if (!m_selection.valid(m_sceneRefs) || m_selection.scene != p.sceneIndex) return;
     World& world = *m_sceneRefs[m_selection.scene].world;
-    Transform* t = world.get<Transform>(m_selection.entity);
-    if (!t || size.x < 8 || size.y < 8) return;
+    if (!world.has<Transform>(m_selection.entity) || size.x < 8 || size.y < 8) return;
+    Mat4 model = worldMatrixOf(world, m_selection.entity);
+    const Vec3 worldPosition = Vec3(model[3]);
+    const f32 worldExtent = std::max({glm::length(Vec3(model[0])), glm::length(Vec3(model[1])), glm::length(Vec3(model[2]))});
 
     // Hotkeys, only while the cursor is over this view and the camera is not flying.
     const bool hotkeys = ImGui::IsWindowHovered() && !p.capturing && !ImGui::GetIO().WantTextInput;
@@ -774,8 +830,8 @@ void Editor::drawGizmo(ViewportPanel& p, const ImVec2& origin, const ImVec2& siz
         if (ImGui::IsKeyPressed(ImGuiKey_R, false)) m_gizmoOp = ImGuizmo::SCALE;
         if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
             // Frame the selection: back off along the current view direction.
-            const f32 dist = std::max(4.0f, std::max({t->scale.x, t->scale.y, t->scale.z}) * 3.0f);
-            p.camera.position = t->position - (p.camera.rotation() * Vec3(0, 0, -1)) * dist;
+            const f32 dist = std::max(4.0f, worldExtent * 3.0f);
+            p.camera.position = worldPosition - (p.camera.rotation() * Vec3(0, 0, -1)) * dist;
         }
     }
 
@@ -785,14 +841,13 @@ void Editor::drawGizmo(ViewportPanel& p, const ImVec2& origin, const ImVec2& siz
     ImGuizmo::SetID(panelIndex);
     const Mat4 view = glm::inverse(p.camera.world());
     const Mat4 proj = glm::perspectiveRH_NO(p.camera.fovY, size.x / size.y, p.camera.nearZ, p.camera.farZ);
-    Mat4 model = t->matrix();
     const bool snap = ImGui::GetIO().KeyCtrl;
     const float step = m_gizmoOp == ImGuizmo::ROTATE ? 15.0f : (m_gizmoOp == ImGuizmo::SCALE ? 0.1f : 0.5f);
     const float snapAll[3] = {step, step, step};
     if (ImGuizmo::Manipulate(&view[0][0], &proj[0][0], static_cast<ImGuizmo::OPERATION>(m_gizmoOp),
                              m_gizmoLocal ? ImGuizmo::LOCAL : ImGuizmo::WORLD, &model[0][0], nullptr,
                              snap ? snapAll : nullptr)) {
-        applyMatrix(*t, model);
+        applyWorldMatrix(world, m_selection.entity, model);
     }
 }
 

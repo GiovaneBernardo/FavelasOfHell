@@ -8,12 +8,11 @@
 //     <prefab node>            Name + Transform [+ MeshRenderer for the mesh's first submesh]
 //       <name>.sub<k>          one extra entity per further submesh of the node's mesh
 //
-// Transforms: entities carry a FLAT world Transform for now (see renderer/components.h), so the
-// node hierarchy is composed here and baked in; the parent/child relationship is set for the
-// hierarchy view. Moving the instance root therefore does not move its children until the
-// engine gets transform propagation (known limitation, planned with the Local/Global split).
+// Transforms: every node keeps its LOCAL transform and is parented to its prefab parent, so moving the
+// instance root (or any node) moves everything below it; the transform propagation system computes the
+// world transforms (GlobalTransform). The instance root is placed at `at`, which is a world transform
+// (the root has no parent).
 
-#include <functional>
 #include <vector>
 
 #include "foh/asset_types.h"
@@ -23,23 +22,14 @@
 
 namespace foh {
 
-// What instantiation needs to know about a mesh: the material slot of every submesh.
-struct MeshInfo {
-    std::vector<u32> submeshMaterialSlots;
-};
-
-// Returns null when the mesh is unknown (the node is then created without a MeshRenderer).
-using MeshInfoFn = std::function<const MeshInfo*(const AssetId& mesh)>;
-// Base color of a material; used for the instance color. Called with an invalid id for slots
-// without a material.
-using MaterialColorFn = std::function<Vec4(const AssetId& material)>;
-
 struct PrefabInstanceResult {
     Entity root{};
     std::vector<Entity> entities; // every entity created, root first
 };
 
-FOH_API PrefabInstanceResult InstantiatePrefab(World& world, const PrefabAsset& prefab, const MeshInfoFn& meshInfo,
-                                               const MaterialColorFn& materialColor, const Transform& at);
+// Needs nothing but the prefab itself: meshes and materials are referenced by asset id and show up in the
+// renderer when their data has been loaded (until then the instance simply is not drawn / uses the default
+// material). Components must be registered in the world (RegisterRenderExtract does it).
+FOH_API PrefabInstanceResult InstantiatePrefab(World& world, const PrefabAsset& prefab, const Transform& at);
 
 } // namespace foh

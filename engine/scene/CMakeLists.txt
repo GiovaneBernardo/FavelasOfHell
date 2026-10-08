@@ -3,6 +3,7 @@
 # Nothing here touches NVRHI (the renderer API it uses is the NVRHI-free tier).
 foh_add_engine_module(scene
     SOURCES
+        src/asset_loader.cpp
         src/asset_scene_bridge.cpp
         src/prefab_instance.cpp
     PUBLIC_DEPS foh::core foh::ecs foh::assets foh::renderer)

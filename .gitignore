@@ -14,3 +14,5 @@ compile_commands.json
 
 # Models/textures dropped into the editor are copied here (with their .meta files) until curated into assets/
 /assets/imported/
+# Packages downloaded by the editor's assets workshop (licensed third-party content, large)
+/assets/workshop/

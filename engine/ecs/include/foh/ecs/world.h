@@ -118,6 +118,14 @@ public:
         static_assert(std::is_empty_v<T>, "insert<T>(Entity) is for tag components; pass a value otherwise");
         setComponent(e, component<T>(), nullptr, 0);
     }
+    // Tells the world that component data was written in place through a pointer from get() (the
+    // editor inspector, gizmos): without it ChangedTables queries and OnSet observers do not see
+    // the write. Writes through Query references and insert() are tracked automatically.
+    // Main thread, outside the parallel phase.
+    template <class T>
+    void markModified(Entity e) { markModified(e, component<T>()); }
+    void markModified(Entity e, ComponentId component);
+
     template <class T>
     void remove(Entity e) { removeComponent(e, component<T>()); }
     template <class T>

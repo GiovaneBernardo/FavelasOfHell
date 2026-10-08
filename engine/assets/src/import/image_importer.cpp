@@ -17,8 +17,9 @@ bool ImportImageFile(const std::filesystem::path& path, ImportedScene& out, std:
         error = "cannot read " + path.string();
         return false;
     }
+    if (!import_util::probeImage(bytes.data(), bytes.size(), error)) return false;
     ImportedImage image;
-    if (!import_util::decodeImage(bytes.data(), bytes.size(), image, error)) return false;
+    image.encoded = std::move(bytes);
     image.name = path.stem().string();
     image.key = image.name;
     ImportedScene scene;

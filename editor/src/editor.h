@@ -16,10 +16,15 @@
 #include "foh/rhi/swapchain.h"
 #include "foh/scene/asset_scene_bridge.h"
 #include "foh/window.h"
+#include "content_browser.h"
+#include "editor_prefs.h"
 #include "fly_camera.h"
 #include "imgui_platform.h"
 #include "imgui_renderer.h"
 #include "inspector.h"
+#include "theme.h"
+#include "thumbnails.h"
+#include "workshop/workshop.h"
 
 struct ImGuiContext;
 struct ImVec2;
@@ -40,6 +45,9 @@ struct EditorOptions {
     // schedule to exercise every resource-recreation path under the validation layer.
     bool stress = false;
     u32 minPassesPerGroup = 4; // --group-passes N (1 = one command list per pass)
+    u32 windowWidth = 1600, windowHeight = 900; // --window WxH (QA: render a 4K-sized layout)
+    bool workshopTest = false; // --workshop-test: download + import the first result with the smallest variant (QA)
+    bool openWorkshop = false; // --workshop: open the assets workshop at startup (QA)
     std::string importFile;    // --import <file>: imports it at startup and places it like a drop (QA)
 };
 
@@ -92,9 +100,12 @@ private:
     void drawStatsPanel(float dt);
     void saveScreenshot();
     void initAssets();
-    void importFile(const std::filesystem::path& file, float dropX, float dropY, bool hasDropPosition);
-    void pollAssetChanges(float dt);
-    void drawAssetsPanel();
+    void importFile(const std::filesystem::path& file, float dropX, float dropY, bool hasDropPosition, bool place = true);
+    // Places a model of the asset folder (a path relative to it), importing it first when needed.
+    void placeAssetByPath(const std::string& relPath, float x, float y, bool hasPosition);
+    void handleImportResult(const ImportResult& result);
+    // Per frame: starts reimports of changed sources, commits finished imports, streams loaded assets to the GPU.
+    void updateAssets(float dt);
     void logAsset(std::string message);
     void instantiateAsset(AssetId prefab, size_t sceneIndex, const Transform& at);
     // Where a dropped model goes: the ground point under the cursor in the viewport it was dropped on.
@@ -112,6 +123,11 @@ private:
     std::unique_ptr<Renderer> m_renderer;
     std::unique_ptr<Swapchain> m_swapchain;
     ImGuiContext* m_imgui = nullptr;
+    EditorTheme m_theme;
+    EditorPrefs m_prefs;
+    ThumbnailService m_thumbs;
+    ContentBrowser m_browser;
+    Workshop m_workshop;
     ImGuiPlatform m_platform;
     ImGuiRenderer m_imguiRenderer;
     std::vector<nvrhi::ITexture*> m_externalTextures; // viewport images drawn this frame
@@ -125,9 +141,27 @@ private:
     // Assets: the database of imported sources and the glue that puts them into worlds.
     std::unique_ptr<AssetDb> m_assets;
     std::unique_ptr<AssetSceneBridge> m_assetBridge;
+    // Where a model goes once its import finishes (the cursor position of the drop).
+    struct Placement {
+        ImportTicket ticket = 0;
+        float x = 0.0f, y = 0.0f;
+        bool hasPosition = false;
+        bool place = true;
+        std::chrono::steady_clock::time_point started;
+    };
+    std::vector<Placement> m_placements;
     std::vector<std::string> m_assetLog; // newest last, capped
     float m_sinceAssetPoll = 0.0f;
+    // Frame times while assets stream in (imports, loads, texture uploads): reported once when streaming ends.
+    struct StreamingStats {
+        bool active = false;
+        u32 frames = 0;
+        double sumMs = 0.0, worstMs = 0.0;
+        double worstPhaseMs = 0.0;
+        const char* worstPhase = "";
+    } m_streaming;
     bool m_showAssets = true;
+    bool m_showWorkshop = false;
 
     bool m_dockLayoutBuilt = false;
     bool m_showRenderGraph = true;

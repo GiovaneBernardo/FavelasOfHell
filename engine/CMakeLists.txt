@@ -5,7 +5,7 @@
 # modules into their own DLLs later for engine hot reload.
 #
 # Module dependency order (lowest first):
-#   core -> jobs -> ecs -> host
+#   core -> platform -> jobs -> ecs -> host   (jobs sets OS thread priorities through platform)
 #   core -> platform -> host
 #   core -> jobs, platform, ecs -> renderer   (the renderer extracts render data through ECS plugins)
 #   core -> assets, physics

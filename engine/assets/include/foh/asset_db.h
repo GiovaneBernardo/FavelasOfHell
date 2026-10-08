@@ -13,9 +13,12 @@
 // keys that disappear stay in the table as tombstones until remapped or pruned.
 //
 // Thread-safety: not thread safe. Use from one thread (the editor's main thread); loads
-// return plain data that may then be handed to other threads.
+// return plain data that may then be handed to other threads. Imports started with beginImport()
+// run on the job system but never touch the database: they work on a snapshot of the source's
+// record and the main thread commits the outcome in pollImports().
 
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -24,17 +27,23 @@
 #include "foh/asset_container.h"
 #include "foh/asset_import.h"
 #include "foh/asset_types.h"
+#include "foh/jobs.h"
 #include "foh/platform.h"
 #include "foh/types.h"
 
 namespace foh {
 
-inline constexpr u32 kImporterVersion = 1; // bump when cooking output changes: forces a reimport
+inline constexpr u32 kImporterVersion = 2; // bump when cooking output changes: forces a reimport
 
 struct AssetDbDesc {
     std::filesystem::path sourceRoot;
     std::filesystem::path cacheRoot;
+    // Runs imports on worker threads (low priority) and parallelizes texture cooking. Without it every
+    // import runs inline on the calling thread. Must outlive the database.
+    JobSystem* jobs = nullptr;
 };
+
+using ImportTicket = u64; // names one beginImport() request; 0 = none
 
 struct SubAssetRecord {
     std::string key;
@@ -58,6 +67,8 @@ struct SourceRecord {
 };
 
 struct ImportResult {
+    ImportTicket ticket = 0;
+    std::string displayName; // what the user asked for (file name), for progress UI
     bool ok = false;
     bool upToDate = false; // nothing changed, nothing written
     std::string error;
@@ -80,17 +91,37 @@ struct AssetInfo {
 class FOH_API AssetDb {
 public:
     explicit AssetDb(AssetDbDesc desc);
+    ~AssetDb(); // waits for running imports
+    struct Outcome; // internal: what an import worker hands back
+    AssetDb(const AssetDb&) = delete;
+    AssetDb& operator=(const AssetDb&) = delete;
 
     // Reads every .meta and .fvariant under the source root and builds the index.
     void scan();
 
-    // Imports (or reimports) a file. Files outside the source root are copied in first, with the
-    // files they reference, under <sourceRoot>/imported/<folder>/ (so the project stays self
-    // contained). Re-dropping the same file reimports it and keeps every GUID.
-    ImportResult importFile(const std::filesystem::path& file, bool force = false);
+    // ---- importing ----
+    // Starts importing (or reimporting) a file and returns at once. Files outside the source root are
+    // copied in first, with the files they reference, under <sourceRoot>/imported/<name>/ (so the
+    // project stays self contained). Re-dropping the same file reimports it and keeps every GUID.
+    // Imports run one at a time, in request order, each internally parallel; a source is never
+    // imported twice concurrently. Results arrive through pollImports().
+    ImportTicket beginImport(const std::filesystem::path& file, bool force = false);
+    // Main thread, once per frame: commits finished imports (database, .meta, index) and returns
+    // their results. Cheap when nothing finished.
+    std::vector<ImportResult> pollImports();
+    bool importsPending() const;
+    std::vector<std::string> pendingImportNames() const; // running first, then queued
 
-    // Hot reload tick: re-imports sources whose files changed since the last import.
-    // Cheap when nothing changed (stat calls only).
+    // Blocking convenience: beginImport + wait for that import. Other finished imports stay queued
+    // for the next pollImports().
+    ImportResult importFile(const std::filesystem::path& file, bool force = false);
+    // Blocks until nothing is pending and returns every result that was not polled yet.
+    std::vector<ImportResult> waitForImports();
+
+    // Hot reload tick: starts a reimport for every source whose files changed since the last import
+    // (stat calls only, cheap when nothing changed) and returns the tickets.
+    std::vector<ImportTicket> beginReimportChanged();
+    // Blocking form of the above, for tools and tests.
     std::vector<ImportResult> reimportChanged();
 
     // Applies new import settings to a source and reimports it.
@@ -131,8 +162,12 @@ public:
     const std::filesystem::path& cacheRoot() const { return m_desc.cacheRoot; }
 
 private:
-    ImportResult importSource(const std::string& relPath, bool force);
-    ImportResult copyIn(const std::filesystem::path& file, bool force);
+    struct Async;
+    ImportTicket enqueue(const std::filesystem::path& external, const std::string& relPath, bool force, std::string display);
+    ImportResult importSourceBlocking(const std::string& relPath, bool force);
+    void dispatch();
+    ImportResult waitFor(ImportTicket ticket);
+    void commit(Outcome& outcome, ImportResult& result);
     bool openContainer(AssetId id, AssetKind expected, std::optional<ContainerReader>& reader, std::string* error) const;
     void indexSource(const SourceRecord& record);
     void saveMeta(const SourceRecord& record) const;
@@ -146,6 +181,7 @@ private:
     std::unordered_map<AssetId, std::vector<AssetId>, AssetIdHash> m_deps;
     // Stamp of the last failed import per source: a broken file is reported once, not every poll.
     std::unordered_map<std::string, u64> m_failedStamps;
+    std::unique_ptr<Async> m_async;
 };
 
 } // namespace foh

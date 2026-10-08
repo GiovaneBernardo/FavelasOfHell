@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
 
 #include "foh/ecs.h"
@@ -92,4 +93,80 @@ TEST_CASE("view params place the camera and look down its local -Z") {
     const Vec4 p = v.view * Vec4(3, 4, 0, 1);
     CHECK(p.x == doctest::Approx(0.0f).epsilon(1e-4));
     CHECK(p.z == doctest::Approx(-5.0f));
+}
+
+// ---- imported meshes and materials: how MeshRenderer references reach the renderer's ids ----
+
+TEST_CASE("extraction maps asset references to renderer mesh and material ids") {
+    Fixture f;
+    World& w = f.app.world();
+    const AssetId mesh{1, 1}, material{2, 2}, unknownMesh{3, 3}, unknownMaterial{4, 4};
+
+    MeshLookup meshes;
+    meshes.set(mesh, {40, 41}); // two submeshes
+    MaterialLookup materials;
+    materials.set(material, 7);
+    f.scene.meshLookup = &meshes;
+    f.scene.materialLookup = &materials;
+
+    MeshRenderer a;
+    a.asset = mesh;
+    a.submesh = 1;
+    a.material = material;
+    MeshRenderer b;
+    b.asset = mesh;
+    b.submesh = 0;
+    b.material = unknownMaterial; // not uploaded yet: the default material
+    MeshRenderer missing;
+    missing.asset = unknownMesh;  // not uploaded yet: not drawn at all
+    MeshRenderer builtin;         // no asset: the builtin cube with the default material
+    w.spawn(Transform{}, a);
+    w.spawn(Transform{}, b);
+    w.spawn(Transform{}, missing);
+    w.spawn(Transform{}, builtin);
+
+    f.app.update(0.016f);
+    f.scene.publish();
+    const ExtractedScene& out = f.scene.read();
+    REQUIRE(out.meshes.size() == 3);
+    std::vector<std::pair<u32, u32>> got; // (mesh, material)
+    for (const ExtractedMesh& m : out.meshes) got.push_back({m.mesh, m.material});
+    std::sort(got.begin(), got.end());
+    CHECK(got[0] == std::pair<u32, u32>{static_cast<u32>(BuiltinMesh::Cube), 0});
+    CHECK(got[1] == std::pair<u32, u32>{40, 0});
+    CHECK(got[2] == std::pair<u32, u32>{41, 7});
+}
+
+TEST_CASE("without lookups an asset reference is simply not drawn") {
+    Fixture f; // scene.meshLookup stays null, like a scene created outside a renderer
+    MeshRenderer m;
+    m.asset = AssetId{9, 9};
+    f.app.world().spawn(Transform{}, m);
+    f.app.update(0.016f);
+    f.scene.publish();
+    CHECK(f.scene.read().meshes.empty());
+}
+
+TEST_CASE("camera and sun extraction use the world transform of their entities") {
+    Fixture f;
+    World& w = f.app.world();
+    const Entity rig = w.spawn(Transform{{10, 0, 0}, Quat(1, 0, 0, 0), {2, 2, 2}}); // scaled parent: must not reach the view
+    Transform local;
+    local.position = Vec3(0, 3, 0);
+    const Entity cam = w.spawn(local, Camera{});
+    w.setParent(cam, rig);
+    Transform sunT;
+    sunT.rotation = glm::angleAxis(-glm::half_pi<f32>(), Vec3(1, 0, 0)); // local -Z points down (-Y) after this rotation
+    w.spawn(sunT, DirectionalLight{});
+
+    f.app.update(0.016f);
+    f.scene.publish();
+    const ExtractedScene& out = f.scene.read();
+    REQUIRE(out.cameras.size() == 1);
+    // Position: parent (10,0,0) + parent scale 2 * local (0,3,0) = (10,6,0); axes are unit length despite the parent scale.
+    CHECK(out.cameras[0].world[3].x == doctest::Approx(10.0f));
+    CHECK(out.cameras[0].world[3].y == doctest::Approx(6.0f));
+    CHECK(glm::length(Vec3(out.cameras[0].world[0])) == doctest::Approx(1.0f));
+    REQUIRE(out.sun.present);
+    CHECK(out.sun.direction.y == doctest::Approx(-1.0f).epsilon(1e-4));
 }

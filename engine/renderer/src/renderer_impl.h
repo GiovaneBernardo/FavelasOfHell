@@ -19,7 +19,9 @@
 #include "foh/rhi/shader_library.h"
 #include "foh/rhi/swapchain.h"
 #include "gpu_structs.h"
+#include "material_store.h"
 #include "mesh_store.h"
+#include "texture_store.h"
 
 namespace foh {
 
@@ -30,9 +32,11 @@ struct SceneGpu {
         u32 first; // first instance in `instances`
         u32 count;
     };
-    std::vector<GpuInstance> instances; // sorted by mesh
+    std::vector<GpuInstance> instances; // sorted by (draw class, mesh)
+    // One instanced draw per mesh and draw class; classBegin[c]..classBegin[c + 1] are the batches of class c.
     std::vector<Batch> batches;
-    std::vector<u32> counts, cursor;    // counting-sort scratch, one slot per mesh id (kept to avoid per-frame allocation)
+    u32 classBegin[kDrawClassCount + 1] = {};
+    std::vector<u32> counts, cursor;    // counting-sort scratch, one slot per (class, mesh) (kept to avoid per-frame allocation)
 };
 
 struct SceneSlot {
@@ -99,9 +103,14 @@ struct GpuResources {
     nvrhi::BindingLayoutHandle layoutViewTexture; // b0 + t0
     nvrhi::BindingLayoutHandle layoutTexture;     // t0
     nvrhi::BindingLayoutHandle layoutDeferred;    // b0 + t0..t4 (G-buffer, depth, shadow atlas) + s0
+    nvrhi::BindingLayoutHandle layoutMaterial;    // b0 + t0 (material buffer) + s0, for the passes that sample materials
+    nvrhi::BindingLayoutHandle layoutBindless;    // the unbounded texture table, register space 1
+    nvrhi::SamplerHandle materialSampler;         // anisotropic wrap
     nvrhi::SamplerHandle shadowSampler;           // hardware PCF compare, see deferred.slang
     nvrhi::InputLayoutHandle meshInput;
     MeshStore meshes;
+    TextureStore textures;
+    MaterialStore materials;
 };
 
 struct Renderer::Impl {
@@ -147,6 +156,8 @@ struct Renderer::Impl {
 
     void createViewportTargets(Viewport& vp);
     void prepareScene(SceneSlot& slot);
+    // Creates every mesh pipeline variant up front so the first masked/double-sided material does not stall a frame.
+    void warmPipelines();
     // Resolve camera + constants, build and compile the viewport's graph (main thread).
     void buildViewportGraph(Viewport& vp);
 };

@@ -20,6 +20,7 @@ set(_common_headers
     "${CMAKE_CURRENT_SOURCE_DIR}/common/view.slangh"
     "${CMAKE_CURRENT_SOURCE_DIR}/common/fullscreen.slangh"
     "${CMAKE_CURRENT_SOURCE_DIR}/common/gbuffer.slangh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/material.slangh"
     "${CMAKE_CURRENT_SOURCE_DIR}/common/instance.slangh")
 
 set(FOH_SHADER_OUTPUTS "")
@@ -56,10 +57,16 @@ endfunction()
 if(FOH_SLANGC)
     foh_shader(fullscreen.slang vsFullscreen vertex) # shared by every fullscreen pass
     foh_shader(depth.slang vsDepth vertex)
+    foh_shader(depth.slang vsDepthMasked vertex)
+    foh_shader(depth.slang psDepthMasked fragment)
     foh_shader(shadow.slang vsShadow vertex)
+    foh_shader(shadow.slang vsShadowMasked vertex)
+    foh_shader(shadow.slang psShadowMasked fragment)
     foh_shader(opaque.slang vsOpaque vertex)
     foh_shader(opaque.slang psOpaque fragment)
+    foh_shader(opaque.slang psOpaqueMasked fragment)
     foh_shader(opaque.slang psPick fragment)
+    foh_shader(opaque.slang psPickMasked fragment)
     foh_shader(deferred.slang psDeferred fragment)
     foh_shader(sky.slang psSky fragment)
     foh_shader(grid.slang psGrid fragment)

@@ -154,6 +154,9 @@ struct PrefabNode {
     Vec3 scale{1.0f};
     AssetId mesh;                  // invalid: transform-only node
     std::vector<AssetId> materials; // one per material slot of the mesh
+    // Material slot of each submesh of the mesh. Copied here so that placing a prefab needs no mesh file read:
+    // the instance can be created at once while the mesh data streams in.
+    std::vector<u32> submeshSlots;
 };
 
 struct PrefabAsset {
@@ -214,6 +217,16 @@ FOH_API bool DeserializePrefab(const ContainerReader& reader, PrefabAsset& out, 
 FOH_API std::vector<u8> SerializePrefabVariant(const PrefabVariantAsset& variant, AssetId id);
 FOH_API bool DeserializePrefabVariant(const ContainerReader& reader, PrefabVariantAsset& out,
                                       std::string* error = nullptr);
+
+// Size and format of a texture without reading any mip data (to decide how much of it to load).
+struct TextureInfo {
+    u32 width = 0;
+    u32 height = 0;
+    u32 mipCount = 0;
+    TexelFormat format = TexelFormat::Rgba8Unorm;
+    TextureRole role = TextureRole::Color;
+};
+FOH_API bool ReadTextureInfo(const ContainerReader& reader, TextureInfo& out);
 
 // The assets a container references (read from its DEPS chunk; empty when absent).
 FOH_API std::vector<AssetId> ReadDependencies(const ContainerReader& reader);

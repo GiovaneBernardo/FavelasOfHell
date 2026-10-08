@@ -23,7 +23,9 @@
           "name": "imgui",
           "features": [ "docking-experimental", "sdl3-binding" ]
         },
-        "imguizmo"
+        "imguizmo",
+        "curl",
+        "miniz"
       ]
     },
     "tests": {

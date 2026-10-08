@@ -1,0 +1,18 @@
+# Build output / IDE
+/out/
+/build/
+/.vs/
+/.vcpkg/
+/vcpkg_installed/
+CMakeUserPresets.json
+*.user
+compile_commands.json
+
+# Cooked assets / caches (never commit)
+/cache/
+/.hotreload/
+
+# Models/textures dropped into the editor are copied here (with their .meta files) until curated into assets/
+/assets/imported/
+# Packages downloaded by the editor's assets workshop (licensed third-party content, large)
+/assets/workshop/

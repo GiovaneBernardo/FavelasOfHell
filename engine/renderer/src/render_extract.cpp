@@ -8,9 +8,9 @@ namespace {
 // PostUpdate so it sees the frame's final transforms. ResMut on the link makes
 // the scheduler serialize it against anything else touching the link.
 void extractRenderScene(ResMut<RenderSceneLink> link, Res<Time> time,
-                        Query<Entity, const Transform&, const MeshRenderer&> meshes,
-                        Query<Entity, const Transform&, const Camera&> cameras,
-                        Query<const Transform&, const DirectionalLight&> suns) {
+                        Query<Entity, const GlobalTransform&, const MeshRenderer&> meshes,
+                        Query<Entity, const GlobalTransform&, const Camera&> cameras,
+                        Query<const GlobalTransform&, const DirectionalLight&> suns) {
     RenderScene* scene = link->scene;
     if (!scene) return; // world not attached to a renderer scene (yet)
 
@@ -23,14 +23,15 @@ void extractRenderScene(ResMut<RenderSceneLink> link, Res<Time> time,
     // sequential concatenation. Order across threads is not deterministic, which
     // is fine: the renderer sorts instances by mesh and nothing depends on order.
     for (u32 i = 0; i < kMaxJobThreads; ++i) scene->staging(i).clear();
-    meshes.parEach([scene](Entity e, const Transform& t, const MeshRenderer& m) {
+    meshes.parEach([scene](Entity e, const GlobalTransform& t, const MeshRenderer& m) {
         u32 mesh = m.mesh;
         if (m.asset.isValid()) {
             // Not uploaded (yet): skip it instead of drawing the wrong thing.
             mesh = scene->meshLookup ? scene->meshLookup->find(m.asset, m.submesh) : MeshLookup::kInvalid;
             if (mesh == MeshLookup::kInvalid) return;
         }
-        scene->staging(JobSystem::currentThreadSlot()).push_back({t.matrix(), m.color, mesh, 0, e.id});
+        const u32 material = m.material.isValid() && scene->materialLookup ? scene->materialLookup->find(m.material) : 0u;
+        scene->staging(JobSystem::currentThreadSlot()).push_back({t.matrix(), m.color, mesh, material, e.id});
     });
     size_t total = 0;
     for (u32 i = 0; i < kMaxJobThreads; ++i) total += scene->staging(i).size();
@@ -41,15 +42,17 @@ void extractRenderScene(ResMut<RenderSceneLink> link, Res<Time> time,
         out.meshes.insert(out.meshes.end(), s.begin(), s.end());
     }
 
-    cameras.each([&out](Entity e, const Transform& t, const Camera& c) {
-        const Mat4 world = glm::translate(Mat4(1.0f), t.position) * glm::mat4_cast(t.rotation);
+    cameras.each([&out](Entity e, const GlobalTransform& t, const Camera& c) {
+        // Cameras look through a rigid transform: scale (inherited from a parent) must not reach the view matrix.
+        const Vec3 x = glm::normalize(t.axisX()), y = glm::normalize(t.axisY()), z = glm::normalize(t.axisZ());
+        const Mat4 world(Vec4(x, 0.0f), Vec4(y, 0.0f), Vec4(z, 0.0f), Vec4(t.position(), 1.0f));
         out.cameras.push_back({e.id, world, c.fovY, c.nearZ, c.farZ, c.active});
     });
 
-    suns.each([&out](const Transform& t, const DirectionalLight& l) {
+    suns.each([&out](const GlobalTransform& t, const DirectionalLight& l) {
         if (out.sun.present) return; // first one wins; multiple suns are a content error
         out.sun.present = true;
-        out.sun.direction = t.rotation * Vec3(0.0f, 0.0f, -1.0f);
+        out.sun.direction = -glm::normalize(t.axisZ()); // shines along the entity's local -Z
         out.sun.color = l.color * l.intensity;
     });
 }
@@ -58,7 +61,7 @@ void extractRenderScene(ResMut<RenderSceneLink> link, Res<Time> time,
 
 void RegisterRenderExtract(App& app) {
     app.registerComponent<Name>();
-    app.registerComponent<Transform>();
+    RegisterTransformPropagation(app); // Transform, GlobalTransform and their systems; must precede the extraction system below
     app.registerComponent<MeshRenderer>();
     app.registerComponent<Camera>();
     app.registerComponent<DirectionalLight>();

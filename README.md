@@ -55,11 +55,11 @@ Non-goals (for now): console builds, multiplayer, dual-contouring/voxel terrain.
 /engine          all modules fold into ONE shared library, foh_engine.dll
   /core          types, math (glm wrappers), logging, asserts, platform macros   [exists]
   /platform      window + input events (SDL3), dynamic libraries, files, PNG     [exists]
-  /jobs          job system: worker pool, fork-join counters, thread slots       [exists]
+  /jobs          job system: worker pool, fork-join, parallelFor, normal/low priority   [exists]
   /ecs           Bevy-style layer on flecs: World, App, plugins, Query/Res/Commands, parallel scheduler   [exists]
   /host          game-module ABI + hot-reload host                               [exists]
   /assets        chunked container, asset types, asset database, glTF/FBX/image importers (ADR 0004)   [exists]
-  /scene         prefab instantiation, imported-mesh upload, reimport sync (assets + ECS + renderer)   [exists]
+  /scene         prefab instantiation, asynchronous asset streaming to the renderer, reimport sync   [exists]
   /renderer      render graph, D3D12 device/swapchain via NVRHI, scenes + viewports,
                  shader library, ECS render extraction (ADR 0003)                 [exists]
   /physics       Jolt integration (placeholder)                                  [exists]
@@ -253,7 +253,7 @@ Smoke/QA flags (both executables): `--frames N` renders N frames and exits with 
 
 ### Dependencies (vcpkg manifest, `vcpkg.json`)
 
-flecs (MIT; ECS storage and queries, private to `engine/ecs`), glm, Jolt Physics, NVRHI (D3D12 + Vulkan), SDL3, zstd, lz4, cgltf (MIT, glTF parser) and stb (public domain / MIT, `stb_image` decoding), both header-only and private to `engine/assets`, Dear ImGui (docking, editor only), doctest (tests). **Vendored in `third_party/`** (not in our vcpkg baseline): ufbx (MIT / public domain, FBX loader; see `third_party/ufbx/README.md`). Shaders are compiled with `slangc` from the Vulkan SDK (the vcpkg `shaders` feature, which builds Slang itself, stays available as an alternative). vcpkg is pinned to a fixed commit (`builtin-baseline`) for reproducible builds; `cmake/toolchain.cmake` uses `$VCPKG_ROOT` if set (Visual Studio sets it) or bootstraps `.vcpkg/`. Triplet: `x64-windows-static-md` (third-party static, dynamic CRT).
+flecs (MIT; ECS storage and queries, private to `engine/ecs`), glm, Jolt Physics, NVRHI (D3D12 + Vulkan), SDL3, zstd, lz4, cgltf (MIT, glTF parser) and stb (public domain / MIT, `stb_image` decoding), both header-only and private to `engine/assets`, Dear ImGui (docking, editor only), libcurl (HTTPS, schannel on Windows) and miniz (MIT, zip extraction) for the editor's assets workshop (ADR 0006), doctest (tests). **Vendored in `third_party/`** (not in our vcpkg baseline): ufbx (MIT / public domain, FBX loader; see `third_party/ufbx/README.md`) and bc7enc_rdo (MIT / public domain, BC7 + BC1-BC5 block encoders; `bc7decomp` is linked into the tests only; see `third_party/bc7enc/README.md`). Shaders are compiled with `slangc` from the Vulkan SDK (the vcpkg `shaders` feature, which builds Slang itself, stays available as an alternative). vcpkg is pinned to a fixed commit (`builtin-baseline`) for reproducible builds; `cmake/toolchain.cmake` uses `$VCPKG_ROOT` if set (Visual Studio sets it) or bootstraps `.vcpkg/`. Triplet: `x64-windows-static-md` (third-party static, dynamic CRT).
 
 ## Decision Log
 
@@ -277,7 +277,10 @@ flecs (MIT; ECS storage and queries, private to `engine/ecs`), glm, Jolt Physics
 | Art direction: realistic lighting and models, dense wires/poles, tight streets, street businesses | Decided |
 | Asset format: chunked container + reflection metadata + descriptor-based bulk data (no FlatBuffers) | Decided |
 | Model import: a source file (gltf/fbx) is an asset with GUID-addressed sub-assets (mesh, material, texture, base prefab), generated base prefab + prefab variants for edits, static geometry first ([ADR 0004](docs/adr/0004-model-and-texture-import.md)) (2026-10-08) | Decided, implemented (see ADR 0004 "Implementation status" for what is still open) |
-| Asset import dependencies: cgltf (glTF), ufbx (FBX, vendored), stb_image (decoding) (2026-10-08) | Decided |
+| Editor UI: DPI-derived UI scale + system font, content browser with async thumbnails (atlas, CPU-rasterized model previews), assets workshop (ambientCG, Poly Haven, Sketchfab; curl + miniz; FreePBR excluded: no API) ([ADR 0005](docs/adr/0005-editor-ui-content-browser-workshop.md)) (2026-10-08) | Decided, implemented |
+| Asset import dependencies: cgltf (glTF), ufbx (FBX, vendored), stb_image (decoding), bc7enc_rdo (BC7/BC5, vendored) (2026-10-08) | Decided |
+| Transforms: `Transform` local + computed `GlobalTransform`, change-driven propagation ([ADR 0006](docs/adr/0006-materials-streaming-transforms.md)) (2026-10-08) | Decided, implemented |
+| Materials: material buffer + bindless texture table, draw classes for alpha mask / double sided, textures BC7/BC5, async import + streaming under byte/time budgets, low-priority job class ([ADR 0006](docs/adr/0006-materials-streaming-transforms.md)) (2026-10-08) | Decided, implemented |
 | Hybrid real-data + procedural world | Decided |
 | Hardware: min RTX 2060 / RX 6600, dev RTX 5070 Ti; RT optional | Decided |
 | Hot reload goal: save code, see it live in ~1-3 s with state preserved (DLL reload baseline, Live++ optional) | Decided |
