@@ -1,0 +1,13 @@
+# Build output / IDE
+/out/
+/build/
+/.vs/
+/.vcpkg/
+/vcpkg_installed/
+CMakeUserPresets.json
+*.user
+compile_commands.json
+
+# Cooked assets / caches (never commit)
+/cache/
+/.hotreload/

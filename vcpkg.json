@@ -1,0 +1,35 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "gtabr",
+  "version-string": "0.0.1",
+  "builtin-baseline": "2750401336fb7c95f6619657a46a7e798661341c",
+  "dependencies": [
+    "flecs",
+    "glm",
+    "joltphysics",
+    "nvrhi",
+    "sdl3",
+    "zstd",
+    "lz4"
+  ],
+  "default-features": [ "editor", "tests" ],
+  "features": {
+    "editor": {
+      "description": "Dear ImGui for the editor",
+      "dependencies": [
+        {
+          "name": "imgui",
+          "features": [ "docking-experimental", "sdl3-binding" ]
+        }
+      ]
+    },
+    "tests": {
+      "description": "Unit tests",
+      "dependencies": [ "doctest" ]
+    },
+    "shaders": {
+      "description": "Slang shader compiler (enable when renderer work starts)",
+      "dependencies": [ "shader-slang" ]
+    }
+  }
+}
