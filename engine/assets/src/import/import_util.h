@@ -43,6 +43,10 @@ bool probeImage(const u8* data, size_t size, std::string& error);
 // Merges identical vertices (FBX gives one vertex per face corner).
 void weldVertices(ImportedMesh& mesh);
 
+// Four joint influences -> bytes: strongest first, weights normalised to sum to exactly 255 (largest remainder).
+// Unused slots have weight 0. False (outputs zeroed) when no weight is positive.
+bool packSkinInfluences(const u32 joints[4], const f32 weights[4], u8 outJoints[4], u8 outWeights[4]);
+
 // Lower-case copy of the file extension including the dot.
 std::string lowerExtension(const std::filesystem::path& p);
 

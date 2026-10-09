@@ -16,12 +16,14 @@ foh_add_engine_module(renderer
         src/gpu_format.cpp
         src/material_store.cpp
         src/mesh_store.cpp
+        src/post_process.cpp
         src/render_extract.cpp
         src/renderer.cpp
         src/shadow_cascades.cpp
         src/texture_store.cpp
         src/transform_propagation.cpp
         src/viewport_graph.cpp
+        src/water.cpp
         src/rhi/graphics_device.cpp
         src/rhi/pipeline_cache.cpp
         src/rhi/render_graph.cpp

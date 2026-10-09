@@ -15,10 +15,10 @@ constexpr u32 kTagIndx = FourCC('I', 'N', 'D', 'X');
 constexpr u32 kTagDeps = FourCC('D', 'E', 'P', 'S');
 constexpr u32 kMaxMips = 24;
 
-constexpr u32 kMeshVersion = 1;
+constexpr u32 kMeshVersion = 2; // 2: skeleton reference (skinned meshes)
 constexpr u32 kMaterialVersion = 1;
 constexpr u32 kTextureVersion = 1;
-constexpr u32 kPrefabVersion = 2; // 2: nodes carry submeshSlots
+constexpr u32 kPrefabVersion = 3; // 2: nodes carry submeshSlots, 3: skeleton reference
 constexpr u32 kVariantVersion = 1;
 
 u32 mipTag(u32 level) { return FourCC('M', 'I', 'P', static_cast<char>(level)); }
@@ -85,6 +85,8 @@ const char* AssetKindName(AssetKind kind) {
         case AssetKind::Texture: return "texture";
         case AssetKind::Prefab: return "prefab";
         case AssetKind::PrefabVariant: return "variant";
+        case AssetKind::Skeleton: return "skeleton";
+        case AssetKind::AnimationClip: return "clip";
         case AssetKind::None: break;
     }
     return "none";
@@ -92,7 +94,7 @@ const char* AssetKindName(AssetKind kind) {
 
 AssetKind AssetKindFromName(std::string_view name) {
     for (AssetKind k : {AssetKind::Mesh, AssetKind::Material, AssetKind::Texture, AssetKind::Prefab,
-                        AssetKind::PrefabVariant})
+                        AssetKind::PrefabVariant, AssetKind::Skeleton, AssetKind::AnimationClip})
         if (name == AssetKindName(k)) return k;
     return AssetKind::None;
 }
@@ -104,6 +106,8 @@ const char* AssetKindExtension(AssetKind kind) {
         case AssetKind::Texture: return "ftex";
         case AssetKind::Prefab: return "fprefab";
         case AssetKind::PrefabVariant: return "fvariant";
+        case AssetKind::Skeleton: return "fskel";
+        case AssetKind::AnimationClip: return "fclip";
         case AssetKind::None: break;
     }
     return "fasset";
@@ -134,13 +138,14 @@ std::vector<u8> SerializeMesh(const MeshAsset& m, AssetId id) {
         w.putVec3(s.boundsMin);
         w.putVec3(s.boundsMax);
     }
+    w.putId(m.skeleton);
 
     ContainerWriter c(static_cast<u32>(AssetKind::Mesh), kMeshVersion, id);
     c.addChunk(kTagMeta, w.bytes());
     c.addChunk(kTagVert, m.vertexData, ChunkCodec::Lz4);
     c.addChunk(kTagIndx, std::span<const u8>(reinterpret_cast<const u8*>(m.indices.data()), m.indices.size() * 4),
                ChunkCodec::Lz4);
-    c.addChunk(kTagDeps, deps({}));
+    c.addChunk(kTagDeps, deps({m.skeleton}));
     return c.finish();
 }
 
@@ -166,7 +171,7 @@ bool DeserializeMesh(const ContainerReader& reader, MeshAsset& out, std::string*
         s.semantic = static_cast<VertexSemantic>(r.get<u8>());
         s.format = static_cast<VertexFormat>(r.get<u8>());
         s.offset = r.get<u32>();
-        if (s.format > VertexFormat::Float4) return setError(error, "unknown vertex format");
+        if (s.format > VertexFormat::Unorm8x4) return setError(error, "unknown vertex format");
         m.streams.push_back(s);
     }
     const u32 subCount = r.getCount(36);
@@ -179,6 +184,7 @@ bool DeserializeMesh(const ContainerReader& reader, MeshAsset& out, std::string*
         s.boundsMax = r.getVec3();
         m.subMeshes.push_back(s);
     }
+    if (reader.typeVersion() >= 2) m.skeleton = r.getId();
     if (!r.ok()) return setError(error, "truncated mesh metadata");
 
     if (m.vertexStride == 0 || m.vertexStride > 256) return setError(error, "bad vertex stride");
@@ -187,6 +193,12 @@ bool DeserializeMesh(const ContainerReader& reader, MeshAsset& out, std::string*
     for (const VertexStream& s : m.streams)
         if (static_cast<u64>(s.offset) + VertexFormatSize(s.format) > m.vertexStride)
             return setError(error, "vertex stream outside the vertex");
+    if (m.skinned()) {
+        const VertexStream* joints = m.findStream(VertexSemantic::Joints0);
+        const VertexStream* weights = m.findStream(VertexSemantic::Weights0);
+        if (!joints || joints->format != VertexFormat::U8x4 || !weights || weights->format != VertexFormat::Unorm8x4)
+            return setError(error, "skinned mesh without joint and weight streams");
+    }
     for (const SubMesh& s : m.subMeshes) {
         if (s.firstIndex > indexCount || s.indexCount > indexCount - s.firstIndex)
             return setError(error, "submesh outside the index buffer");
@@ -380,6 +392,8 @@ std::vector<u8> SerializePrefab(const PrefabAsset& p, AssetId id) {
         refs.push_back(n.mesh);
         refs.insert(refs.end(), n.materials.begin(), n.materials.end());
     }
+    w.putId(p.skeleton);
+    refs.push_back(p.skeleton);
     ContainerWriter c(static_cast<u32>(AssetKind::Prefab), kPrefabVersion, id);
     c.addChunk(kTagMeta, w.bytes(), ChunkCodec::Lz4);
     c.addChunk(kTagDeps, deps(refs));
@@ -412,6 +426,7 @@ bool DeserializePrefab(const ContainerReader& reader, PrefabAsset& out, std::str
         if (n.parent >= static_cast<i32>(i) || n.parent < -1) return setError(error, "prefab node parent out of order");
         p.nodes.push_back(std::move(n));
     }
+    if (reader.typeVersion() >= 3) p.skeleton = r.getId();
     if (!r.ok()) return setError(error, "truncated prefab metadata");
     out = std::move(p);
     return true;

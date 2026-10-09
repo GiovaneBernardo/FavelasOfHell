@@ -36,6 +36,7 @@ enum class RgBlend : u8 {
     Opaque, // overwrite
     Alpha,  // src.a * src + (1 - src.a) * dst, destination alpha kept
     Premultiplied, // src + (1 - src.a) * dst, destination alpha kept
+    Additive,      // src + dst (the target keeps what it holds: bloom upsample), destination alpha kept
 };
 
 struct RgFullscreenState {

@@ -23,7 +23,9 @@
 #include "gpu_structs.h"
 #include "material_store.h"
 #include "mesh_store.h"
+#include "post_process.h"
 #include "texture_store.h"
+#include "water.h"
 
 namespace foh {
 
@@ -59,6 +61,13 @@ struct ViewFrame {
     const SceneGpu* scene = nullptr;
     CloudConstants clouds{};
     nvrhi::IBuffer* cloudCb = nullptr;
+    WaterConstants water{};
+    nvrhi::IBuffer* waterCb = nullptr;
+    PostConstants post{};
+    nvrhi::IBuffer* postCb = nullptr;
+    nvrhi::IBuffer* exposureState = nullptr;
+    u32 bloomLevels = 0; // 0 = bloom off for this frame
+    u32 waterRings = 0; // clipmap rings (levels) this view draws
     nvrhi::IBuffer* viewCb = nullptr;
     nvrhi::IBuffer* shadowCb = nullptr;
     u32 width = 0;
@@ -100,6 +109,16 @@ struct Viewport {
     u64 cloudLastFrame = 0;
     Mat4 cloudPrevViewProj{1.0f};
 
+    nvrhi::BufferHandle waterCb; // volatile; created on first use
+
+    // Post-processing: constants for the exposure / bloom / tonemap passes, and the adapted exposure (it persists across
+    // frames, so every viewport adapts on its own). `exposureValid` false = the next frame snaps to the target.
+    nvrhi::BufferHandle postCb; // volatile
+    nvrhi::BufferHandle exposureState;
+    bool exposureValid = false;
+    u64 exposureLastFrame = 0;
+    f32 exposureLastTime = 0.0f;
+
     ViewportDebugInfo debug;
 
     enum class PickState : u8 { Idle, Requested, InFlight, Ready };
@@ -135,6 +154,8 @@ struct Renderer::Impl {
     std::unique_ptr<PipelineCache> pipelines;
     GpuResources gpu;
     Clouds clouds;
+    Water water;
+    PostProcess post;
     Atmosphere atmosphere; // after `device`/`pipelines`/`shaders`: it must be destroyed before them
     MeshLookup meshLookup; // imported mesh asset -> mesh ids in gpu.meshes
     // Replaced/released mesh ids stay valid for a few frames: scene snapshots already extracted

@@ -114,6 +114,42 @@ bool probeImage(const u8* data, size_t size, std::string& error) {
     return true;
 }
 
+bool packSkinInfluences(const u32 joints[4], const f32 weights[4], u8 outJoints[4], u8 outWeights[4]) {
+    std::memset(outJoints, 0, 4);
+    std::memset(outWeights, 0, 4);
+    u32 order[4] = {0, 1, 2, 3};
+    std::stable_sort(order, order + 4, [&](u32 a, u32 b) { return weights[a] > weights[b]; });
+    f32 total = 0.0f;
+    for (u32 i = 0; i < 4; ++i) total += std::max(weights[i], 0.0f);
+    if (!(total > 0.0f)) return false;
+
+    f32 scaled[4];
+    u32 sum = 0;
+    for (u32 i = 0; i < 4; ++i) {
+        const u32 src = order[i];
+        outJoints[i] = static_cast<u8>(std::min(joints[src], 255u));
+        scaled[i] = std::max(weights[src], 0.0f) / total * 255.0f;
+        outWeights[i] = static_cast<u8>(scaled[i]);
+        sum += outWeights[i];
+    }
+    while (sum < 255) { // hand the rounding remainder to the largest fractions
+        u32 best = 0;
+        f32 bestFraction = -1.0f;
+        for (u32 i = 0; i < 4; ++i) {
+            const f32 fraction = scaled[i] - static_cast<f32>(outWeights[i]);
+            if (scaled[i] > 0.0f && fraction > bestFraction) {
+                bestFraction = fraction;
+                best = i;
+            }
+        }
+        ++outWeights[best];
+        ++sum;
+    }
+    for (u32 i = 0; i < 4; ++i)
+        if (outWeights[i] == 0) outJoints[i] = 0;
+    return true;
+}
+
 void weldVertices(ImportedMesh& mesh) {
     struct Hash {
         size_t operator()(const ImportedVertex& v) const { return static_cast<size_t>(HashBytes(&v, sizeof(v))); }

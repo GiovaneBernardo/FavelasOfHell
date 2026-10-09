@@ -1,0 +1,21 @@
+// Water surface constants. MIRRORED by foh::WaterConstants in engine/renderer/src/water.h: change both together
+// (the C++ side has a static_assert on the size).
+#pragma once
+
+static const int kWaterGerstnerWaves = 6;
+static const float kWaterGravity = 9.81;
+static const float kWaterProbeSize = 128.0; // texels per side of the sky probe (kWaterProbeSize in water.h)
+
+struct WaterConstants {
+    float4 level;      // x = sea level (m), y = time (s), z = chop (horizontal displacement scale), w = 1 if the camera is underwater
+    float4 cascade;    // xyz = tile length (m) of cascades 0..2, w = 1 for the FFT waves, 0 for the Gerstner fallback
+    float4 grid;       // x = cell size of ring level 0 (m), y = cells per side, z = ring levels, w = cascade 0 texel size (m)
+    float4 absorb;     // rgb = absorption (1 / m), w = refraction strength
+    float4 body;       // rgb = scattering albedo of the water body, w = scattering density (1 / m)
+    float4 foam;       // x = whitecap amount, y = shore foam amount, z = foam noise scale (1 / m), w = breaker zone depth (m)
+    float4 bed;        // xy = origin (m), zw = 1 / size (1 / m) of the sea-floor height field
+    float4 bedParams;  // x = 1 if there is a height field, y = shoaling depth (m), z = depth assumed without one (m), w = sand brightness
+    float4 reflection; // x = SSR steps (0 = off), y = SSR max distance (m), z = SSR thickness (m), w = sky parallax altitude (m)
+    float4 misc;       // x = frame % 4096, y = highest mip of the wave textures, z = wind direction (rad), w = Gerstner foam threshold (Jacobian)
+    float4 gerstner[6]; // xy = direction, z = amplitude (m), w = wavenumber (rad / m)
+};

@@ -25,6 +25,7 @@ add_executable(foh_editor
     src/theme.cpp
     src/thumb_loaders.cpp
     src/thumbnails.cpp
+    src/water_test_scene.cpp
     src/workshop/http_client.cpp
     src/workshop/json.cpp
     src/workshop/material_recipe.cpp

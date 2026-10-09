@@ -33,7 +33,7 @@
 
 namespace foh {
 
-inline constexpr u32 kImporterVersion = 2; // bump when cooking output changes: forces a reimport
+inline constexpr u32 kImporterVersion = 3; // bump when cooking output changes: forces a reimport
 
 struct AssetDbDesc {
     std::filesystem::path sourceRoot;
@@ -151,6 +151,8 @@ public:
     bool load(AssetId id, TextureAsset& out, u32 firstMip = 0, std::string* error = nullptr) const;
     bool load(AssetId id, PrefabAsset& out, std::string* error = nullptr) const;
     bool load(AssetId id, PrefabVariantAsset& out, std::string* error = nullptr) const;
+    bool load(AssetId id, SkeletonAsset& out, std::string* error = nullptr) const;
+    bool load(AssetId id, ClipAsset& out, std::string* error = nullptr) const;
     // A prefab with a variant's overrides applied. Accepts a prefab or a variant id.
     bool loadResolvedPrefab(AssetId id, VariantApplyResult& out, std::string* error = nullptr) const;
 

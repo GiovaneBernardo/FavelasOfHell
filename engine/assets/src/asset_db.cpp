@@ -87,6 +87,11 @@ void AssetDb::saveMeta(const SourceRecord& r) const {
     out << "setting compressTextures " << (r.settings.compressTextures ? 1 : 0) << '\n';
     out << "setting maxTextureSize " << r.settings.maxTextureSize << '\n';
     out << "setting textureRole " << r.settings.textureRole << '\n';
+    out << "setting clipLoop " << r.settings.clipLoop << '\n';
+    out << "setting clipRootMotion " << r.settings.clipRootMotion << '\n';
+    out << "setting clipRootJoint " << r.settings.clipRootJoint << '\n';
+    out << "setting clipRotationToleranceDeg " << r.settings.clipRotationToleranceDeg << '\n';
+    out << "setting clipTranslationTolerance " << r.settings.clipTranslationTolerance << '\n';
     for (const std::string& f : r.files) out << "file " << f << '\n';
     // sub <kind> <guid> <live|dead> <deps comma separated or -> <key> <name>, tab separated
     for (const SubAssetRecord& s : r.subAssets) {
@@ -146,6 +151,11 @@ bool AssetDb::loadMeta(const fs::path& metaFile, SourceRecord& out) const {
             else if (name == "compressTextures") r.settings.compressTextures = v != "0";
             else if (name == "maxTextureSize") r.settings.maxTextureSize = static_cast<u32>(std::strtoul(v.c_str(), nullptr, 10));
             else if (name == "textureRole") r.settings.textureRole = v;
+            else if (name == "clipLoop") r.settings.clipLoop = v;
+            else if (name == "clipRootMotion") r.settings.clipRootMotion = v;
+            else if (name == "clipRootJoint") r.settings.clipRootJoint = v;
+            else if (name == "clipRotationToleranceDeg") r.settings.clipRotationToleranceDeg = std::strtof(v.c_str(), nullptr);
+            else if (name == "clipTranslationTolerance") r.settings.clipTranslationTolerance = std::strtof(v.c_str(), nullptr);
         }
     }
     if (!r.guid.isValid()) return false;
@@ -833,6 +843,14 @@ bool AssetDb::load(AssetId id, MaterialAsset& out, std::string* error) const {
 bool AssetDb::load(AssetId id, TextureAsset& out, u32 firstMip, std::string* error) const {
     std::optional<ContainerReader> reader;
     return openContainer(id, AssetKind::Texture, reader, error) && DeserializeTexture(*reader, out, firstMip, error);
+}
+bool AssetDb::load(AssetId id, SkeletonAsset& out, std::string* error) const {
+    std::optional<ContainerReader> reader;
+    return openContainer(id, AssetKind::Skeleton, reader, error) && DeserializeSkeleton(*reader, out, error);
+}
+bool AssetDb::load(AssetId id, ClipAsset& out, std::string* error) const {
+    std::optional<ContainerReader> reader;
+    return openContainer(id, AssetKind::AnimationClip, reader, error) && DeserializeClip(*reader, out, error);
 }
 bool AssetDb::load(AssetId id, PrefabAsset& out, std::string* error) const {
     std::optional<ContainerReader> reader;

@@ -237,7 +237,7 @@ void Clouds::fill(CloudConstants& c, f32 time, u64 frame, f32 historyWeight) con
     const f32 coverage = std::clamp(m_weather.coverage + d.coverageBias, 0.0f, 1.0f);
     // The weather layers cross-fade slowly (a few minutes per swing): the pattern keeps reshaping by itself.
     const f32 phase = 0.5f + 0.5f * std::sin(time * 0.02f);
-    c.layer = Vec4(d.baseAltitude, d.baseAltitude + d.thickness, 0.0f, d.density * m_weather.density);
+    c.layer = Vec4(d.baseAltitude, d.baseAltitude + d.thickness, 1.0f, d.density * m_weather.density);
     c.weather = Vec4(coverage, m_weather.type, m_weather.storm, phase);
     c.noise = Vec4(1.0f / (kShapeTile * d.cloudScale), 1.0f / (kDetailTile * d.cloudScale), 1.0f / (kWeatherTile * d.cloudScale),
                    d.detail * 0.8f);

@@ -1,4 +1,5 @@
 #include "editor.h"
+#include "water_test_scene.h"
 
 #include <algorithm>
 #include <cctype>
@@ -124,6 +125,7 @@ bool Editor::init() {
     }
     createDebugScene();
     createPreviewScene();
+    createWaterScene();
 
     // ---- viewport panels ----
     auto addViewport = [&](const char* title, size_t sceneIndex, bool editorCamera, bool grid) {
@@ -151,6 +153,24 @@ bool Editor::init() {
     m_viewports[m_previewViewport].initialW = 560.0f;
     m_viewports[m_previewViewport].initialH = 460.0f;
     m_viewports[m_previewViewport].camera.farZ = 500.0f;
+    addViewport("Water Test", m_waterScene, true, false);
+    m_waterViewport = m_viewports.size() - 1;
+    {
+        ViewportPanel& wp = m_viewports[m_waterViewport];
+        wp.water = true;
+        wp.open = m_options.waterTest >= 0; // off by default: the sea costs GPU time and the real terrain does not exist yet
+        wp.camera.farZ = 6000.0f;
+        m_renderer->setViewportFlags(wp.id, ViewportFlags::Sky | ViewportFlags::Water);
+        struct View { Vec3 position; f32 yaw, pitch; };
+        const View views[] = {{{-40.0f, 55.0f, -300.0f}, 3.1416f, -0.14f},   // from the hill over the cove
+                              {{30.0f, 3.0f, -160.0f}, 3.1416f, -0.04f},      // standing on the beach
+                              {{0.0f, 380.0f, -500.0f}, 3.1416f, -0.55f},     // high over the bay
+                              {{200.0f, 9.0f, 330.0f}, 3.1416f - 0.5f, -0.10f}}; // facing the islet
+        const View& v = views[std::clamp(m_options.waterTest, 0, 3)];
+        wp.camera.position = v.position;
+        wp.camera.yaw = v.yaw;
+        wp.camera.pitch = v.pitch;
+    }
 
     m_thumbs.init(*m_renderer, *m_jobs);
     m_showWorkshop = m_options.openWorkshop;
@@ -579,6 +599,61 @@ void Editor::createPreviewScene() {
     m_scenes.push_back(std::move(scene));
 }
 
+ViewportFlags Editor::FlagsOf(const ViewportPanel& p) {
+    return (p.sky ? ViewportFlags::Sky : ViewportFlags::None) | (p.grid ? ViewportFlags::Grid : ViewportFlags::None) |
+           (p.water ? ViewportFlags::Water : ViewportFlags::None);
+}
+
+// The editor's coast: the terrain mesh and the water's sea-floor texture come from the same height function.
+void Editor::createWaterScene() {
+    AppConfig cfg;
+    cfg.jobs = m_jobs.get();
+    SceneEntry scene;
+    scene.name = "Water Test";
+    scene.app = std::make_unique<App>(cfg);
+    RenderExtractPlugin extract;
+    scene.app->addPlugin(extract);
+    scene.renderScene = m_renderer->createScene("Water Test");
+    scene.app->world().resource<RenderSceneLink>()->scene = m_renderer->scene(scene.renderScene);
+
+    const WaterTestMesh mesh = BuildWaterTestMesh(4.0f);
+    const AssetId terrainId{0x57A7E5C0A57ull, 1};
+    const MeshIndexRange whole{0, static_cast<u32>(mesh.indices.size())};
+    if (!m_renderer->uploadMeshAsset(terrainId, MeshGeometry{mesh.positions, mesh.normals, mesh.uvs, {}, mesh.indices}, std::span(&whole, 1))) {
+        FOH_ERROR("water test: could not upload the terrain mesh");
+    }
+    const u32 bedSize = 512;
+    const std::vector<f32> bed = BuildWaterTestBed(bedSize);
+    WaterBedDesc bd;
+    bd.origin = Vec2(-WaterTestTerrain::kHalfSize);
+    bd.size = Vec2(2.0f * WaterTestTerrain::kHalfSize);
+    bd.width = bd.height = bedSize;
+    bd.heights = bed;
+    m_renderer->setWaterBed(bd);
+
+    World& w = scene.app->world();
+    MeshRenderer ground;
+    ground.color = Vec4(0.55f, 0.50f, 0.38f, 1.0f);
+    ground.asset = terrainId;
+    w.spawn(Transform{}, ground, Name::Make("Coast"));
+    // Things to reflect and to break the waves around: houses on the shore, a pier, a boat.
+    auto box = [&](Vec3 at, Vec3 size, Vec4 color, const char* name) {
+        w.spawn(Transform{at, Quat(1, 0, 0, 0), size}, MeshRenderer{static_cast<u32>(BuiltinMesh::Cube), color}, Name::Make(name));
+    };
+    for (int i = 0; i < 7; ++i) {
+        const f32 x = -150.0f + 55.0f * static_cast<f32>(i), z = -215.0f - 14.0f * static_cast<f32>((i * 5) % 4);
+        const f32 h = 6.0f + 3.0f * static_cast<f32>(i % 3);
+        box({x, WaterTestTerrain::height(x, z) + h * 0.5f, z}, {11.0f, h, 9.0f},
+            {0.75f - 0.07f * static_cast<f32>(i % 4), 0.62f, 0.50f + 0.06f * static_cast<f32>(i % 3), 1.0f}, "House");
+    }
+    box({60.0f, 0.9f, -60.0f}, {4.0f, 0.35f, 150.0f}, {0.38f, 0.30f, 0.22f, 1.0f}, "Pier");
+    box({-120.0f, 0.5f, 120.0f}, {10.0f, 2.2f, 4.0f}, {0.85f, 0.85f, 0.88f, 1.0f}, "Boat");
+    w.spawn(Transform{{0, 0, 0}, glm::quatLookAt(glm::normalize(Vec3(0.30f, -0.50f, -0.55f)), Vec3(0, 1, 0)), {1, 1, 1}},
+            DirectionalLight{{1.0f, 0.96f, 0.9f}, 3.2f}, Name::Make("Sun"));
+    m_waterScene = m_scenes.size();
+    m_scenes.push_back(std::move(scene));
+}
+
 void Editor::shutdown() {
     if (m_renderer) m_renderer->device().waitIdle();
     m_prefs.save();
@@ -791,6 +866,7 @@ void Editor::buildDockLayout(unsigned int dockspaceId) {
     right = ImGui::DockBuilderSplitNode(top, ImGuiDir_Right, 0.34f, nullptr, &left);
     bottomRight = ImGui::DockBuilderSplitNode(bottom, ImGuiDir_Right, 0.24f, nullptr, &bottomLeft);
     ImGui::DockBuilderDockWindow("Scene", left);
+    ImGui::DockBuilderDockWindow("Water Test", left);
     ImGui::DockBuilderDockWindow("Game", right);
     ImGui::DockBuilderDockWindow("Animation Debug", right);
     ImGui::DockBuilderDockWindow("Prefab Preview", right);
@@ -809,6 +885,7 @@ void Editor::buildUi(float dt) {
         m_dockLayoutBuilt = true;
     }
 
+    if (m_options.waterTest >= 0 && m_frameCount == 2) ImGui::SetWindowFocus("Water Test");
     for (ViewportPanel& p : m_viewports) drawViewport(p, dt);
     if (m_showEntities) m_inspector.drawEntities(m_sceneRefs, m_selection, &m_showEntities);
     if (m_showInspector) m_inspector.drawInspector(m_sceneRefs, m_selection, &m_showInspector);
@@ -842,6 +919,13 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
     }
 
     if (p.initialW > 0.0f) ImGui::SetNextWindowSize(ImVec2(p.initialW * m_theme.scale(), p.initialH * m_theme.scale()), ImGuiCond_FirstUseEver);
+    if (m_options.waterTest >= 0 && &p == &m_viewports[m_waterViewport] && m_frameCount < 8) {
+        // QA (--water-test): the water panel takes the whole window so screenshots show it big.
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowDockID(0, ImGuiCond_Always);
+        ImGui::SetNextWindowPos(vp->WorkPos, ImGuiCond_Always);
+        ImGui::SetNextWindowSize(vp->WorkSize, ImGuiCond_Always);
+    }
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     const bool visible = ImGui::Begin(p.title.c_str(), &p.open, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
@@ -956,10 +1040,7 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
                 ImGui::Checkbox("Local", &m_gizmoLocal);
                 ImGui::SameLine();
             }
-            if (ImGui::Checkbox("Grid", &p.grid)) {
-                m_renderer->setViewportFlags(p.id, (p.sky ? ViewportFlags::Sky : ViewportFlags::None) |
-                                                       (p.grid ? ViewportFlags::Grid : ViewportFlags::None));
-            }
+            if (ImGui::Checkbox("Grid", &p.grid)) m_renderer->setViewportFlags(p.id, FlagsOf(p));
         }
         ImGui::EndChild();
         ImGui::PopStyleVar();
@@ -983,6 +1064,18 @@ void Editor::loadRenderSettings() {
     r.aerialPerspective = m_prefs.getBool("render.aerial", r.aerialPerspective);
     r.exposure = m_prefs.getFloat("render.exposure", r.exposure);
     r.dither = m_prefs.getBool("render.dither", r.dither);
+    r.tonemapper = static_cast<Tonemapper>(static_cast<int>(m_prefs.getFloat("render.tonemapper", static_cast<float>(r.tonemapper))));
+    r.whitePoint = m_prefs.getFloat("render.whitePoint", r.whitePoint);
+    r.autoExposure = m_prefs.getBool("render.autoExposure", r.autoExposure);
+    r.exposureCompensation = m_prefs.getFloat("render.exposureComp", r.exposureCompensation);
+    r.exposureMinLuminance = m_prefs.getFloat("render.exposureMinLum", r.exposureMinLuminance);
+    r.exposureMaxLuminance = m_prefs.getFloat("render.exposureMaxLum", r.exposureMaxLuminance);
+    r.adaptBrighten = m_prefs.getFloat("render.adaptBrighten", r.adaptBrighten);
+    r.adaptDarken = m_prefs.getFloat("render.adaptDarken", r.adaptDarken);
+    r.meterCenterWeight = m_prefs.getFloat("render.meterCenter", r.meterCenterWeight);
+    r.bloom = m_prefs.getBool("render.bloom", r.bloom);
+    r.bloomStrength = m_prefs.getFloat("render.bloomStrength", r.bloomStrength);
+    r.bloomLevels = static_cast<u32>(m_prefs.getFloat("render.bloomLevels", static_cast<float>(r.bloomLevels)));
     m_renderer->setRenderSettings(r);
 }
 
@@ -1011,8 +1104,42 @@ void Editor::drawRenderSettings() {
             ImGui::EndDisabled();
             ImGui::TreePop();
         }
-        if (ImGui::TreeNodeEx("Tonemap", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::TreeNodeEx("Exposure", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Auto exposure", &r.autoExposure);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Luminance histogram of the HDR image; adapts toward middle grey, per viewport.");
+            ImGui::BeginDisabled(r.autoExposure);
             ImGui::SliderFloat("Exposure", &r.exposure, 0.01f, 64.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            ImGui::EndDisabled();
+            ImGui::BeginDisabled(!r.autoExposure);
+            ImGui::SliderFloat("Compensation (EV)", &r.exposureCompensation, -4.0f, 4.0f, "%.2f");
+            ImGui::SliderFloat("Adapt to brighter (1/s)", &r.adaptBrighten, 0.1f, 20.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("Adapt to darker (1/s)", &r.adaptDarken, 0.1f, 20.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("Center weight", &r.meterCenterWeight, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("0: every pixel counts the same. 1: the weight falls to zero at the corners.");
+            ImGui::SliderFloat("Histogram min (log2 lum)", &r.exposureMinLuminance, -16.0f, 8.0f, "%.1f");
+            ImGui::SliderFloat("Histogram max (log2 lum)", &r.exposureMaxLuminance, -8.0f, 16.0f, "%.1f");
+            ImGui::EndDisabled();
+            ImGui::TreePop();
+        }
+        if (ImGui::TreeNodeEx("Bloom", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Enabled##bloom", &r.bloom);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Call of Duty: Advanced Warfare: 13-tap downsample chain, tent-filtered upsample with accumulation.");
+            ImGui::BeginDisabled(!r.bloom);
+            ImGui::SliderFloat("Strength", &r.bloomStrength, 0.0f, 0.5f, "%.3f", ImGuiSliderFlags_Logarithmic);
+            int levels = static_cast<int>(r.bloomLevels);
+            if (ImGui::SliderInt("Levels", &levels, 1, 8)) r.bloomLevels = static_cast<u32>(levels);
+            ImGui::EndDisabled();
+            ImGui::TreePop();
+        }
+        if (ImGui::TreeNodeEx("Tonemap", ImGuiTreeNodeFlags_DefaultOpen)) {
+            static const char* kTonemappers[] = {"Linear (clamp)", "Reinhard", "Reinhard extended", "Uncharted 2", "ACES (fit)", "PBR Neutral"};
+            static_assert(sizeof(kTonemappers) / sizeof(kTonemappers[0]) == kTonemapperCount, "tonemapper names out of sync");
+            int op = static_cast<int>(r.tonemapper);
+            if (ImGui::Combo("Operator", &op, kTonemappers, static_cast<int>(kTonemapperCount))) r.tonemapper = static_cast<Tonemapper>(op);
+            const bool usesWhite = r.tonemapper == Tonemapper::ReinhardExtended || r.tonemapper == Tonemapper::Uncharted2;
+            ImGui::BeginDisabled(!usesWhite);
+            ImGui::SliderFloat("White point", &r.whitePoint, 1.0f, 32.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            ImGui::EndDisabled();
             ImGui::Checkbox("Dither", &r.dither);
             ImGui::TreePop();
         }
@@ -1031,6 +1158,18 @@ void Editor::drawRenderSettings() {
         m_prefs.setBool("render.aerial", r.aerialPerspective);
         m_prefs.setFloat("render.exposure", r.exposure);
         m_prefs.setBool("render.dither", r.dither);
+        m_prefs.setFloat("render.tonemapper", static_cast<float>(r.tonemapper));
+        m_prefs.setFloat("render.whitePoint", r.whitePoint);
+        m_prefs.setBool("render.autoExposure", r.autoExposure);
+        m_prefs.setFloat("render.exposureComp", r.exposureCompensation);
+        m_prefs.setFloat("render.exposureMinLum", r.exposureMinLuminance);
+        m_prefs.setFloat("render.exposureMaxLum", r.exposureMaxLuminance);
+        m_prefs.setFloat("render.adaptBrighten", r.adaptBrighten);
+        m_prefs.setFloat("render.adaptDarken", r.adaptDarken);
+        m_prefs.setFloat("render.meterCenter", r.meterCenterWeight);
+        m_prefs.setBool("render.bloom", r.bloom);
+        m_prefs.setFloat("render.bloomStrength", r.bloomStrength);
+        m_prefs.setFloat("render.bloomLevels", static_cast<float>(r.bloomLevels));
     }
 }
 
@@ -1051,10 +1190,7 @@ void Editor::drawRenderGraphPanel() {
         bool changed = ImGui::Checkbox("Sky pass", &p.sky);
         ImGui::SameLine();
         changed |= ImGui::Checkbox("Grid pass", &p.grid);
-        if (changed) {
-            m_renderer->setViewportFlags(p.id, (p.sky ? ViewportFlags::Sky : ViewportFlags::None) |
-                                                   (p.grid ? ViewportFlags::Grid : ViewportFlags::None));
-        }
+        if (ImGui::Checkbox("Water pass", &p.water) || changed) m_renderer->setViewportFlags(p.id, FlagsOf(p));
         ImGui::PopID();
         ImGui::Text("%ux%u  |  %u instances  |  %u command list group(s)  |  %u/%u physical/virtual transients  |  %u barriers",
                     info.width, info.height, info.instances, info.groups, info.physicalTextures,

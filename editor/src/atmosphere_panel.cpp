@@ -67,6 +67,54 @@ void DrawClouds(Renderer& renderer) {
                        "through the atmosphere tables, so they follow the time of day.");
 }
 
+// The sea applies live too. It is drawn by viewports that have the water pass on (the "Water Test" panel).
+void DrawWater(Renderer& renderer) {
+    WaterDesc d = renderer.water();
+    bool changed = ImGui::Checkbox("Enabled##water", &d.enabled);
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
+    int quality = static_cast<int>(d.quality);
+    if (ImGui::Combo("Quality##water", &quality, "Low (Gerstner waves, no SSR)\0Medium (FFT 128, 12-step SSR)\0High (FFT 256, 24-step SSR)\0")) {
+        d.quality = static_cast<u32>(quality);
+        changed = true;
+    }
+    changed |= ImGui::Checkbox("Screen-space reflections", &d.reflections);
+    changed |= ImGui::SliderFloat("Sea level (m)", &d.seaLevel, -5.0f, 5.0f, "%.2f");
+
+    ImGui::SeparatorText("Waves");
+    changed |= ImGui::SliderFloat("Wind direction##water", &d.windDirection, 0.0f, 360.0f, "%.0f deg");
+    changed |= ImGui::SliderFloat("Wind sea height (m)", &d.waveHeight, 0.0f, 4.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Wind sea period (s)", &d.wavePeriod, 2.0f, 14.0f, "%.1f");
+    changed |= ImGui::SliderFloat("Spread", &d.spread, 0.25f, 6.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+    changed |= ImGui::SliderFloat("Swell height (m)", &d.swellHeight, 0.0f, 4.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Swell period (s)", &d.swellPeriod, 5.0f, 18.0f, "%.1f");
+    changed |= ImGui::SliderFloat("Swell direction", &d.swellDirection, 0.0f, 360.0f, "%.0f deg");
+    changed |= ImGui::SliderFloat("Choppiness", &d.choppiness, 0.0f, 1.5f, "%.2f");
+    changed |= ImGui::SliderFloat("Largest tile (m)", &d.tileSize, 128.0f, 2048.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("The largest cascade repeats at this distance; swell longer than it cannot exist.");
+    changed |= ImGui::SliderFloat("Shoaling depth (m)", &d.shoalingDepth, 0.5f, 20.0f, "%.1f");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Waves lose height in water shallower than this (needs a sea floor height field).");
+
+    ImGui::SeparatorText("Look");
+    changed |= ImGui::ColorEdit3("Water color", &d.bodyColor.x, ImGuiColorEditFlags_Float);
+    changed |= ImGui::SliderFloat("Turbidity", &d.turbidity, 0.01f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+    changed |= ImGui::SliderFloat3("Absorption (1/m)", &d.absorption.x, 0.0f, 1.5f, "%.3f");
+    changed |= ImGui::SliderFloat("Refraction", &d.refraction, 0.0f, 0.2f, "%.3f");
+    changed |= ImGui::SliderFloat("Sand brightness", &d.sandBrightness, 0.0f, 1.2f, "%.2f");
+
+    ImGui::SeparatorText("Foam");
+    changed |= ImGui::SliderFloat("Whitecaps", &d.foam, 0.0f, 3.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Fold threshold", &d.foamThreshold, -0.2f, 1.0f, "%.2f");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Foam forms where the surface folds over itself harder than this (1 = flat). Higher = more foam.");
+    changed |= ImGui::SliderFloat("Foam lifetime (s)", &d.foamPersistence, 0.2f, 12.0f, "%.1f");
+    changed |= ImGui::SliderFloat("Shore foam", &d.shoreFoam, 0.0f, 3.0f, "%.2f");
+    ImGui::PopItemWidth();
+    if (changed) renderer.setWater(d);
+    if (ImGui::Button("Defaults##water")) renderer.setWater(WaterDesc{});
+    ImGui::TextWrapped("FFT wave cascades (wind sea + swell, JONSWAP) simulated once per frame; a camera-centred clipmap "
+                       "mesh; reflections from the screen, else from a sky + cloud probe. The shoreline is where the "
+                       "terrain crosses the sea level.");
+}
+
 } // namespace
 
 void AtmospherePanel::draw(Renderer& renderer, bool* open) {
@@ -123,6 +171,7 @@ void AtmospherePanel::draw(Renderer& renderer, bool* open) {
                        "(or the precompute shaders).");
     ImGui::Separator();
     if (ImGui::CollapsingHeader("Clouds", ImGuiTreeNodeFlags_DefaultOpen)) DrawClouds(renderer);
+    if (ImGui::CollapsingHeader("Water")) DrawWater(renderer);
     ImGui::End();
 }
 

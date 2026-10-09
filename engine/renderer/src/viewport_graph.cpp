@@ -9,6 +9,8 @@
 //   Deferred                 fullscreen lighting from the G-buffer + shadows + atmosphere -> HDR
 //   CloudTrace/Resolve/Composite (volumetric clouds, sky viewports with the atmosphere on)
 //                            half-resolution ray march, temporal accumulation, blend over the empty HDR pixels
+//   WaterSkyProbe / WaterSceneCopy / WaterSurface (viewports with the Water flag)
+//                            sky + clouds into a small octahedral map, copy of the HDR scene, then the sea drawn over it
 //   Grid (editor views)      ground grid over the HDR color, occluded by depth
 //   Tonemap                  HDR -> sRGB RGBA8, the viewport's output image
 //
@@ -168,6 +170,16 @@ struct CloudCompositeData {
     RgTexture depth;
     RgTexture hdr;
 };
+struct SceneCopyData {
+    RgTexture src;
+    RgTexture dst;
+};
+struct WaterSurfaceData {
+    RgTexture depth;
+    RgTexture scene;
+    RgTexture probe;
+    RgTexture hdr;
+};
 struct GridData {
     RgTexture hdr;
     RgTexture depth;
@@ -180,8 +192,25 @@ struct PickData {
 struct PickReadbackData {
     RgTexture ids;
 };
+struct BloomData {
+    RgTexture src;
+    RgTexture dst;
+};
+struct ExposureClearData {
+    RgBuffer bins;
+};
+struct HistogramData {
+    RgTexture hdr;
+    RgBuffer bins;
+};
+struct ExposureAverageData {
+    RgBuffer bins;
+    RgBuffer state;
+};
 struct TonemapData {
     RgTexture hdr;
+    RgTexture bloom; // invalid when bloom is off
+    RgBuffer exposure;
     RgTexture output;
 };
 
@@ -465,6 +494,85 @@ void ensureCloudTargets(Impl& s, Viewport& vp, u32 width, u32 height) {
     vp.cloudHistoryValid = false;
 }
 
+// ---- water ----------------------------------------------------------------------------------------------------
+
+// Volatile constant buffers of a viewport's water passes (the sky probe also reads the cloud constants, which exist
+// even when the clouds are off: a zeroed struct switches the march off in the probe shader).
+void ensureWaterBuffers(Impl& s, Viewport& vp) {
+    nvrhi::IDevice* dev = s.device->nvrhi();
+    auto make = [&](nvrhi::BufferHandle& handle, u32 size, const char* what) {
+        if (handle) return;
+        nvrhi::BufferDesc cb;
+        cb.byteSize = size;
+        cb.isConstantBuffer = true;
+        cb.isVolatile = true;
+        cb.maxVersions = 16;
+        cb.debugName = vp.name + what;
+        handle = dev->createBuffer(cb);
+    };
+    make(vp.waterCb, sizeof(WaterConstants), " (water constants)");
+    make(vp.cloudCb, sizeof(CloudConstants), " (cloud constants)");
+}
+
+nvrhi::IBindingSet* waterSurfaceBindings(Impl& s, const ViewFrame& vf, const WaterSurfaceData& d, RgPassContext& ctx) {
+    ctx.cmd()->writeBuffer(vf.viewCb, &vf.constants, sizeof(ViewConstants));
+    ctx.cmd()->writeBuffer(vf.waterCb, &vf.water, sizeof(WaterConstants));
+    nvrhi::BindingSetDesc bd;
+    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, vf.viewCb));
+    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(1, vf.waterCb));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(0, ctx.texture(d.depth), nvrhi::Format::R32_FLOAT));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(1, ctx.texture(d.scene)));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(2, ctx.texture(d.probe)));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(3, s.water.displacement()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(4, s.water.slope()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(5, s.water.bed()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(6, s.atmosphere.transmittance()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(7, s.atmosphere.scattering()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(8, s.atmosphere.irradiance()));
+    bd.addItem(nvrhi::BindingSetItem::Sampler(0, s.water.waveSampler()));
+    bd.addItem(nvrhi::BindingSetItem::Sampler(1, s.atmosphere.sampler()));
+    return ctx.bindingSet(bd, s.water.surfaceLayout());
+}
+
+// The clipmap: the rings (coarsest first, one instanced draw) and then the full innermost grid. No vertex buffer:
+// the vertices are generated from SV_VertexID. The finest geometry is drawn last, so it wins where rings overlap.
+void recordWaterSurface(Impl& s, const ViewFrame& vf, const WaterSurfaceData& d, RgPassContext& ctx) {
+    const ShaderRef vsRing = s.shaders->get("water.vsWaterRing", nvrhi::ShaderType::Vertex);
+    const ShaderRef vsCenter = s.shaders->get("water.vsWaterCenter", nvrhi::ShaderType::Vertex);
+    const ShaderRef ps = s.shaders->get("water.psWater", nvrhi::ShaderType::Pixel);
+    if (!vsRing || !vsCenter || !ps) return;
+
+    nvrhi::IFramebuffer* fb = ctx.framebuffer();
+    nvrhi::IBindingLayout* layout = s.water.surfaceLayout();
+    auto pipeline = [&](const ShaderRef& vs) {
+        return s.pipelines->graphics(HashCombine(shaderKey(vs, ps, 0x3A7E), reinterpret_cast<uintptr_t>(layout)), fb, [&] {
+            nvrhi::GraphicsPipelineDesc pd;
+            pd.VS = vs.shader;
+            pd.PS = ps.shader;
+            pd.bindingLayouts = {layout};
+            pd.renderState.depthStencilState.depthTestEnable = false; // the pixel shader tests the scene depth itself
+            pd.renderState.depthStencilState.depthWriteEnable = false;
+            pd.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
+            return pd;
+        });
+    };
+    nvrhi::IGraphicsPipeline* ringPso = pipeline(vsRing);
+    nvrhi::IGraphicsPipeline* centerPso = pipeline(vsCenter);
+    if (!ringPso || !centerPso) return;
+
+    nvrhi::IBindingSet* set = waterSurfaceBindings(s, vf, d, ctx);
+    nvrhi::ICommandList* cmd = ctx.cmd();
+    auto draw = [&](nvrhi::IGraphicsPipeline* pso, nvrhi::IBuffer* indices, u32 indexCount, u32 instances) {
+        nvrhi::GraphicsState gs;
+        gs.setPipeline(pso).setFramebuffer(fb).setViewport(fullViewport(vf)).addBindingSet(set);
+        gs.setIndexBuffer({indices, nvrhi::Format::R16_UINT, 0});
+        cmd->setGraphicsState(gs);
+        cmd->drawIndexed(nvrhi::DrawArguments().setVertexCount(indexCount).setInstanceCount(instances));
+    };
+    if (vf.waterRings > 1) draw(ringPso, s.water.ringIndices(), s.water.ringIndexCount(), vf.waterRings - 1);
+    draw(centerPso, s.water.centerIndices(), s.water.centerIndexCount(), 1);
+}
+
 // Entity ids instead of colors, same geometry and depth test as the G-buffer pass.
 void recordPick(Impl& s, const ViewFrame& vf, const PickData& d, RgPassContext& ctx) {
     nvrhi::ICommandList* cmd = ctx.cmd();
@@ -483,6 +591,62 @@ void recordPick(Impl& s, const ViewFrame& vf, const PickData& d, RgPassContext& 
         if (!pso) continue;
         drawBatches(s, fullViewport(vf), fb, pso, set, s.gpu.textures.table(), cmd, instances, scene, scene.classBegin[c], scene.classBegin[c + 1]);
     }
+}
+
+// ---- post-processing ----------------------------------------------------------------------------------------------
+
+// Every post pass writes the constants itself: the buffer is volatile, so a write belongs to one command list.
+void writePostConstants(const ViewFrame& vf, RgPassContext& ctx) {
+    ctx.cmd()->writeBuffer(vf.postCb, &vf.post, sizeof(PostConstants));
+}
+
+nvrhi::IBindingSet* bloomBindings(Impl& s, nvrhi::ITexture* source, RgPassContext& ctx) {
+    nvrhi::BindingSetDesc bd;
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(0, source));
+    bd.addItem(nvrhi::BindingSetItem::Sampler(0, s.post.sampler()));
+    return ctx.bindingSet(bd, s.post.bloomLayout());
+}
+
+void recordExposureClear(const ExposureClearData& d, RgPassContext& ctx) {
+    static const u32 kZeros[kHistogramBins] = {};
+    ctx.cmd()->writeBuffer(ctx.buffer(d.bins), kZeros, sizeof(kZeros));
+}
+
+void recordHistogram(Impl& s, const ViewFrame& vf, const HistogramData& d, RgPassContext& ctx) {
+    writePostConstants(vf, ctx);
+    nvrhi::BindingSetDesc bd;
+    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, vf.postCb));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(0, ctx.texture(d.hdr)));
+    bd.addItem(nvrhi::BindingSetItem::Sampler(0, s.post.sampler()));
+    bd.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(0, ctx.buffer(d.bins)));
+    // One thread per 2x2 block of the image, in 16x16 groups (csHistogram).
+    RecordCompute(ctx, s.services(), {"exposure.csHistogram", s.post.histogramLayout()},
+                  ctx.bindingSet(bd, s.post.histogramLayout()),
+                  DispatchForImage((vf.width + 1) / 2, (vf.height + 1) / 2, 16));
+}
+
+void recordExposureAverage(Impl& s, const ViewFrame& vf, const ExposureAverageData& d, RgPassContext& ctx) {
+    writePostConstants(vf, ctx);
+    nvrhi::BindingSetDesc bd;
+    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, vf.postCb));
+    bd.addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(1, ctx.buffer(d.bins)));
+    bd.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(1, ctx.buffer(d.state)));
+    RecordCompute(ctx, s.services(), {"exposure.csAverage", s.post.averageLayout()},
+                  ctx.bindingSet(bd, s.post.averageLayout()), RgDispatch{});
+}
+
+nvrhi::IBindingSet* tonemapBindings(Impl& s, const ViewFrame& vf, const TonemapData& d, RgPassContext& ctx) {
+    ctx.cmd()->writeBuffer(vf.viewCb, &vf.constants, sizeof(ViewConstants));
+    writePostConstants(vf, ctx);
+    nvrhi::ITexture* hdr = ctx.texture(d.hdr);
+    nvrhi::BindingSetDesc bd;
+    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, vf.viewCb));
+    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(1, vf.postCb));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(0, hdr));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(1, d.bloom.valid() ? ctx.texture(d.bloom) : hdr)); // strength is 0 without bloom
+    bd.addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(2, ctx.buffer(d.exposure)));
+    bd.addItem(nvrhi::BindingSetItem::Sampler(0, s.post.sampler()));
+    return ctx.bindingSet(bd, s.post.tonemapLayout());
 }
 
 } // namespace
@@ -565,6 +729,22 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
     const RenderViewParams view = resolveView(vp, slot, aspect);
     fillConstants(vf.constants, view, slot, vp.width, vp.height, time, settings);
     fillShadows(vf, view, settings);
+
+    // Post-processing: the exposure adapts over time, so it needs the time since this viewport's last frame. A
+    // viewport that was not drawn last frame (hidden, auto exposure was off) has nothing to adapt from and snaps.
+    vf.postCb = vp.postCb.Get();
+    vf.exposureState = vp.exposureState.Get();
+    vf.bloomLevels = settings.bloom && settings.bloomStrength > 0.0f ? BloomLevelsFor(settings, vp.width, vp.height) : 0;
+    {
+        const bool resetExposure = !vp.exposureValid || vp.exposureLastFrame + 1 != frame;
+        const f32 dt = std::clamp(time - vp.exposureLastTime, 0.0f, 0.25f);
+        FillPostConstants(vf.post, settings, vp.width, vp.height, dt, resetExposure, vf.bloomLevels > 0);
+        vp.exposureValid = settings.autoExposure;
+        if (settings.autoExposure) {
+            vp.exposureLastFrame = frame;
+            vp.exposureLastTime = time;
+        }
+    }
     // Sky light and aerial perspective need the tables, a sun to light them, and a view that draws the sky.
     atmosphere.fillView(vf.constants);
     if (!settings.atmosphere || vf.constants.sunDirection.w < 0.5f || !HasFlag(vp.flags, ViewportFlags::Sky)) vf.constants.atmosphere1.y = 0.0f;
@@ -764,6 +944,60 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
     }
     vp.cloudPrevViewProj = vf.constants.viewProj;
 
+    // Water: the sky above the camera into a small map (what reflections that leave the screen see), a copy of the
+    // scene so the surface can read it while it writes the same target, then the sea itself.
+    if (HasFlag(vp.flags, ViewportFlags::Water) && water.active()) {
+        ensureWaterBuffers(*this, vp);
+        vf.waterCb = vp.waterCb.Get();
+        vf.cloudCb = vp.cloudCb.Get();
+        if (!cloudsOn) vf.clouds = CloudConstants{}; // zeroed: the probe skips the cloud march
+        const f32 cloudMid = clouds.desc().baseAltitude + 0.5f * clouds.desc().thickness;
+        water.fill(vf.water, frame, cloudMid);
+        vf.waterRings = water.ringLevels(view.farZ);
+        vf.water.grid.z = static_cast<f32>(vf.waterRings);
+
+        RgTextureDesc probeDesc;
+        probeDesc.width = probeDesc.height = kWaterProbeSize;
+        probeDesc.format = kHdrFormat;
+        probeDesc.renderTarget = true;
+        probeDesc.name = "WaterSkyProbe";
+        RgTexture probe;
+        AddFullscreenPass<CloudTraceData>(
+            g, services, "WaterSkyProbe", {"sky_probe.psSkyProbe", clouds.traceLayout()},
+            [&](RgPassBuilder& b, CloudTraceData& d) {
+                d.depth = b.read(depth, RgAccess::SampledRead); // bound but unused: the layout is the cloud trace's
+                probe = b.createTexture(probeDesc);
+                d.out = b.colorTarget(0, probe);
+            },
+            [self, frameData](const CloudTraceData& d, RgPassContext& ctx) { return cloudTraceBindings(*self, *frameData, d, ctx); });
+
+        RgTextureDesc copyDesc = hdrDesc;
+        copyDesc.renderTarget = false;
+        copyDesc.useClearValue = false;
+        copyDesc.name = "WaterSceneCopy";
+        RgTexture sceneCopy;
+        g.addPass<SceneCopyData>(
+            "WaterSceneCopy",
+            [&](RgPassBuilder& b, SceneCopyData& d) {
+                d.src = b.read(hdr, RgAccess::CopySrc);
+                sceneCopy = b.createTexture(copyDesc);
+                d.dst = b.write(sceneCopy, RgAccess::CopyDst);
+            },
+            [](const SceneCopyData& d, RgPassContext& ctx) {
+                ctx.cmd()->copyTexture(ctx.texture(d.dst), nvrhi::TextureSlice(), ctx.texture(d.src), nvrhi::TextureSlice());
+            });
+
+        g.addPass<WaterSurfaceData>(
+            "WaterSurface",
+            [&](RgPassBuilder& b, WaterSurfaceData& d) {
+                d.depth = b.read(depth, RgAccess::SampledRead);
+                d.scene = b.read(sceneCopy, RgAccess::SampledRead);
+                d.probe = b.read(probe, RgAccess::SampledRead);
+                d.hdr = b.colorTarget(0, hdr); // keeps the scene where the shader discards
+            },
+            [self, frameData](const WaterSurfaceData& d, RgPassContext& ctx) { recordWaterSurface(*self, *frameData, d, ctx); });
+    }
+
     if (HasFlag(vp.flags, ViewportFlags::Grid)) {
         AddFullscreenPass<GridData>(
             g, services, "Grid", {"grid.psGrid", gpu.layoutViewTexture.Get(), RgBlend::Alpha},
@@ -835,15 +1069,89 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
         }
     }
 
+    // Bloom (Jimenez, Call of Duty: Advanced Warfare): the HDR image is downsampled `levels` times with a 13-tap filter,
+    // then walked back up with a tent filter that is added onto each larger level. Level i is half of level i - 1, the
+    // first is half of the scene; the tonemap blends the largest into the image.
+    const u32 bloomLevels = vf.bloomLevels;
+    RgTexture bloomChain[kMaxBloomLevels];
+    if (bloomLevels > 0) {
+        RgTextureDesc bd;
+        bd.format = nvrhi::Format::R11G11B10_FLOAT; // no alpha needed, half the bandwidth of RGBA16F
+        bd.renderTarget = true;
+        bd.name = "BloomLevel";
+        RgTexture previous = hdr;
+        u32 w = vp.width, h = vp.height;
+        for (u32 i = 0; i < bloomLevels; ++i) {
+            w = std::max(1u, (w + 1) / 2);
+            h = std::max(1u, (h + 1) / 2);
+            bd.width = w;
+            bd.height = h;
+            AddFullscreenPass<BloomData>(
+                g, services, "BloomDown", {i == 0 ? "bloom.psBloomDownFirst" : "bloom.psBloomDown", post.bloomLayout()},
+                [&](RgPassBuilder& b, BloomData& d) {
+                    d.src = b.read(previous, RgAccess::SampledRead);
+                    bloomChain[i] = b.createTexture(bd);
+                    d.dst = b.colorTarget(0, bloomChain[i]);
+                },
+                [self](const BloomData& d, RgPassContext& ctx) { return bloomBindings(*self, ctx.texture(d.src), ctx); });
+            previous = bloomChain[i];
+        }
+        for (u32 i = bloomLevels - 1; i-- > 0;) {
+            AddFullscreenPass<BloomData>(
+                g, services, "BloomUp", {"bloom.psBloomUp", post.bloomLayout(), RgBlend::Additive},
+                [&](RgPassBuilder& b, BloomData& d) {
+                    d.src = b.read(bloomChain[i + 1], RgAccess::SampledRead);
+                    d.dst = b.colorTarget(0, bloomChain[i]); // holds the downsampled level: the pass adds onto it
+                },
+                [self](const BloomData& d, RgPassContext& ctx) { return bloomBindings(*self, ctx.texture(d.src), ctx); });
+        }
+    }
+
+    // Auto exposure: histogram of the HDR image -> average -> adapted value in the viewport's persistent buffer.
+    const RgBuffer exposure = g.importBuffer(vp.exposureState.Get(), nvrhi::ResourceStates::ShaderResource,
+                                             nvrhi::ResourceStates::ShaderResource, "ExposureState");
+    if (settings.autoExposure) {
+        RgBufferDesc binsDesc;
+        binsDesc.byteSize = kHistogramBins * sizeof(u32);
+        binsDesc.structStride = sizeof(u32);
+        binsDesc.storage = true;
+        binsDesc.name = "ExposureHistogram";
+        RgBuffer bins;
+        // The bins are cleared by a copy so the barriers between clear -> histogram -> average are real state changes.
+        g.addPass<ExposureClearData>(
+            "ExposureClear",
+            [&](RgPassBuilder& b, ExposureClearData& d) {
+                bins = b.createBuffer(binsDesc);
+                d.bins = b.write(bins, RgAccess::CopyDst);
+            },
+            [](const ExposureClearData& d, RgPassContext& ctx) { recordExposureClear(d, ctx); });
+        g.addPass<HistogramData>(
+            "ExposureHistogram",
+            [&](RgPassBuilder& b, HistogramData& d) {
+                d.hdr = b.read(hdr, RgAccess::SampledRead);
+                d.bins = b.write(bins, RgAccess::StorageWrite);
+            },
+            [self, frameData](const HistogramData& d, RgPassContext& ctx) { recordHistogram(*self, *frameData, d, ctx); });
+        g.addPass<ExposureAverageData>(
+            "ExposureAverage",
+            [&](RgPassBuilder& b, ExposureAverageData& d) {
+                d.bins = b.read(bins, RgAccess::SampledRead);
+                d.state = b.write(exposure, RgAccess::StorageWrite);
+            },
+            [self, frameData](const ExposureAverageData& d, RgPassContext& ctx) {
+                recordExposureAverage(*self, *frameData, d, ctx);
+            });
+    }
+
     AddFullscreenPass<TonemapData>(
-        g, services, "Tonemap", {"tonemap.psTonemap", gpu.layoutViewTexture.Get()},
+        g, services, "Tonemap", {"tonemap.psTonemap", post.tonemapLayout()},
         [&](RgPassBuilder& b, TonemapData& d) {
             d.hdr = b.read(hdr, RgAccess::SampledRead);
+            if (bloomLevels > 0) d.bloom = b.read(bloomChain[0], RgAccess::SampledRead);
+            d.exposure = b.read(exposure, RgAccess::SampledRead);
             d.output = b.colorTarget(0, output);
         },
-        [self, frameData](const TonemapData& d, RgPassContext& ctx) {
-            return viewBindings(ctx, *self, *frameData, ctx.texture(d.hdr), nvrhi::Format::UNKNOWN);
-        });
+        [self, frameData](const TonemapData& d, RgPassContext& ctx) { return tonemapBindings(*self, *frameData, d, ctx); });
 
     g.compile(device->nvrhi());
 

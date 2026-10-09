@@ -103,6 +103,7 @@ enum class ViewportFlags : u32 {
     None = 0,
     Sky = 1u << 0,  // procedural sky background (otherwise a flat clear color)
     Grid = 1u << 1, // editor ground grid
+    Water = 1u << 2, // the sea (see WaterDesc); opt-in so scenes without it (previews) stay dry
 };
 constexpr ViewportFlags operator|(ViewportFlags a, ViewportFlags b) {
     return static_cast<ViewportFlags>(static_cast<u32>(a) | static_cast<u32>(b));
@@ -190,6 +191,52 @@ struct CloudWeather {
     CloudPreset target = CloudPreset::Fair;
 };
 
+// Water: one sea at `seaLevel` that extends to the horizon (a camera-centred clipmap, drawn with a pixel-shader-side
+// depth test so terrain simply covers it: the shoreline is wherever the ground crosses the sea level). The waves
+// are a Tessendorf FFT simulation in three cascades (wind sea + swell, JONSWAP spectra) with persistent foam, run
+// once per frame for every viewport; the low quality tier replaces it with six analytic Gerstner waves.
+// Applies to every viewport from the next frame.
+struct WaterDesc {
+    bool enabled = true;
+    // 0 low: Gerstner waves, no screen-space reflections. 1 medium: FFT 128^2 x 3, 12-step SSR. 2 high: FFT 256^2 x 3, 24-step SSR.
+    u32 quality = 2;
+    f32 seaLevel = 0.0f;         // m (tide: change it live)
+    // Wind sea
+    f32 windDirection = 40.0f;   // degrees in the ground plane (0 = +X, 90 = +Z); waves travel toward it
+    f32 waveHeight = 0.9f;       // significant wave height of the wind sea (m)
+    f32 wavePeriod = 6.5f;       // peak period (s); the wavelength follows from it (about 66 m at 6.5 s)
+    f32 spread = 1.0f;           // directional narrowness: 1 = natural, higher = more aligned waves
+    // Swell: long, regular waves from far away
+    f32 swellHeight = 1.0f;      // m (0 = none)
+    f32 swellPeriod = 11.0f;     // s
+    f32 swellDirection = 20.0f;  // degrees
+    f32 choppiness = 0.9f;       // sharpness of the crests (horizontal displacement), 0..1.5
+    f32 tileSize = 512.0f;       // m: the largest cascade repeats at this distance
+    // Look
+    Vec3 absorption{0.40f, 0.065f, 0.030f}; // 1/m per channel: red is gone within metres, blue lasts
+    Vec3 bodyColor{0.045f, 0.20f, 0.19f};   // colour of the light the water scatters back (albedo)
+    f32 turbidity = 0.18f;       // scattering density (1/m): higher = murkier, greener near shore
+    f32 refraction = 0.05f;      // how much the surface bends the view of what is below
+    f32 sandBrightness = 0.55f;  // floor colour where no terrain is drawn below the water
+    f32 foam = 1.0f;             // whitecaps
+    f32 foamThreshold = 0.0f;    // wave folding needed before foam appears (0 = only the sharpest crests)
+    f32 foamPersistence = 3.0f;  // seconds foam takes to fade
+    f32 shoreFoam = 1.0f;        // breaker zone and swash line at the shore
+    f32 shoalingDepth = 6.0f;    // waves lose height below this depth (m)
+    bool reflections = true;     // screen-space reflections (the sky probe is always used)
+};
+
+// The sea floor / terrain height used by the water for shoaling, the breaker zone and the colour of shallow water.
+// Heights in metres, row-major, `width` x `height` samples covering [origin, origin + size) in the ground plane.
+// The real terrain will provide the same data; until then any height field works (see the editor's water test scene).
+struct WaterBedDesc {
+    Vec2 origin{0.0f};
+    Vec2 size{1.0f};
+    u32 width = 0;
+    u32 height = 0;
+    std::span<const f32> heights;
+};
+
 struct AtmosphereStatus {
     enum class Phase : u8 {
         Missing,    // no tables yet: the sky falls back to a plain gradient
@@ -207,6 +254,17 @@ struct AtmosphereStatus {
     std::string message; // what happened last (loaded / generated / error)
 };
 
+// Display transform from HDR to the output (shaders/tonemap.slang mirrors the order).
+enum class Tonemapper : u8 {
+    Linear,           // clamp only: for debugging the scene values
+    Reinhard,         // c / (1 + c) per channel: soft, desaturates highlights, never reaches white
+    ReinhardExtended, // Reinhard on the luminance with a white point
+    Uncharted2,       // Hable's filmic curve
+    Aces,             // Narkowicz ACES fit: contrasty, the classic filmic look
+    PbrNeutral,       // Khronos PBR Neutral: faithful colors below ~0.8, only compresses highlights
+};
+inline constexpr u32 kTonemapperCount = 6;
+
 // Quality and pass switches, applied to every viewport from the next frame (editor: Render Graph panel).
 struct RenderSettings {
     bool shadows = true;           // ShadowCascades pass (off: the pass only clears a 1x1 stand-in)
@@ -214,8 +272,25 @@ struct RenderSettings {
     f32 shadowDistance = 400.0f;   // meters from the camera; farther surfaces are unshadowed
     bool atmosphere = true;        // sky, sun color and ambient from the atmosphere tables (off: gradient sky, constant ambient)
     bool aerialPerspective = true; // distance haze on lit pixels (needs `atmosphere`)
-    f32 exposure = 1.0f;           // linear multiplier before tonemapping
+    f32 exposure = 1.0f;           // linear multiplier before tonemapping (used when autoExposure is off)
     bool dither = true;            // sub-LSB noise on the output against 8-bit banding
+
+    Tonemapper tonemapper = Tonemapper::Aces;
+    f32 whitePoint = 4.0f;         // scene luminance that maps to white (ReinhardExtended, Uncharted2)
+
+    // Auto exposure: luminance histogram -> average between two percentiles -> adapts toward middle grey (per viewport).
+    bool autoExposure = true;
+    f32 exposureCompensation = 0.0f; // EV added to the automatic exposure
+    f32 exposureMinLuminance = -8.0f; // log2 of the darkest / brightest scene luminance the histogram resolves
+    f32 exposureMaxLuminance = 8.0f;
+    f32 adaptBrighten = 3.0f;      // adaptation speed (1/s) when the scene gets brighter (exposure drops)
+    f32 adaptDarken = 1.0f;        // ... when it gets darker (exposure rises): the eye is slower here
+    f32 meterCenterWeight = 0.5f;  // 0 = every pixel counts the same, 1 = weight falls to zero at the corners
+
+    // Bloom (Call of Duty: Advanced Warfare): blurred downsample chain, tent-filtered upsample with accumulation.
+    bool bloom = true;
+    f32 bloomStrength = 0.06f;     // blend between the scene and the bloom chain (energy conserving)
+    u32 bloomLevels = 6;           // downsample steps (1..8); more = a wider glow
 };
 
 struct RendererDesc {
@@ -307,6 +382,13 @@ public:
     void setClouds(const CloudDesc& desc);
     const CloudDesc& clouds() const;
     CloudWeather cloudWeather() const;
+
+    // ---- water ----
+    void setWater(const WaterDesc& desc);
+    const WaterDesc& water() const;
+    // False (nothing changes) if the sample count does not match width * height.
+    bool setWaterBed(const WaterBedDesc& bed);
+    void clearWaterBed();
 
     // ---- scenes ----
     SceneId createScene(const char* name);

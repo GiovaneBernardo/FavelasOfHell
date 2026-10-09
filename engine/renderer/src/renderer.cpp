@@ -44,7 +44,9 @@ Renderer::~Renderer() {
     m_impl->viewports.clear();
     m_impl->windowGraph.reset();
     m_impl->atmosphere.shutdown();
+    m_impl->water.shutdown();
     m_impl->clouds.shutdown();
+    m_impl->post.shutdown();
     m_impl->gpu = {};
     m_impl->pipelines.reset();
     m_impl->shaders.reset();
@@ -72,7 +74,9 @@ std::unique_ptr<Renderer> Renderer::create(const RendererDesc& desc) {
 
     // Fail early and loudly if the shader binaries were not built.
     if (!s.shaders->get("opaque.vsOpaque", nvrhi::ShaderType::Vertex) ||
-        !s.shaders->get("tonemap.psTonemap", nvrhi::ShaderType::Pixel)) {
+        !s.shaders->get("tonemap.psTonemap", nvrhi::ShaderType::Pixel) ||
+        !s.shaders->get("bloom.psBloomDown", nvrhi::ShaderType::Pixel) ||
+        !s.shaders->get("exposure.csHistogram", nvrhi::ShaderType::Compute)) {
         FOH_ERROR("renderer: shader binaries missing in {} (build the 'foh_shaders' target)", shaderDir.string());
         return nullptr;
     }
@@ -192,6 +196,11 @@ std::unique_ptr<Renderer> Renderer::create(const RendererDesc& desc) {
         s.atmosphere.init(dev, s.shaders.get(), s.pipelines.get(), desc.jobs, cacheDir / "atmosphere.lut");
     }
     s.clouds.init(dev, s.shaders.get(), s.pipelines.get());
+    s.water.init(dev, s.shaders.get(), s.pipelines.get());
+    if (!s.post.init(dev)) {
+        FOH_ERROR("renderer: cannot create the post-processing binding layouts");
+        return nullptr;
+    }
 
     RenderGraphConfig gc;
     gc.jobs = desc.jobs;
@@ -226,6 +235,16 @@ void Renderer::setRenderSettings(const RenderSettings& settings) {
     s.shadowCascadeSize = std::clamp(s.shadowCascadeSize, 256u, 8192u);
     s.shadowDistance = std::clamp(s.shadowDistance, 1.0f, 5000.0f);
     s.exposure = std::clamp(s.exposure, 0.0f, 1000.0f);
+    s.whitePoint = std::clamp(s.whitePoint, 0.5f, 100.0f);
+    s.tonemapper = static_cast<u32>(s.tonemapper) < kTonemapperCount ? s.tonemapper : Tonemapper::Aces;
+    s.exposureCompensation = std::clamp(s.exposureCompensation, -8.0f, 8.0f);
+    s.exposureMinLuminance = std::clamp(s.exposureMinLuminance, -16.0f, 15.0f);
+    s.exposureMaxLuminance = std::clamp(s.exposureMaxLuminance, s.exposureMinLuminance + 1.0f, 16.0f);
+    s.adaptBrighten = std::clamp(s.adaptBrighten, 0.01f, 100.0f);
+    s.adaptDarken = std::clamp(s.adaptDarken, 0.01f, 100.0f);
+    s.meterCenterWeight = std::clamp(s.meterCenterWeight, 0.0f, 1.0f);
+    s.bloomStrength = std::clamp(s.bloomStrength, 0.0f, 1.0f);
+    s.bloomLevels = std::clamp(s.bloomLevels, 1u, kMaxBloomLevels);
 }
 const RenderSettings& Renderer::renderSettings() const { return m_impl->settings; }
 
@@ -240,6 +259,13 @@ AtmosphereStatus Renderer::atmosphereStatus() const { return m_impl->atmosphere.
 void Renderer::setClouds(const CloudDesc& desc) { m_impl->clouds.set(desc); }
 const CloudDesc& Renderer::clouds() const { return m_impl->clouds.desc(); }
 CloudWeather Renderer::cloudWeather() const { return m_impl->clouds.state(); }
+
+// ---- water ------------------------------------------------------------------------------------------
+
+void Renderer::setWater(const WaterDesc& desc) { m_impl->water.set(desc); }
+const WaterDesc& Renderer::water() const { return m_impl->water.desc(); }
+bool Renderer::setWaterBed(const WaterBedDesc& bed) { return m_impl->water.setBed(bed); }
+void Renderer::clearWaterBed() { m_impl->water.clearBed(); }
 
 // ---- scenes ---------------------------------------------------------------------------------
 
@@ -380,6 +406,19 @@ ViewportId Renderer::createViewport(const ViewportDesc& desc) {
     cb.maxVersions = 16;
     cb.debugName = vp->name + " (shadow cascade)";
     vp->shadowCb = m_impl->device->nvrhi()->createBuffer(cb);
+    cb.byteSize = sizeof(PostConstants);
+    cb.debugName = vp->name + " (post constants)";
+    vp->postCb = m_impl->device->nvrhi()->createBuffer(cb);
+
+    // Adapted exposure: one float4, rests in ShaderResource between frames (every graph imports it that way).
+    nvrhi::BufferDesc eb;
+    eb.byteSize = sizeof(Vec4);
+    eb.structStride = sizeof(Vec4);
+    eb.canHaveUAVs = true;
+    eb.initialState = nvrhi::ResourceStates::ShaderResource;
+    eb.keepInitialState = false;
+    eb.debugName = vp->name + " (exposure)";
+    vp->exposureState = m_impl->device->nvrhi()->createBuffer(eb);
 
     RenderGraphConfig gc;
     gc.jobs = m_impl->desc.jobs;
@@ -522,6 +561,11 @@ void Renderer::beginFrame() {
     s.shaders->pollReload();
     s.atmosphere.pump();
     s.clouds.pump();
+    {
+        bool wanted = false;
+        for (const auto& v : s.viewports) wanted |= v->active && HasFlag(v->flags, ViewportFlags::Water);
+        s.water.simulate(wanted);
+    }
     s.pipelines->collect(s.frame, 3600); // a minute: rarely used variants (masked, double-sided) must not recompile on every use
     {
         // Background texture uploads under a byte budget; materials then pick up the new slots.

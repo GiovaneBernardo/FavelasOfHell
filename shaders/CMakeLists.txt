@@ -25,7 +25,10 @@ set(_common_headers
     "${CMAKE_CURRENT_SOURCE_DIR}/common/atmosphere_core.slangh"
     "${CMAKE_CURRENT_SOURCE_DIR}/common/atmosphere.slangh"
     "${CMAKE_CURRENT_SOURCE_DIR}/common/clouds.slangh"
-    "${CMAKE_CURRENT_SOURCE_DIR}/common/noise.slangh")
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/clouds_march.slangh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/water.slangh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/noise.slangh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/post.slangh")
 
 set(FOH_SHADER_OUTPUTS "")
 
@@ -87,7 +90,22 @@ if(FOH_SLANGC)
     foh_shader(clouds.slang psClouds fragment)
     foh_shader(clouds_post.slang psCloudResolve fragment)
     foh_shader(clouds_post.slang psCloudComposite fragment)
+    # Water: FFT wave simulation (compute, once per frame), the sky probe it reflects, and the surface.
+    foreach(_entry csSpectrum csEvolve csFftH csFftV csFinalize csMip)
+        foh_shader(water_sim.slang ${_entry} compute)
+    endforeach()
+    foh_shader(sky_probe.slang psSkyProbe fragment)
+    foh_shader(water.slang vsWaterRing vertex)
+    foh_shader(water.slang vsWaterCenter vertex)
+    foh_shader(water.slang psWater fragment)
     foh_shader(grid.slang psGrid fragment)
+    # Post-processing: bloom chain (Call of Duty: Advanced Warfare), luminance-histogram auto exposure, tonemap.
+    foreach(_entry psBloomDownFirst psBloomDown psBloomUp)
+        foh_shader(bloom.slang ${_entry} fragment)
+    endforeach()
+    foreach(_entry csHistogram csAverage)
+        foh_shader(exposure.slang ${_entry} compute)
+    endforeach()
     foh_shader(tonemap.slang psTonemap fragment)
     foh_shader(blit.slang psBlit fragment)
     foh_shader(imgui.slang vsImGui vertex)

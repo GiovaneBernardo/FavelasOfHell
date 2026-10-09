@@ -7,6 +7,8 @@ foh_add_engine_module(assets
         src/asset_container.cpp
         src/asset_types.cpp
         src/asset_db.cpp
+        src/animation_assets.cpp
+        src/import/animation_cook.cpp
         src/import/cook.cpp
         src/import/fbx_importer.cpp
         src/import/gltf_importer.cpp

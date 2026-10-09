@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <set>
@@ -27,7 +28,8 @@ struct MeshCook {
     std::vector<i32> slotMaterials; // slot -> ImportedScene material index (-1 = none)
 };
 
-MeshCook cookMesh(const ImportedMesh& src) {
+// `skeleton` is valid for a skinned mesh: the vertices then carry joint indices and weights.
+MeshCook cookMesh(const ImportedMesh& src, const AssetId& skeleton) {
     MeshCook out;
     MeshAsset& m = out.asset;
     m.name = src.name;
@@ -35,11 +37,26 @@ MeshCook cookMesh(const ImportedMesh& src) {
                  {VertexSemantic::Normal, VertexFormat::Float3, offsetof(CookedVertex, normal)},
                  {VertexSemantic::Tangent, VertexFormat::Float4, offsetof(CookedVertex, tangent)},
                  {VertexSemantic::Uv0, VertexFormat::Float2, offsetof(CookedVertex, uv0)}};
-    m.vertexStride = sizeof(CookedVertex);
-    m.vertexData.resize(src.vertices.size() * sizeof(CookedVertex));
-    auto* dst = reinterpret_cast<CookedVertex*>(m.vertexData.data());
-    for (size_t i = 0; i < src.vertices.size(); ++i)
-        dst[i] = {src.vertices[i].position, src.vertices[i].normal, src.vertices[i].tangent, src.vertices[i].uv0};
+    if (skeleton.isValid()) {
+        m.skeleton = skeleton;
+        m.streams.push_back({VertexSemantic::Joints0, VertexFormat::U8x4, offsetof(CookedSkinnedVertex, joints)});
+        m.streams.push_back({VertexSemantic::Weights0, VertexFormat::Unorm8x4, offsetof(CookedSkinnedVertex, weights)});
+        m.vertexStride = sizeof(CookedSkinnedVertex);
+        m.vertexData.resize(src.vertices.size() * sizeof(CookedSkinnedVertex));
+        auto* skinned = reinterpret_cast<CookedSkinnedVertex*>(m.vertexData.data());
+        for (size_t i = 0; i < src.vertices.size(); ++i) {
+            const ImportedVertex& v = src.vertices[i];
+            skinned[i].base = {v.position, v.normal, v.tangent, v.uv0};
+            std::memcpy(skinned[i].joints, v.joints, 4);
+            std::memcpy(skinned[i].weights, v.weights, 4);
+        }
+    } else {
+        m.vertexStride = sizeof(CookedVertex);
+        m.vertexData.resize(src.vertices.size() * sizeof(CookedVertex));
+        auto* dst = reinterpret_cast<CookedVertex*>(m.vertexData.data());
+        for (size_t i = 0; i < src.vertices.size(); ++i)
+            dst[i] = {src.vertices[i].position, src.vertices[i].normal, src.vertices[i].tangent, src.vertices[i].uv0};
+    }
     m.indices = src.indices;
 
     for (const ImportedSubMesh& s : src.subMeshes) {
@@ -199,12 +216,45 @@ std::vector<CookedAsset> CookScene(const ImportedScene& scene, const ImportSetti
 
     cookTextures();
 
+    // ---- skeletons and clips ----
+    // A skeleton becomes an asset only when a mesh is skinned to it. A file of animations alone (Mixamo "without
+    // skin") yields clips only: they find their joints by name on whatever skeleton plays them.
+    std::vector<AssetId> skeletonIds(scene.skeletons.size());
+    for (size_t i = 0; i < scene.skeletons.size(); ++i) {
+        const ImportedSkeleton& src = scene.skeletons[i];
+        if (!src.usedBySkin) continue;
+        if (src.parents.size() > kMaxSkeletonJoints) {
+            if (warnings) warnings->push_back("skeleton '" + src.name + "' has more than 255 joints; skinned meshes bound to it are static");
+            continue;
+        }
+        CookedAsset c;
+        c.key = src.key;
+        c.name = src.name;
+        c.kind = AssetKind::Skeleton;
+        c.guid = idFor(AssetKind::Skeleton, c.key);
+        c.bytes = SerializeSkeleton(CookSkeleton(src), c.guid);
+        skeletonIds[i] = c.guid;
+        out.push_back(std::move(c));
+    }
+    for (const ImportedClip& clip : scene.clips) {
+        if (clip.skeleton < 0 || static_cast<size_t>(clip.skeleton) >= scene.skeletons.size() || clip.frameCount == 0) continue;
+        CookedAsset c;
+        c.key = clip.key;
+        c.name = clip.name;
+        c.kind = AssetKind::AnimationClip;
+        c.guid = idFor(AssetKind::AnimationClip, c.key);
+        c.bytes = SerializeClip(CookClip(clip, scene.skeletons[static_cast<size_t>(clip.skeleton)], settings, warnings), c.guid);
+        out.push_back(std::move(c));
+    }
+
     // ---- meshes ----
     std::vector<AssetId> meshIds(scene.meshes.size());
     std::vector<std::vector<AssetId>> meshSlotMaterials(scene.meshes.size());
     std::vector<std::vector<u32>> meshSubmeshSlots(scene.meshes.size());
     for (size_t i = 0; i < scene.meshes.size(); ++i) {
-        MeshCook cook = cookMesh(scene.meshes[i]);
+        const i32 skeletonIndex = scene.meshes[i].skeleton;
+        const AssetId skeleton = skeletonIndex >= 0 && static_cast<size_t>(skeletonIndex) < skeletonIds.size() ? skeletonIds[static_cast<size_t>(skeletonIndex)] : AssetId{};
+        MeshCook cook = cookMesh(scene.meshes[i], skeleton);
         CookedAsset c;
         c.key = scene.meshes[i].key;
         c.name = scene.meshes[i].name;
@@ -212,6 +262,7 @@ std::vector<CookedAsset> CookScene(const ImportedScene& scene, const ImportSetti
         c.guid = idFor(AssetKind::Mesh, c.key);
         c.bytes = SerializeMesh(cook.asset, c.guid);
         meshIds[i] = c.guid;
+        if (skeleton.isValid()) c.dependencies.push_back(skeleton);
         for (const SubMesh& sm : cook.asset.subMeshes) meshSubmeshSlots[i].push_back(sm.materialSlot);
         for (i32 mat : cook.slotMaterials)
             meshSlotMaterials[i].push_back(mat >= 0 && static_cast<size_t>(mat) < materialIds.size() ? materialIds[static_cast<size_t>(mat)] : AssetId{});
@@ -237,11 +288,19 @@ std::vector<CookedAsset> CookScene(const ImportedScene& scene, const ImportSetti
                 node.materials = meshSlotMaterials[static_cast<size_t>(n.mesh)];
                 node.submeshSlots = meshSubmeshSlots[static_cast<size_t>(n.mesh)];
                 c.dependencies.push_back(node.mesh);
+                // The instance root animates the skinned meshes below it; one skeleton per prefab.
+                const i32 skeletonIndex = scene.meshes[static_cast<size_t>(n.mesh)].skeleton;
+                if (skeletonIndex >= 0 && static_cast<size_t>(skeletonIndex) < skeletonIds.size() && skeletonIds[static_cast<size_t>(skeletonIndex)].isValid()) {
+                    const AssetId& id = skeletonIds[static_cast<size_t>(skeletonIndex)];
+                    if (!prefab.skeleton.isValid()) prefab.skeleton = id;
+                    else if (prefab.skeleton != id && warnings) warnings->push_back("prefab '" + scene.name + "': meshes are skinned to different skeletons, only the first one is animated");
+                }
                 for (const AssetId& m : node.materials)
                     if (m.isValid()) c.dependencies.push_back(m);
             }
             prefab.nodes.push_back(std::move(node));
         }
+        if (prefab.skeleton.isValid()) c.dependencies.push_back(prefab.skeleton);
         c.key = "prefab";
         c.name = scene.name;
         c.kind = AssetKind::Prefab;

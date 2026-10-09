@@ -5,11 +5,12 @@
 // each other only by AssetId. Runtime code never sees source files.
 //
 // Chunk layout per type (tags are FourCC):
-//   Mesh      META (name, bounds, submeshes, stream descriptor)  VERT (interleaved)  INDX (u32)  DEPS
+//   Mesh      META (name, bounds, submeshes, stream descriptor, skeleton)  VERT (interleaved)  INDX (u32)  DEPS
 //   Material  META (factors, flags, texture references)                                          DEPS
 //   Texture   META (size, role, format, mip count)  MIP0..MIPn (one chunk per mip, streamable)  DEPS
-//   Prefab    META (name, nodes with mesh + per-slot material references)                        DEPS
+//   Prefab    META (name, nodes with mesh + per-slot material references, skeleton)              DEPS
 //   Variant   META (base prefab, overrides)                                                      DEPS
+//   Skeleton, AnimationClip: see animation_assets.h
 //
 // Thread-safety: plain data; (de)serialization functions are pure.
 
@@ -30,6 +31,8 @@ enum class AssetKind : u32 {
     Texture = FourCC('T', 'E', 'X', 'T'),
     Prefab = FourCC('P', 'R', 'F', 'B'),
     PrefabVariant = FourCC('P', 'R', 'V', 'R'),
+    Skeleton = FourCC('S', 'K', 'E', 'L'),
+    AnimationClip = FourCC('A', 'C', 'L', 'P'),
 };
 
 FOH_API const char* AssetKindName(AssetKind kind);        // "mesh", "material", ...
@@ -41,10 +44,11 @@ FOH_API const char* AssetKindExtension(AssetKind kind);   // cooked file extensi
 // Vertex data is described, not hard-coded: readers look streams up by semantic, so
 // new attributes and reordering never break old files and unknown streams are skipped.
 enum class VertexSemantic : u8 { Position, Normal, Tangent, Uv0, Uv1, Color0, Joints0, Weights0 };
-enum class VertexFormat : u8 { Float2, Float3, Float4 };
+// U8x4 / Unorm8x4 are the skinning streams: four joint indices and four weights (sum 255) per vertex.
+enum class VertexFormat : u8 { Float2, Float3, Float4, U8x4, Unorm8x4 };
 
 inline constexpr u32 VertexFormatSize(VertexFormat f) {
-    return f == VertexFormat::Float2 ? 8u : f == VertexFormat::Float3 ? 12u : 16u;
+    return f == VertexFormat::Float2 ? 8u : f == VertexFormat::Float3 ? 12u : f == VertexFormat::Float4 ? 16u : 4u;
 }
 
 struct VertexStream {
@@ -74,7 +78,11 @@ struct MeshAsset {
     u32 materialSlotCount = 0;
     Vec3 boundsMin{0.0f};
     Vec3 boundsMax{0.0f};
+    // Valid for a skinned mesh (Joints0/Weights0 streams): the joints index THIS skeleton's joint list, and the
+    // vertices are in the skeleton's bind pose space (skinning matrix = jointModelPose * skeleton.inverseBind).
+    AssetId skeleton;
 
+    bool skinned() const { return skeleton.isValid(); }
     u32 vertexCount() const { return vertexStride ? static_cast<u32>(vertexData.size() / vertexStride) : 0; }
     const VertexStream* findStream(VertexSemantic s) const {
         for (const VertexStream& st : streams)
@@ -91,6 +99,14 @@ struct CookedVertex {
     Vec2 uv0;
 };
 static_assert(sizeof(CookedVertex) == 48);
+
+// Skinned meshes append the influences: four joint indices and four weights that sum to 255.
+struct CookedSkinnedVertex {
+    CookedVertex base;
+    u8 joints[4];
+    u8 weights[4];
+};
+static_assert(sizeof(CookedSkinnedVertex) == 56);
 
 // ---- material ------------------------------------------------------------------------------
 
@@ -162,6 +178,9 @@ struct PrefabNode {
 struct PrefabAsset {
     std::string name;
     std::vector<PrefabNode> nodes; // parents always precede their children
+    // A skinned character: bones are not nodes, the skeleton is referenced once and the instance root gets the
+    // animator (the skinned mesh nodes below it read its pose).
+    AssetId skeleton;
 
     // "Root/Child/Leaf": how variants address nodes.
     FOH_API std::string nodePath(u32 index) const;

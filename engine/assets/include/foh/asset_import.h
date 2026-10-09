@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "foh/animation_assets.h"
 #include "foh/asset_container.h"
 #include "foh/asset_types.h"
 #include "foh/jobs.h"
@@ -30,6 +31,13 @@ struct ImportSettings {
     u32 maxTextureSize = 0;     // 0 = unlimited; larger images are box-filtered down
     // Standalone textures only. "auto" decides from the file name (_n/_normal, _orm/_rough/_ao/...).
     std::string textureRole = "auto";
+    // Animation clips (ADR 0009). "auto" compares the first and last pose of the clip.
+    std::string clipLoop = "auto";          // auto | loop | once
+    std::string clipRootMotion = "auto";    // auto (linear when it loops, full otherwise) | none | linear | full
+    std::string clipRootJoint = "auto";     // auto (hips/pelvis/root, else the first joint) | a joint name
+    // Key reduction error bounds: a key is dropped when linear interpolation of its neighbours stays inside them.
+    f32 clipRotationToleranceDeg = 0.05f;
+    f32 clipTranslationTolerance = 0.0005f; // meters
 
     bool operator==(const ImportSettings&) const = default;
 };
@@ -39,6 +47,9 @@ struct ImportedVertex {
     Vec3 normal{0.0f, 1.0f, 0.0f};
     Vec4 tangent{1.0f, 0.0f, 0.0f, 1.0f};
     Vec2 uv0{0.0f};
+    // Skinning (ImportedMesh::skeleton >= 0): indices into the skeleton's joints, weights sum to 255.
+    u8 joints[4] = {0, 0, 0, 0};
+    u8 weights[4] = {0, 0, 0, 0};
 };
 
 // Images stay encoded until the cook step: decoding, mip generation and compression of every
@@ -81,6 +92,7 @@ struct ImportedMesh {
     std::vector<ImportedVertex> vertices;
     std::vector<u32> indices;
     std::vector<ImportedSubMesh> subMeshes;
+    i32 skeleton = -1; // index into ImportedScene::skeletons, -1 = static mesh
 };
 
 struct ImportedNode {
@@ -92,12 +104,45 @@ struct ImportedNode {
     i32 mesh = -1;
 };
 
+// A joint hierarchy. Parents precede children. Names are the source's (cook normalises them).
+struct ImportedSkeleton {
+    std::string key;
+    std::string name;
+    std::vector<std::string> jointNames;
+    std::vector<i32> parents;
+    std::vector<Vec3> restPosition;
+    std::vector<Quat> restRotation;
+    std::vector<Vec3> restScale;
+    std::vector<Mat4> inverseBind;      // model space -> joint space; meaningful where hasInverseBind is set
+    std::vector<u8> hasInverseBind;     // joints no skin binds get the inverse of their rest pose
+    bool usedBySkin = false;            // some mesh is skinned to it: only then is a Skeleton asset emitted
+};
+
+// Per-joint local transforms of a clip, sampled at `frameRate` for every frame. An empty vector means the joint
+// is not animated by the clip on that channel (it keeps its rest value).
+struct ImportedClipTrack {
+    std::vector<Vec3> translation;
+    std::vector<Quat> rotation;
+    std::vector<Vec3> scale;
+};
+
+struct ImportedClip {
+    std::string key;
+    std::string name;
+    i32 skeleton = -1; // the joint hierarchy the tracks belong to (tracks[i] is skeleton joint i)
+    f32 frameRate = 30.0f;
+    u32 frameCount = 0;
+    std::vector<ImportedClipTrack> tracks;
+};
+
 struct ImportedScene {
     std::string name;
     std::vector<ImportedImage> images;
     std::vector<ImportedMaterial> materials;
     std::vector<ImportedMesh> meshes;
     std::vector<ImportedNode> nodes;
+    std::vector<ImportedSkeleton> skeletons;
+    std::vector<ImportedClip> clips;
     // Files read besides the main one (.bin, textures): they take part in change detection and copying.
     std::vector<std::filesystem::path> externalFiles;
     std::vector<std::string> warnings;
@@ -131,6 +176,20 @@ using SubAssetIdFn = std::function<AssetId(AssetKind kind, const std::string& ke
 FOH_API std::vector<CookedAsset> CookScene(const ImportedScene& scene, const ImportSettings& settings,
                                            const SubAssetIdFn& idFor, bool sourceIsTexture, JobSystem* jobs = nullptr,
                                            std::vector<std::string>* warnings = nullptr);
+
+// ---- animation cooking (exposed for tests) -------------------------------------------------
+
+// Resolves a skeleton for the cook: normalised names, inverse bind matrices for joints without a skin.
+FOH_API SkeletonAsset CookSkeleton(const ImportedSkeleton& source);
+
+// Clip -> asset: name normalisation, loop detection, root motion split (hips planar motion and yaw out of the pose),
+// foot-plant detection for phase sync, key reduction. `warnings` receives problems that do not fail the cook.
+FOH_API ClipAsset CookClip(const ImportedClip& clip, const ImportedSkeleton& skeleton, const ImportSettings& settings,
+                           std::vector<std::string>* warnings = nullptr);
+
+// Removes keys that linear interpolation of their neighbours reproduces within the tolerance. Exposed for tests.
+FOH_API void ReduceQuatChannel(std::vector<Quat>& samples, f32 toleranceRadians, QuatChannel& out);
+FOH_API void ReduceVecChannel(std::vector<Vec3>& samples, f32 tolerance, VecChannel& out);
 
 // ---- texture processing (exposed for tests and the editor) ---------------------------------
 

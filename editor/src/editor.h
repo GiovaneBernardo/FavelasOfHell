@@ -56,6 +56,7 @@ struct EditorOptions {
     std::string prefabEdit;    // --prefab-edit <model>: opens the prefab editor on an imported model (QA)
     bool prefabQa = false;     // --prefab-qa: with --prefab-edit, fits/rotates/saves/places the model like a user would (QA)
     std::string inspect;       // --inspect <path>: shows a file in the asset inspector (QA)
+    int waterTest = -1;        // --water-test [view]: opens and focuses the Water Test panel on camera preset `view` (QA)
 };
 
 // The editor: one window, one renderer, any number of scenes (ECS worlds) and
@@ -87,6 +88,7 @@ private:
         bool useEditorCamera = true;
         bool grid = true;
         bool sky = true;
+        bool water = false; // draws the sea (ViewportFlags::Water)
         bool open = true;
         bool capturing = false; // RMB look/fly in progress
         FlyCamera camera;
@@ -131,6 +133,9 @@ private:
     Transform dropPlacement(float x, float y, bool hasPosition, size_t& sceneIndex) const;
     void createDebugScene();
     void createPreviewScene();
+    // A procedural coast with the sea in front of it, for looking at the water (see water_test_scene.h).
+    void createWaterScene();
+    static ViewportFlags FlagsOf(const ViewportPanel& p);
     void openPrefabEditor(const std::string& relPath);
     // Prefab editor: replaces what the preview scene shows with `prefab`.
     void showPrefabPreview(const PrefabAsset& prefab);
@@ -200,6 +205,8 @@ private:
     bool m_prefabEditorWasShown = false;
     std::string m_lastBrowserSelection;
     size_t m_previewScene = 0;
+    size_t m_waterScene = 0;
+    size_t m_waterViewport = 0;
     size_t m_previewViewport = 0;
     Entity m_previewRoot{};
     bool m_showWorkshop = false;

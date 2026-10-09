@@ -12,6 +12,7 @@
 #include <string_view>
 
 #include "foh/asset_id.h"
+#include "foh/ecs/buffer.h"
 #include "foh/ecs/reflect.h"
 #include "foh/math.h"
 #include "foh/types.h"
@@ -97,6 +98,30 @@ struct MeshRenderer {
     AssetId material;
 };
 
+// ---- skinning ----------------------------------------------------------------------------------
+// Animation (engine/animation) produces the skinning matrices, rendering consumes them. Both sides only share these
+// plain components, so neither needs the other's headers.
+
+// One skinning matrix: jointModelPose * inverseBind, as 3 rows (the layout GlobalTransform and the instance stream use).
+// It maps a vertex of the mesh's bind pose to the posed vertex in the character's model space.
+struct SkinMatrix {
+    Vec4 row0{1.0f, 0.0f, 0.0f, 0.0f};
+    Vec4 row1{0.0f, 1.0f, 0.0f, 0.0f};
+    Vec4 row2{0.0f, 0.0f, 1.0f, 0.0f};
+};
+
+// The pose of a character, one SkinMatrix per skeleton joint, refilled every frame by the animation system. Lives on
+// the character's root entity; the engine owns and frees the buffer. An empty buffer means "no pose yet".
+struct SkinPalette {
+    BufferHandle<SkinMatrix> matrices;
+};
+
+// Marks a MeshRenderer whose mesh is skinned (its asset has a skeleton). The skinned entity is a child of the entity
+// that holds the SkinPalette; it is drawn only once that palette exists, placed by the root's GlobalTransform.
+struct SkinnedMesh {
+    u32 flags = 0; // reserved
+};
+
 // Perspective camera looking down the entity's local -Z (Y up).
 struct Camera {
     f32 fovY = 1.0471976f; // 60 degrees
@@ -119,5 +144,8 @@ FOH_REFLECT(foh::Transform, position, rotation, scale);
 FOH_REFLECT(foh::GlobalTransform, row0, row1, row2, stamp);
 FOH_REFLECT(foh::AssetId, hi, lo);
 FOH_REFLECT(foh::MeshRenderer, mesh, color, asset, submesh, material);
+FOH_REFLECT(foh::SkinMatrix, row0, row1, row2);
+FOH_REFLECT(foh::SkinPalette, matrices);
+FOH_REFLECT(foh::SkinnedMesh, flags);
 FOH_REFLECT(foh::Camera, fovY, nearZ, farZ, active);
 FOH_REFLECT(foh::DirectionalLight, color, intensity);
