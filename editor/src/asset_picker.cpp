@@ -41,11 +41,13 @@ const char* kindLabel(AssetKind k) {
         case AssetKind::Texture: return "Texture";
         case AssetKind::Prefab: return "Prefab";
         case AssetKind::PrefabVariant: return "Variant";
+        case AssetKind::Skeleton: return "Skeleton";
+        case AssetKind::AnimationClip: return "Animation";
         default: return "Asset";
     }
 }
 
-constexpr AssetKind kPickable[] = {AssetKind::Prefab, AssetKind::Mesh, AssetKind::Material, AssetKind::Texture};
+constexpr AssetKind kPickable[] = {AssetKind::Prefab, AssetKind::Mesh, AssetKind::Material, AssetKind::Texture, AssetKind::AnimationClip, AssetKind::Skeleton};
 
 } // namespace
 

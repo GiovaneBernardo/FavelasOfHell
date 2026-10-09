@@ -292,6 +292,7 @@ std::vector<CookedAsset> CookScene(const ImportedScene& scene, const ImportSetti
                 const i32 skeletonIndex = scene.meshes[static_cast<size_t>(n.mesh)].skeleton;
                 if (skeletonIndex >= 0 && static_cast<size_t>(skeletonIndex) < skeletonIds.size() && skeletonIds[static_cast<size_t>(skeletonIndex)].isValid()) {
                     const AssetId& id = skeletonIds[static_cast<size_t>(skeletonIndex)];
+                    node.skinned = true;
                     if (!prefab.skeleton.isValid()) prefab.skeleton = id;
                     else if (prefab.skeleton != id && warnings) warnings->push_back("prefab '" + scene.name + "': meshes are skinned to different skeletons, only the first one is animated");
                 }

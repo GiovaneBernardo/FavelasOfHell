@@ -18,7 +18,7 @@ constexpr u32 kMaxMips = 24;
 constexpr u32 kMeshVersion = 2; // 2: skeleton reference (skinned meshes)
 constexpr u32 kMaterialVersion = 1;
 constexpr u32 kTextureVersion = 1;
-constexpr u32 kPrefabVersion = 3; // 2: nodes carry submeshSlots, 3: skeleton reference
+constexpr u32 kPrefabVersion = 4; // 2: nodes carry submeshSlots, 3: skeleton reference, 4: node.skinned
 constexpr u32 kVariantVersion = 1;
 
 u32 mipTag(u32 level) { return FourCC('M', 'I', 'P', static_cast<char>(level)); }
@@ -389,6 +389,7 @@ std::vector<u8> SerializePrefab(const PrefabAsset& p, AssetId id) {
         for (const AssetId& m : n.materials) w.putId(m);
         w.put<u32>(static_cast<u32>(n.submeshSlots.size()));
         for (u32 slot : n.submeshSlots) w.put<u32>(slot);
+        w.put<u8>(n.skinned ? 1 : 0);
         refs.push_back(n.mesh);
         refs.insert(refs.end(), n.materials.begin(), n.materials.end());
     }
@@ -422,6 +423,7 @@ bool DeserializePrefab(const ContainerReader& reader, PrefabAsset& out, std::str
             const u32 subs = r.getCount(4);
             for (u32 s = 0; s < subs; ++s) n.submeshSlots.push_back(r.get<u32>());
         }
+        if (reader.typeVersion() >= 4) n.skinned = r.get<u8>() != 0;
         if (!r.ok()) break;
         if (n.parent >= static_cast<i32>(i) || n.parent < -1) return setError(error, "prefab node parent out of order");
         p.nodes.push_back(std::move(n));

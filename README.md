@@ -284,6 +284,7 @@ flecs (MIT; ECS storage and queries, private to `engine/ecs`), glm, Jolt Physics
 | Atmosphere: Bruneton precomputed scattering (transmittance/scattering/irradiance LUTs from compute shaders, 8.1 MiB), sun/ambient/aerial perspective from the LUTs, tables cached on disk and rebuilt from an editor button ([ADR 0007](docs/adr/0007-precomputed-atmosphere.md)) (2026-10-09) | Decided, implemented |
 | Volumetric clouds: one ray-marched slab, half resolution + temporal accumulation, early-out on geometry, lit through the Bruneton tables; ~0.1-0.2 ms on a 5070 Ti ([ADR 0008](docs/adr/0008-volumetric-clouds.md)) (2026-10-09) | Decided, implemented |
 | Post-processing: Call of Duty AW bloom (13-tap down chain + additive tent upsample), luminance-histogram auto exposure per viewport, selectable tonemap operators ([ADR 0010](docs/adr/0010-post-processing.md)) (2026-10-09) | Decided, implemented |
+| Skeletal animation: skinned meshes + skeleton/clip sub-assets (glTF + FBX/Mixamo), CPU pose evaluation on the job system (phase-synchronised locomotion blend space, inertialized transitions, root motion), GPU compute pre-skinning ([ADR 0009](docs/adr/0009-skeletal-animation.md)) (2026-10-09) | Proposed, phases 1-3 implemented |
 | Hybrid real-data + procedural world | Decided |
 | Hardware: min RTX 2060 / RX 6600, dev RTX 5070 Ti; RT optional | Decided |
 | Hot reload goal: save code, see it live in ~1-3 s with state preserved (DLL reload baseline, Live++ optional) | Decided |

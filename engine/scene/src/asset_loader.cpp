@@ -34,9 +34,13 @@ struct AssetLoader::Job {
     std::vector<Vec4> tangents;
     std::vector<u32> indices;
     std::vector<MeshIndexRange> ranges;
+    std::vector<u32> skinJoints, skinWeights; // skinned meshes: packed per vertex
     // Texture / material
     TextureUpload texture;
     MaterialParams material;
+    // Skeleton / clip
+    SkeletonAsset skeleton;
+    ClipAsset clip;
 };
 
 namespace {
@@ -67,7 +71,12 @@ void AssetLoader::request(AssetId id) {
             for (const AssetId& dep : m_db.dependencies(id)) request(dep); // its textures
             [[fallthrough]];
         case AssetKind::Mesh:
-        case AssetKind::Texture: {
+        case AssetKind::Texture:
+        case AssetKind::Skeleton:
+        case AssetKind::AnimationClip: {
+            if ((info->kind == AssetKind::Skeleton || info->kind == AssetKind::AnimationClip) && !m_animation) return;
+            if (info->kind == AssetKind::Mesh)
+                for (const AssetId& dep : m_db.dependencies(id)) request(dep); // a skinned mesh's skeleton
             const auto it = m_entries.find(id);
             if (it != m_entries.end() && it->second.state != State::Failed) return; // already requested
             m_entries[id] = {State::Queued, info->kind};
@@ -110,7 +119,7 @@ void AssetLoader::apply(Job& job) {
     }
     switch (job.kind) {
         case AssetKind::Mesh:
-            if (!m_renderer.uploadMeshAsset(job.id, {job.positions, job.normals, job.uvs, job.tangents, job.indices}, job.ranges)) {
+            if (!m_renderer.uploadMeshAsset(job.id, {job.positions, job.normals, job.uvs, job.tangents, job.indices, job.skinJoints, job.skinWeights}, job.ranges)) {
                 entry.state = State::Failed;
                 FOH_ERROR("the renderer rejected mesh {:016x}{:016x}", job.id.hi, job.id.lo);
                 return;
@@ -124,6 +133,12 @@ void AssetLoader::apply(Job& job) {
             }
             break;
         case AssetKind::Material: m_renderer.setMaterial(job.id, job.material); break;
+        case AssetKind::Skeleton:
+            if (m_animation) m_animation->setSkeleton(job.id, std::move(job.skeleton));
+            break;
+        case AssetKind::AnimationClip:
+            if (m_animation) m_animation->setClip(job.id, std::move(job.clip));
+            break;
         default: break;
     }
     entry.state = State::Loaded;
@@ -168,6 +183,12 @@ void AssetLoader::release(const AssetId& id, AssetKind kind) {
         case AssetKind::Mesh: m_renderer.releaseMeshAsset(id); break;
         case AssetKind::Texture: m_renderer.releaseTexture(id); break;
         case AssetKind::Material: m_renderer.releaseMaterial(id); break;
+        case AssetKind::Skeleton:
+            if (m_animation) m_animation->removeSkeleton(id);
+            break;
+        case AssetKind::AnimationClip:
+            if (m_animation) m_animation->removeClip(id);
+            break;
         default: break;
     }
 }
@@ -248,6 +269,17 @@ void runJob(AssetLoader::Job& job) {
                 if (!job.uvs.empty()) std::memcpy(&job.uvs[i], v + uv->offset, sizeof(Vec2));
                 if (!job.tangents.empty()) std::memcpy(&job.tangents[i], v + tan->offset, sizeof(Vec4));
             }
+            if (mesh.skinned()) {
+                const VertexStream* joints = mesh.findStream(VertexSemantic::Joints0);
+                const VertexStream* weights = mesh.findStream(VertexSemantic::Weights0);
+                job.skinJoints.resize(count);
+                job.skinWeights.resize(count);
+                for (u32 i = 0; i < count; ++i) {
+                    const u8* v = mesh.vertexData.data() + static_cast<size_t>(i) * mesh.vertexStride;
+                    std::memcpy(&job.skinJoints[i], v + joints->offset, 4);
+                    std::memcpy(&job.skinWeights[i], v + weights->offset, 4);
+                }
+            }
             job.indices = std::move(mesh.indices);
             for (const SubMesh& s : mesh.subMeshes) job.ranges.push_back({s.firstIndex, s.indexCount});
             job.ok = true;
@@ -299,6 +331,14 @@ void runJob(AssetLoader::Job& job) {
             job.ok = true;
             return;
         }
+        case AssetKind::Skeleton:
+            if (!DeserializeSkeleton(*reader, job.skeleton, &job.error)) return;
+            job.ok = true;
+            return;
+        case AssetKind::AnimationClip:
+            if (!DeserializeClip(*reader, job.clip, &job.error)) return;
+            job.ok = true;
+            return;
         default: job.error = "not a loadable asset kind"; return;
     }
 }

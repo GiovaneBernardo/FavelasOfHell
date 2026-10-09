@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "foh/animation/animation.h"
 #include "foh/asset_db.h"
 #include "foh/dev_builder.h"
 #include "foh/ecs.h"
@@ -56,6 +57,7 @@ struct EditorOptions {
     std::string prefabEdit;    // --prefab-edit <model>: opens the prefab editor on an imported model (QA)
     bool prefabQa = false;     // --prefab-qa: with --prefab-edit, fits/rotates/saves/places the model like a user would (QA)
     std::string inspect;       // --inspect <path>: shows a file in the asset inspector (QA)
+    float walkSpeed = 0.0f;    // --walk <m/s>: placed characters walk straight ahead at this speed (QA)
     int waterTest = -1;        // --water-test [view]: opens and focuses the Water Test panel on camera preset `view` (QA)
 };
 
@@ -128,6 +130,7 @@ private:
     // Per frame: starts reimports of changed sources, commits finished imports, streams loaded assets to the GPU.
     void updateAssets(float dt);
     void logAsset(std::string message);
+    void assignLocomotionClips(World& world, Entity root);
     void instantiateAsset(AssetId prefab, size_t sceneIndex, const Transform& at);
     // Where a dropped model goes: the ground point under the cursor in the viewport it was dropped on.
     Transform dropPlacement(float x, float y, bool hasPosition, size_t& sceneIndex) const;
@@ -169,6 +172,7 @@ private:
 
     // Assets: the database of imported sources and the glue that puts them into worlds.
     std::unique_ptr<AssetDb> m_assets;
+    AnimationLibrary m_animation; // loaded skeletons and clips; declared before the bridge, whose loader fills it
     std::unique_ptr<AssetSceneBridge> m_assetBridge;
     // Where a model goes once its import finishes (the cursor position of the drop).
     struct Placement {

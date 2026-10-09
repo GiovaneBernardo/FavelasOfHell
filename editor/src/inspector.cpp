@@ -331,6 +331,8 @@ AssetKind assetKindOfField(const std::string& name) {
     if (l.find("material") != std::string::npos) return AssetKind::Material;
     if (l.find("texture") != std::string::npos || l.find("map") != std::string::npos) return AssetKind::Texture;
     if (l.find("prefab") != std::string::npos) return AssetKind::Prefab;
+    if (l.find("clip") != std::string::npos) return AssetKind::AnimationClip;
+    if (l.find("skeleton") != std::string::npos) return AssetKind::Skeleton;
     if (l.find("mesh") != std::string::npos || l == "asset") return AssetKind::Mesh;
     return AssetKind::None;
 }

@@ -1,6 +1,6 @@
 # 0009: Skeletal animation: skinned meshes, clips, blending, GPU skinning
 
-- Status: **Proposed** (needs the project lead's review). The parts marked "built" are implemented; the rest is the plan.
+- Status: **Proposed** (needs the project lead's review); phases 1-3 are implemented, see "Implementation status" at the end.
 - Related: [ADR 0004](0004-model-and-texture-import.md) (import pipeline, which already reserved `Skeleton`/`AnimationClip`), [ADR 0003](0003-renderer-render-graph-viewports.md), [ADR 0001](0001-ecs-on-flecs.md); AGENTS.md rules 2, 3, 5, 8
 - References: Bollinger, "Inertialization: High Performance Animation Transitions in Gears of War" (GDC 2018); Holden, "Spring-It-On: The Game Developer's Spring-Roll-Call" and "Dead Blending / Inertialization" (theorangeduck.com); Clavet, "Motion Matching and The Road to Next-Gen Animation" (GDC 2016, for what we are *not* doing yet); Kovar & Gleicher, "Flexible Automatic Motion Blending with Registration Curves" (2003, why blends need phase alignment); Ubisoft's crowd talks (vertex-animation / GPU crowds); Mixamo FBX specifics inspected from the lead's own files (below).
 
@@ -75,6 +75,20 @@ Clip/skeleton/mesh assets reload like every other sub-asset (ADR 0006 loader). A
 4. **Crowd tier** (GPU clip sampling for distant characters; LOD of pose evaluation rate) - planned
 5. **Foot IK, look-at, aim/upper-body layer, additive hit reactions** - planned
 6. **Motion vectors** (renderer velocity target) - planned, renderer side
+
+## Implementation status (2026-10-09)
+
+Built and verified: `Skeleton`/`AnimationClip` assets and the skinned `Mesh` (version 2, `Joints0`/`Weights0`), prefab v4 (skeleton + per-node `skinned`); glTF and FBX import (FBX through `ufbx_bake_anim`); cook (name normalisation, loop detection, root motion split, foot-plant landmarks, error-bounded key reduction, 16-bit smallest-three quaternions); `engine/animation` (pose sampling/blending, springs, inertialization, radial blend space, locomotion system with turn-in-place and jump one-shots, skinning palettes); renderer pre-skinning (`shaders/skin.slang`, one compute dispatch per viewport, skinned vertices drawn by the depth/shadow/G-buffer/pick passes); editor wiring (plugin, library, auto-assignment of Mixamo clips by name, `--walk` QA flag). Tests: `test_animation_assets` (incl. the real Mixamo files through `FOH_TEST_MIXAMO`) and `test_animation_runtime`; `foh_editor --stress` (also `--group-passes 1`) exits 0 with the D3D12 validation layer silent.
+
+What the Mixamo data showed (and the importer now handles): hips-only translation with the whole walk/run/strafe displacement baked in (1.60 m/s walk, 4.2 m/s run, 4.34 m/s run strafe), 30 Hz dense keys, loops whose last key closes the cycle, turn clips of 89.7 and 176 degrees (not loops even though the pose matches: loop detection also requires the net yaw to be small).
+
+Not done, deliberately or for lack of time:
+- **No foot IK / look-at / upper-body layers / additive clips** (phase 5). Small in-place heading corrections slide the feet (a turn clip handles the big ones); steep stairs and slopes need the ground adaptation described above.
+- **No crowd tier** (phase 4): all characters evaluate on the CPU and each is one draw per submesh. Skinning is also run once per viewport that shows the scene (the editor has two), not once per scene.
+- **No screen-space motion vectors**: there is no velocity target in the renderer yet. "Motion vectors" was implemented as root motion.
+- **Animation-driven root motion** (applying a clip's root curve to the entity) exists as data and for turn clips only; walking is controller driven. The locomotion system moves the entity itself while `LocomotionControl::kinematic` is set, because there is no character controller yet.
+- **Retargeting is by joint name only**; the root joint's translation is scaled by the height ratio. Vertex joints are limited to 255 per skeleton, four influences per vertex, linear blend skinning (no dual quaternion, no non-uniform bone scale in normals).
+- Meshes attached to bones (weapons, hats) are not imported; blend shapes are not imported; Vulkan path for the skinning pass is untested.
 
 ## Consequences
 

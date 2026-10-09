@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <thread>
 
 #include <imgui.h>
@@ -112,6 +113,9 @@ bool Editor::init() {
         main.app = std::make_unique<App>(cfg);
         RenderExtractPlugin extract;
         main.app->addPlugin(extract);
+        AnimationPlugin animation;
+        main.app->addPlugin(animation);
+        main.app->insertResource(AnimationLink{&m_animation});
         main.renderScene = m_renderer->createScene("World");
         main.app->world().resource<RenderSceneLink>()->scene = m_renderer->scene(main.renderScene);
         m_scenes.push_back(std::move(main));
@@ -190,6 +194,7 @@ void Editor::initAssets() {
     m_assets = std::make_unique<AssetDb>(desc);
     m_assets->scan();
     m_assetBridge = std::make_unique<AssetSceneBridge>(*m_assets, *m_renderer, m_jobs.get());
+    m_assetBridge->loader().setAnimationLibrary(&m_animation);
     FOH_INFO("asset database: {} source(s) in {}", m_assets->sources().size(), PathToUtf8(desc.sourceRoot));
     logAsset("Drop a .gltf / .glb / .fbx model or a texture onto the window to import it.");
 
@@ -254,6 +259,9 @@ void Editor::showPrefabPreview(const PrefabAsset& prefab) {
     if (!m_previewRoot.isNull() && world.isAlive(m_previewRoot)) world.despawn(m_previewRoot); // children go with it
     const PrefabInstanceResult inst = InstantiatePrefab(world, prefab, Transform{});
     m_previewRoot = inst.root;
+    assignLocomotionClips(world, inst.root);
+    // The stage is small: a character walks in place there (the blend still follows its velocity).
+    if (LocomotionControl* control = world.get<LocomotionControl>(inst.root)) control->kinematic = false;
     for (const PrefabNode& node : prefab.nodes) {
         if (node.mesh.isValid()) m_assetBridge->loader().request(node.mesh);
         for (const AssetId& material : node.materials)
@@ -359,7 +367,59 @@ void Editor::instantiateAsset(AssetId prefab, size_t sceneIndex, const Transform
     }
     m_selection.scene = sceneIndex;
     m_selection.entity = inst.root;
+    assignLocomotionClips(m_scenes[sceneIndex].app->world(), inst.root);
+    if (m_options.walkSpeed > 0.0f) {
+        // QA (--walk): look at the character from the front so a screenshot shows the gait.
+        for (ViewportPanel& p : m_viewports) {
+            if (!p.useEditorCamera || p.sceneIndex != sceneIndex) continue;
+            p.camera.yaw = 0.0f;
+            p.camera.pitch = -0.08f;
+            p.camera.position = at.position + Vec3(0.0f, 1.3f, 4.0f);
+            break;
+        }
+    }
     logAsset("Placed " + std::to_string(inst.entities.size()) + " entities into '" + m_scenes[sceneIndex].name + "'.");
+}
+
+// A placed character gets the locomotion clips that were imported next to it, matched by the names Mixamo gives its
+// downloads ("walking", "left strafe walking", ...). Anything missing stays empty and can be set in the inspector.
+void Editor::assignLocomotionClips(World& world, Entity root) {
+    LocomotionClips* clips = world.get<LocomotionClips>(root);
+    if (!clips) return;
+    std::map<std::string, AssetId> byName;
+    for (const AssetId& id : m_assets->assetsOfKind(AssetKind::AnimationClip)) {
+        if (const AssetInfo* info = m_assets->find(id)) {
+            std::string name = info->name;
+            for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            byName.emplace(std::move(name), id);
+        }
+    }
+    auto pick = [&](AssetId& slot, std::initializer_list<const char*> names) {
+        for (const char* n : names) {
+            const auto it = byName.find(n);
+            if (it == byName.end()) continue;
+            slot = it->second;
+            m_assetBridge->loader().request(it->second);
+            return;
+        }
+    };
+    pick(clips->idleClip, {"idle", "idle (1)"});
+    pick(clips->walkClip, {"walking", "walk"});
+    pick(clips->runClip, {"running", "run"});
+    pick(clips->sprintClip, {"sprint", "sprinting", "fast run"});
+    pick(clips->walkBackClip, {"walking backwards", "walking backward", "walk backward"});
+    pick(clips->runBackClip, {"running backward", "running backwards", "run backward"});
+    pick(clips->walkLeftClip, {"left strafe walking", "strafe walk left"});
+    pick(clips->walkRightClip, {"right strafe walking", "strafe walk right"});
+    pick(clips->runLeftClip, {"left strafe", "strafe left"});
+    pick(clips->runRightClip, {"right strafe", "strafe right"});
+    pick(clips->turnLeftClip, {"left turn"});
+    pick(clips->turnRightClip, {"right turn"});
+    pick(clips->turnLeft90Clip, {"left turn 90"});
+    pick(clips->turnRight90Clip, {"right turn 90"});
+    pick(clips->jumpClip, {"jump"});
+    if (m_options.walkSpeed > 0.0f)
+        if (LocomotionControl* control = world.get<LocomotionControl>(root)) control->velocity = Vec3(0.0f, 0.0f, m_options.walkSpeed);
 }
 
 ImportTicket Editor::importFile(const fs::path& file, float dropX, float dropY, bool hasDropPosition, bool place) {
@@ -587,6 +647,9 @@ void Editor::createPreviewScene() {
     scene.app = std::make_unique<App>(cfg);
     RenderExtractPlugin extract;
     scene.app->addPlugin(extract);
+    AnimationPlugin animation;
+    scene.app->addPlugin(animation);
+    scene.app->insertResource(AnimationLink{&m_animation});
     scene.renderScene = m_renderer->createScene("Prefab Preview");
     scene.app->world().resource<RenderSceneLink>()->scene = m_renderer->scene(scene.renderScene);
 
@@ -886,6 +949,7 @@ void Editor::buildUi(float dt) {
     }
 
     if (m_options.waterTest >= 0 && m_frameCount == 2) ImGui::SetWindowFocus("Water Test");
+    if (!m_options.prefabEdit.empty() && m_options.walkSpeed > 0.0f && m_frameCount == 40) ImGui::SetWindowFocus(m_viewports[m_previewViewport].title.c_str()); // QA: show the stage
     for (ViewportPanel& p : m_viewports) drawViewport(p, dt);
     if (m_showEntities) m_inspector.drawEntities(m_sceneRefs, m_selection, &m_showEntities);
     if (m_showInspector) m_inspector.drawInspector(m_sceneRefs, m_selection, &m_showInspector);

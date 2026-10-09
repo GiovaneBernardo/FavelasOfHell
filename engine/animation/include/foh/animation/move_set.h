@@ -49,7 +49,7 @@ struct MoveSet {
     std::vector<MoveEntry> entries;
     std::vector<MoveRing> rings; // ascending speed
     std::vector<TurnEntry> turns;
-    bool usable() const { return idle.isValid() || !entries.empty(); }
+    bool usable() const { return idle.isValid() || jump.isValid() || !entries.empty() || !turns.empty(); }
 };
 
 struct MoveWeights {

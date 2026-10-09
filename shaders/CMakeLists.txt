@@ -74,6 +74,7 @@ if(FOH_SLANGC)
     foh_shader(opaque.slang psOpaqueMasked fragment)
     foh_shader(opaque.slang psPick fragment)
     foh_shader(opaque.slang psPickMasked fragment)
+    foh_shader(skin.slang csSkin compute)
     foh_shader(deferred.slang psDeferred fragment)
     foh_shader(sky.slang psSky fragment)
     # Precomputed atmosphere (Bruneton): LUT generation (on demand) and the cache dump.

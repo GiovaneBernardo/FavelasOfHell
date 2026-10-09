@@ -6,6 +6,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <nvrhi/nvrhi.h>
@@ -35,11 +36,26 @@ struct SceneGpu {
         u32 mesh;
         u32 first; // first instance in `instances`
         u32 count;
+        i32 skinBase = -1; // >= 0: a skinned character, drawn from the skinned vertex buffer starting at this vertex
+    };
+    // One mesh block to deform (mirrored by SkinJob in shaders/skin.slang). Every job repeats the job count, which the
+    // shader needs for its search and which saves a constant buffer.
+    struct SkinJob {
+        u32 srcVertex, vertexCount, dstVertex, palette;
+        u32 firstGroup, jobCount, pad0, pad1;
     };
     std::vector<GpuInstance> instances; // sorted by (draw class, mesh)
     // One instanced draw per mesh and draw class; classBegin[c]..classBegin[c + 1] are the batches of class c.
     std::vector<Batch> batches;
     u32 classBegin[kDrawClassCount + 1] = {};
+    // Skinned characters (ADR 0009): the pre-skinning pass deforms `skinJobs` into one vertex buffer; the batches with
+    // skinBase >= 0 draw from it. `palettes` are the skinning matrices of all characters, back to back.
+    std::vector<SkinJob> skinJobs;
+    std::vector<SkinMatrix> palettes;
+    u32 skinnedVertexCount = 0;
+    u32 skinGroups = 0;
+    std::vector<Batch> classScratch;                    // prepareScene scratch
+    std::unordered_map<u64, u32> skinDestination;       // (block, palette) -> first output vertex, shares work between submeshes
     std::vector<u32> counts, cursor;    // counting-sort scratch, one slot per (class, mesh) (kept to avoid per-frame allocation)
 };
 
@@ -137,6 +153,7 @@ struct GpuResources {
     nvrhi::BindingLayoutHandle layoutDeferred;    // b0 + t0..t4 (G-buffer, depth, shadow atlas) + t5..t7 (atmosphere) + s0, s1
     nvrhi::BindingLayoutHandle layoutSky;         // b0 + t0 (depth) + t1..t3 (atmosphere) + s0
     nvrhi::BindingLayoutHandle layoutMaterial;    // b0 + t0 (material buffer) + s0, for the passes that sample materials
+    nvrhi::BindingLayoutHandle layoutSkin;        // t0 jobs, t1 source vertices, t2 influences, t3 palettes, u0 skinned vertices
     nvrhi::BindingLayoutHandle layoutBindless;    // the unbounded texture table, register space 1
     nvrhi::SamplerHandle materialSampler;         // anisotropic wrap
     nvrhi::SamplerHandle shadowSampler;           // hardware PCF compare, see deferred.slang

@@ -173,6 +173,7 @@ struct PrefabNode {
     // Material slot of each submesh of the mesh. Copied here so that placing a prefab needs no mesh file read:
     // the instance can be created at once while the mesh data streams in.
     std::vector<u32> submeshSlots;
+    bool skinned = false; // the mesh is skinned to the prefab's skeleton: it gets a SkinnedMesh and is posed by the root
 };
 
 struct PrefabAsset {

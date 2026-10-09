@@ -97,7 +97,8 @@ void MeshStore::grow(nvrhi::IDevice* device, size_t vertexCapacity, size_t index
     nvrhi::BufferDesc vb;
     vb.byteSize = vertexCapacity * sizeof(MeshVertex);
     vb.isVertexBuffer = true;
-    vb.initialState = nvrhi::ResourceStates::VertexBuffer;
+    vb.structStride = sizeof(MeshVertex); // the skinning pass reads it as a structured buffer
+    vb.initialState = nvrhi::ResourceStates::VertexBuffer | nvrhi::ResourceStates::ShaderResource;
     vb.keepInitialState = true;
     vb.debugName = "MeshVertices";
     m_vertices = device->createBuffer(vb);
@@ -109,6 +110,14 @@ void MeshStore::grow(nvrhi::IDevice* device, size_t vertexCapacity, size_t index
     ib.keepInitialState = true;
     ib.debugName = "MeshIndices";
     m_indices = device->createBuffer(ib);
+
+    nvrhi::BufferDesc sb;
+    sb.byteSize = vertexCapacity * sizeof(SkinInfluence);
+    sb.structStride = sizeof(SkinInfluence);
+    sb.initialState = nvrhi::ResourceStates::ShaderResource;
+    sb.keepInitialState = true;
+    sb.debugName = "MeshSkinInfluences";
+    m_influences = device->createBuffer(sb);
 
     // The new buffers start empty: re-upload what the old ones held.
     if (!m_cpuVertices.empty() || !m_cpuIndices.empty()) upload(device, 0, m_cpuVertices.size(), 0, m_cpuIndices.size());
@@ -122,15 +131,21 @@ void MeshStore::upload(nvrhi::IDevice* device, size_t firstVertex, size_t vertex
     if (vertexCount)
         cmd->writeBuffer(m_vertices, m_cpuVertices.data() + firstVertex, vertexCount * sizeof(MeshVertex),
                          firstVertex * sizeof(MeshVertex));
+    if (vertexCount)
+        cmd->writeBuffer(m_influences, m_cpuInfluences.data() + firstVertex, vertexCount * sizeof(SkinInfluence),
+                         firstVertex * sizeof(SkinInfluence));
     if (indexCount)
         cmd->writeBuffer(m_indices, m_cpuIndices.data() + firstIndex, indexCount * sizeof(u32), firstIndex * sizeof(u32));
     cmd->close();
     device->executeCommandLists(&cmd, 1);
 }
 
-MeshStore::Block MeshStore::append(nvrhi::IDevice* device, std::span<const MeshVertex> vertices, std::span<const u32> indices) {
+MeshStore::Block MeshStore::append(nvrhi::IDevice* device, std::span<const MeshVertex> vertices, std::span<const u32> indices,
+                                   std::span<const SkinInfluence> influences) {
     const Block block{static_cast<u32>(m_cpuIndices.size()), static_cast<i32>(m_cpuVertices.size())};
     m_cpuVertices.insert(m_cpuVertices.end(), vertices.begin(), vertices.end());
+    if (influences.size() == vertices.size()) m_cpuInfluences.insert(m_cpuInfluences.end(), influences.begin(), influences.end());
+    else m_cpuInfluences.resize(m_cpuVertices.size());
     m_cpuIndices.insert(m_cpuIndices.end(), indices.begin(), indices.end());
 
     if (m_cpuVertices.size() > m_vertexCapacity || m_cpuIndices.size() > m_indexCapacity) {

@@ -1,11 +1,23 @@
 #include "foh/scene/prefab_instance.h"
 
+#include "foh/animation/components.h"
+
 namespace foh {
 
 PrefabInstanceResult InstantiatePrefab(World& world, const PrefabAsset& prefab, const Transform& at) {
     PrefabInstanceResult result;
     result.root = world.spawn(Name::Make(prefab.name.empty() ? "Prefab" : prefab.name), at);
     result.entities.push_back(result.root);
+    if (prefab.skeleton.isValid()) {
+        // A skinned character: the root animates every skinned mesh below it (bones are not entities).
+        Animator animator;
+        animator.skeleton = prefab.skeleton;
+        world.insert(result.root, animator);
+        world.insert(result.root, SkinPalette{});
+        world.insert(result.root, LocomotionClips{});
+        world.insert(result.root, LocomotionControl{});
+        world.insert(result.root, LocomotionState{});
+    }
 
     std::vector<Entity> nodeEntities(prefab.nodes.size());
     for (size_t i = 0; i < prefab.nodes.size(); ++i) {
@@ -30,9 +42,12 @@ PrefabInstanceResult InstantiatePrefab(World& world, const PrefabAsset& prefab, 
             mr.color = Vec4(1.0f); // a tint on top of the material, not the color itself
             if (sub == 0) {
                 world.insert(e, mr);
+                if (node.skinned) world.insert(e, SkinnedMesh{});
             } else {
                 const Entity extra = world.spawn(Name::Make(node.name + ".sub" + std::to_string(sub)), Transform{}, mr);
-                world.setParent(extra, e);
+                if (node.skinned) world.insert(extra, SkinnedMesh{});
+                // Skinned submeshes hang directly below the root: that is where the SkinPalette is.
+                world.setParent(extra, node.skinned ? result.root : e);
                 result.entities.push_back(extra);
             }
         }

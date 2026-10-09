@@ -129,15 +129,27 @@ nvrhi::IBindingSet* viewBindings(RgPassContext& ctx, Impl& s, const ViewFrame& v
 struct UploadData {
     RgBuffer instances;
 };
+struct SkinUploadData {
+    RgBuffer palettes;
+    RgBuffer jobs;
+};
+struct SkinData {
+    RgBuffer palettes;
+    RgBuffer jobs;
+    RgBuffer out; // the deformed vertices of every character, MeshVertex layout
+};
 struct DepthPrepassData {
+    RgBuffer skinned; // invalid when nothing is skinned
     RgBuffer instances; // invalid when the scene has no meshes
     RgTexture depth;
 };
 struct ShadowData {
+    RgBuffer skinned; // invalid when nothing is skinned
     RgBuffer instances;
     RgTexture atlas;
 };
 struct OpaqueData {
+    RgBuffer skinned; // invalid when nothing is skinned
     RgBuffer instances;
     RgTexture albedo;
     RgTexture normal;
@@ -185,6 +197,7 @@ struct GridData {
     RgTexture depth;
 };
 struct PickData {
+    RgBuffer skinned; // invalid when nothing is skinned
     RgBuffer instances;
     RgTexture ids;
     RgTexture depth;
@@ -227,7 +240,7 @@ nvrhi::RasterCullMode cullOf(DrawClass cls) { return IsDoubleSided(cls) ? nvrhi:
 // `table` is the bindless texture table for passes that sample materials (null otherwise).
 void drawBatches(Impl& s, const nvrhi::ViewportState& viewport, nvrhi::IFramebuffer* fb, nvrhi::IGraphicsPipeline* pso,
                  nvrhi::IBindingSet* set, nvrhi::IBindingSet* table, nvrhi::ICommandList* cmd, nvrhi::IBuffer* instances,
-                 const SceneGpu& scene, u32 begin, u32 end) {
+                 nvrhi::IBuffer* skinned, const SceneGpu& scene, u32 begin, u32 end) {
     if (begin >= end) return;
     nvrhi::GraphicsState gs;
     gs.setPipeline(pso).setFramebuffer(fb).setViewport(viewport).addBindingSet(set);
@@ -236,14 +249,23 @@ void drawBatches(Impl& s, const nvrhi::ViewportState& viewport, nvrhi::IFramebuf
     gs.addVertexBuffer({instances, 1, 0});
     gs.setIndexBuffer({s.gpu.meshes.indexBuffer(), nvrhi::Format::R32_UINT, 0});
     cmd->setGraphicsState(gs);
+    bool onSkinned = false;
     for (u32 i = begin; i < end; ++i) {
         const SceneGpu::Batch& b = scene.batches[i];
         const MeshRange& r = s.gpu.meshes.range(b.mesh);
+        const bool skin = b.skinBase >= 0 && skinned;
+        if (b.skinBase >= 0 && !skinned) continue; // the pre-skinning pass did not run: nothing to draw
+        if (skin != onSkinned) {
+            // Static batches come first within a class, so this switches at most once per call.
+            gs.vertexBuffers[0].buffer = skin ? skinned : s.gpu.meshes.vertexBuffer();
+            cmd->setGraphicsState(gs);
+            onSkinned = skin;
+        }
         cmd->drawIndexed(nvrhi::DrawArguments()
                              .setVertexCount(r.indexCount)
                              .setInstanceCount(b.count)
                              .setStartIndexLocation(r.firstIndex)
-                             .setStartVertexLocation(static_cast<u32>(r.baseVertex))
+                             .setStartVertexLocation(skin ? static_cast<u32>(b.skinBase) : static_cast<u32>(r.baseVertex))
                              .setStartInstanceLocation(b.first));
     }
 }
@@ -317,6 +339,20 @@ nvrhi::IGraphicsPipeline* classPipeline(Impl& s, MeshPass pass, DrawClass cls, n
     return nullptr;
 }
 
+// Characters (ADR 0009): one dispatch deforms every skinned mesh block of the scene into the skinned vertex buffer,
+// which the depth, shadow, G-buffer and picking passes then draw like any other vertex buffer.
+void recordSkin(Impl& s, const ViewFrame& vf, const SkinData& d, RgPassContext& ctx) {
+    const SceneGpu& scene = *vf.scene;
+    nvrhi::BindingSetDesc bd;
+    bd.addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(0, ctx.buffer(d.jobs)));
+    bd.addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(1, s.gpu.meshes.vertexBuffer()));
+    bd.addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(2, s.gpu.meshes.influenceBuffer()));
+    bd.addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(3, ctx.buffer(d.palettes)));
+    bd.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(0, ctx.buffer(d.out)));
+    RecordCompute(ctx, s.services(), {"skin.csSkin", s.gpu.layoutSkin}, ctx.bindingSet(bd, s.gpu.layoutSkin),
+                  RgDispatch{scene.skinGroups, 1, 1});
+}
+
 void recordDepthPrepass(Impl& s, const ViewFrame& vf, const DepthPrepassData& d, RgPassContext& ctx) {
     nvrhi::ICommandList* cmd = ctx.cmd();
     // Reverse-Z: far is 0.
@@ -326,6 +362,7 @@ void recordDepthPrepass(Impl& s, const ViewFrame& vf, const DepthPrepassData& d,
     nvrhi::IFramebuffer* fb = ctx.framebuffer();
     const SceneGpu& scene = *vf.scene;
     nvrhi::IBuffer* instances = ctx.buffer(d.instances);
+    nvrhi::IBuffer* skinned = d.skinned.valid() ? ctx.buffer(d.skinned) : nullptr;
     // viewBindings writes the view constants into this command list; the masked binding set uses the same buffer.
     nvrhi::IBindingSet* viewSet = viewBindings(ctx, s, vf, nullptr, nvrhi::Format::UNKNOWN);
     nvrhi::IBindingSet* materialSet = nullptr;
@@ -336,7 +373,7 @@ void recordDepthPrepass(Impl& s, const ViewFrame& vf, const DepthPrepassData& d,
         if (!pso) continue;
         if (IsMasked(cls) && !materialSet) materialSet = materialBindings(ctx, s, vf.viewCb);
         drawBatches(s, fullViewport(vf), fb, pso, IsMasked(cls) ? materialSet : viewSet, IsMasked(cls) ? s.gpu.textures.table() : nullptr, cmd,
-                    instances, scene, scene.classBegin[c], scene.classBegin[c + 1]);
+                    instances, skinned, scene, scene.classBegin[c], scene.classBegin[c + 1]);
     }
 }
 
@@ -349,6 +386,7 @@ void recordShadows(Impl& s, const ViewFrame& vf, const ShadowData& d, RgPassCont
     nvrhi::IFramebuffer* fb = ctx.framebuffer();
     const SceneGpu& scene = *vf.scene;
     nvrhi::IBuffer* instances = ctx.buffer(d.instances);
+    nvrhi::IBuffer* skinned = d.skinned.valid() ? ctx.buffer(d.skinned) : nullptr;
     nvrhi::BindingSetDesc bd;
     bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, vf.shadowCb));
     nvrhi::IBindingSet* viewSet = ctx.bindingSet(bd, s.gpu.layoutView);
@@ -373,7 +411,7 @@ void recordShadows(Impl& s, const ViewFrame& vf, const ShadowData& d, RgPassCont
             const u32 c = static_cast<u32>(cls);
             if (!pso[c]) continue;
             drawBatches(s, viewport, fb, pso[c], IsMasked(cls) ? materialSet : viewSet, IsMasked(cls) ? s.gpu.textures.table() : nullptr, cmd,
-                        instances, scene, scene.classBegin[c], scene.classBegin[c + 1]);
+                        instances, skinned, scene, scene.classBegin[c], scene.classBegin[c + 1]);
         }
     }
 }
@@ -388,12 +426,13 @@ void recordOpaque(Impl& s, const ViewFrame& vf, const OpaqueData& d, RgPassConte
     cmd->writeBuffer(vf.viewCb, &vf.constants, sizeof(ViewConstants));
     nvrhi::IBindingSet* set = materialBindings(ctx, s, vf.viewCb);
     nvrhi::IBuffer* instances = ctx.buffer(d.instances);
+    nvrhi::IBuffer* skinned = d.skinned.valid() ? ctx.buffer(d.skinned) : nullptr;
     for (DrawClass cls : kAllClasses) {
         const u32 c = static_cast<u32>(cls);
         if (scene.classBegin[c] >= scene.classBegin[c + 1]) continue;
         nvrhi::IGraphicsPipeline* pso = classPipeline(s, MeshPass::GBuffer, cls, fb);
         if (!pso) continue;
-        drawBatches(s, fullViewport(vf), fb, pso, set, s.gpu.textures.table(), cmd, instances, scene, scene.classBegin[c], scene.classBegin[c + 1]);
+        drawBatches(s, fullViewport(vf), fb, pso, set, s.gpu.textures.table(), cmd, instances, skinned, scene, scene.classBegin[c], scene.classBegin[c + 1]);
     }
 }
 
@@ -584,12 +623,13 @@ void recordPick(Impl& s, const ViewFrame& vf, const PickData& d, RgPassContext& 
     cmd->writeBuffer(vf.viewCb, &vf.constants, sizeof(ViewConstants));
     nvrhi::IBindingSet* set = materialBindings(ctx, s, vf.viewCb);
     nvrhi::IBuffer* instances = ctx.buffer(d.instances);
+    nvrhi::IBuffer* skinned = d.skinned.valid() ? ctx.buffer(d.skinned) : nullptr;
     for (DrawClass cls : kAllClasses) {
         const u32 c = static_cast<u32>(cls);
         if (scene.classBegin[c] >= scene.classBegin[c + 1]) continue;
         nvrhi::IGraphicsPipeline* pso = classPipeline(s, MeshPass::Pick, cls, fb);
         if (!pso) continue;
-        drawBatches(s, fullViewport(vf), fb, pso, set, s.gpu.textures.table(), cmd, instances, scene, scene.classBegin[c], scene.classBegin[c + 1]);
+        drawBatches(s, fullViewport(vf), fb, pso, set, s.gpu.textures.table(), cmd, instances, skinned, scene, scene.classBegin[c], scene.classBegin[c + 1]);
     }
 }
 
@@ -796,12 +836,55 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
             });
     }
 
+    // Characters: upload their pose, deform their meshes, and let every geometry pass below draw the result.
+    RgBuffer skinned;
+    const bool skinning = vf.scene && !vf.scene->skinJobs.empty() && instanceCount > 0;
+    if (skinning) {
+        auto sized = [](size_t count, size_t stride, const char* name) {
+            RgBufferDesc bd;
+            bd.structStride = static_cast<u32>(stride);
+            bd.byteSize = std::bit_ceil(std::max<size_t>(count, 64)) * stride; // size classes: the pooled buffer stays stable
+            bd.name = name;
+            return bd;
+        };
+        const SceneGpu& sg = *vf.scene;
+        const RgBufferDesc paletteDesc = sized(sg.palettes.size(), sizeof(SkinMatrix), "SkinPalettes");
+        const RgBufferDesc jobDesc = sized(sg.skinJobs.size(), sizeof(SceneGpu::SkinJob), "SkinJobs");
+        RgBufferDesc outDesc = sized(sg.skinnedVertexCount, sizeof(MeshVertex), "SkinnedVertices");
+        outDesc.storage = true;
+        outDesc.vertex = true;
+        RgBuffer paletteBuffer, jobBuffer;
+        g.addPass<SkinUploadData>(
+            "UploadSkinning",
+            [&](RgPassBuilder& b, SkinUploadData& d) {
+                paletteBuffer = b.createBuffer(paletteDesc);
+                jobBuffer = b.createBuffer(jobDesc);
+                d.palettes = b.write(paletteBuffer, RgAccess::CopyDst);
+                d.jobs = b.write(jobBuffer, RgAccess::CopyDst);
+            },
+            [frameData](const SkinUploadData& d, RgPassContext& ctx) {
+                const SceneGpu& scene = *frameData->scene;
+                ctx.cmd()->writeBuffer(ctx.buffer(d.palettes), scene.palettes.data(), scene.palettes.size() * sizeof(SkinMatrix));
+                ctx.cmd()->writeBuffer(ctx.buffer(d.jobs), scene.skinJobs.data(), scene.skinJobs.size() * sizeof(SceneGpu::SkinJob));
+            });
+        g.addPass<SkinData>(
+            "SkinMeshes",
+            [&](RgPassBuilder& b, SkinData& d) {
+                d.palettes = b.read(paletteBuffer, RgAccess::SampledRead);
+                d.jobs = b.read(jobBuffer, RgAccess::SampledRead);
+                skinned = b.createBuffer(outDesc);
+                d.out = b.write(skinned, RgAccess::StorageWrite);
+            },
+            [self, frameData](const SkinData& d, RgPassContext& ctx) { recordSkin(*self, *frameData, d, ctx); });
+    }
+
     g.addPass<DepthPrepassData>(
         "DepthPrepass",
         [&](RgPassBuilder& b, DepthPrepassData& d) {
             depth = b.createTexture(depthDesc);
             d.depth = b.depthTarget(depth);
             if (instanceCount > 0) d.instances = b.read(instances, RgAccess::VertexRead);
+            if (skinning) d.skinned = b.read(skinned, RgAccess::VertexRead);
         },
         [self, frameData](const DepthPrepassData& d, RgPassContext& ctx) {
             recordDepthPrepass(*self, *frameData, d, ctx);
@@ -818,6 +901,7 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
                 atlas = b.createTexture(atlasDesc);
                 d.atlas = b.depthTarget(atlas);
                 d.instances = b.read(instances, RgAccess::VertexRead);
+                if (skinning) d.skinned = b.read(skinned, RgAccess::VertexRead);
             },
             [self, frameData](const ShadowData& d, RgPassContext& ctx) { recordShadows(*self, *frameData, d, ctx); });
 
@@ -842,6 +926,7 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
                 d.material = b.colorTarget(2, material);
                 d.depth = b.depthTarget(depth, true);
                 d.instances = b.read(instances, RgAccess::VertexRead);
+                if (skinning) d.skinned = b.read(skinned, RgAccess::VertexRead);
             },
             [self, frameData](const OpaqueData& d, RgPassContext& ctx) { recordOpaque(*self, *frameData, d, ctx); });
     }
@@ -1040,6 +1125,7 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
                 "PickIds",
                 [&](RgPassBuilder& b, PickData& d) {
                     d.instances = b.read(instances, RgAccess::VertexRead);
+                    if (skinning) d.skinned = b.read(skinned, RgAccess::VertexRead);
                     ids = b.createTexture(idDesc);
                     d.ids = b.colorTarget(0, ids);
                     d.depth = b.depthTarget(b.createTexture(pdDesc));

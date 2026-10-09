@@ -118,6 +118,13 @@ std::unique_ptr<Renderer> Renderer::create(const RendererDesc& desc) {
         ml.addItem(nvrhi::BindingLayoutItem::Sampler(0));
         s.gpu.layoutMaterial = dev->createBindingLayout(ml);
 
+        // Pre-skinning (shaders/skin.slang).
+        nvrhi::BindingLayoutDesc kl;
+        kl.visibility = nvrhi::ShaderType::All;
+        for (u32 t = 0; t < 4; ++t) kl.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(t));
+        kl.addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(0));
+        s.gpu.layoutSkin = dev->createBindingLayout(kl);
+
         nvrhi::BindlessLayoutDesc bl;
         bl.setVisibility(nvrhi::ShaderType::All)
             .setFirstSlot(0)
@@ -307,6 +314,8 @@ bool Renderer::uploadMeshAsset(const AssetId& asset, const MeshGeometry& geometr
     for (const MeshIndexRange& r : submeshes) {
         if (r.firstIndex > geometry.indices.size() || r.indexCount > geometry.indices.size() - r.firstIndex) return false;
     }
+    const bool skinned = !geometry.skinJoints.empty();
+    if (skinned && (geometry.skinJoints.size() != vertexCount || geometry.skinWeights.size() != vertexCount)) return false;
 
     std::vector<MeshVertex> vertices(vertexCount);
     for (size_t i = 0; i < vertexCount; ++i) {
@@ -325,10 +334,16 @@ bool Renderer::uploadMeshAsset(const AssetId& asset, const MeshGeometry& geometr
 
     // Replacing (hot reload): the new ranges become visible together, then the old ones are released.
     const std::vector<u32> previous = s.meshLookup.ids(asset) ? *s.meshLookup.ids(asset) : std::vector<u32>{};
-    const MeshStore::Block block = s.gpu.meshes.append(s.device->nvrhi(), vertices, geometry.indices);
+    std::vector<SkinInfluence> influences;
+    if (skinned) {
+        influences.resize(vertexCount);
+        for (size_t i = 0; i < vertexCount; ++i) influences[i] = {geometry.skinJoints[i], geometry.skinWeights[i]};
+    }
+    const MeshStore::Block block = s.gpu.meshes.append(s.device->nvrhi(), vertices, geometry.indices, influences);
     std::vector<u32> ids;
     ids.reserve(submeshes.size());
-    for (const MeshIndexRange& r : submeshes) ids.push_back(s.gpu.meshes.addRange({block.firstIndex + r.firstIndex, r.indexCount, block.baseVertex}));
+    for (const MeshIndexRange& r : submeshes)
+        ids.push_back(s.gpu.meshes.addRange({block.firstIndex + r.firstIndex, r.indexCount, block.baseVertex, static_cast<u32>(vertexCount), skinned}));
     s.meshLookup.set(asset, std::move(ids));
     for (const u32 id : previous) s.retiredMeshes.push_back({s.frame, id});
     return true;
@@ -552,6 +567,58 @@ void Renderer::Impl::prepareScene(SceneSlot& slot) {
     packed.classBegin[kDrawClassCount] = static_cast<u32>(packed.batches.size());
     packed.instances.resize(meshes.size());
     for (const ExtractedMesh& m : meshes) packed.instances[packed.cursor[keyOf(m)]++] = packInstance(m);
+
+    // Skinned characters: one instance and one single-instance batch each (every character has its own deformed
+    // vertices), slotted after the static batches of its draw class. The deformation work is shared between the
+    // submeshes of one mesh and one pose.
+    packed.skinJobs.clear();
+    packed.skinDestination.clear();
+    packed.skinnedVertexCount = 0;
+    packed.skinGroups = 0;
+    const ExtractedScene& extracted = slot.scene->read();
+    if (extracted.skinned.empty()) {
+        packed.palettes.clear();
+        return;
+    }
+    packed.palettes = extracted.skinMatrices;
+    struct SkinBatch {
+        u32 cls;
+        SceneGpu::Batch batch;
+    };
+    std::vector<SkinBatch> skinBatches;
+    skinBatches.reserve(extracted.skinned.size());
+    for (const ExtractedSkinned& sk : extracted.skinned) {
+        if (sk.mesh.mesh >= meshCount) continue;
+        const MeshRange& range = gpu.meshes.range(sk.mesh.mesh);
+        if (!range.skinned || range.indexCount == 0 || range.vertexCount == 0) continue;
+        const u64 key = (static_cast<u64>(static_cast<u32>(range.baseVertex)) << 32) | sk.palette;
+        auto [it, fresh] = packed.skinDestination.try_emplace(key, packed.skinnedVertexCount);
+        if (fresh) {
+            const u32 groups = (range.vertexCount + 63) / 64;
+            packed.skinJobs.push_back({static_cast<u32>(range.baseVertex), range.vertexCount, packed.skinnedVertexCount, sk.palette,
+                                       packed.skinGroups, 0, 0, 0});
+            packed.skinGroups += groups;
+            packed.skinnedVertexCount += range.vertexCount;
+        }
+        const u32 instance = static_cast<u32>(packed.instances.size());
+        packed.instances.push_back(packInstance(sk.mesh));
+        skinBatches.push_back({static_cast<u32>(gpu.materials.classOf(sk.mesh.material)), {sk.mesh.mesh, instance, 1, static_cast<i32>(it->second)}});
+    }
+    for (SceneGpu::SkinJob& job : packed.skinJobs) job.jobCount = static_cast<u32>(packed.skinJobs.size());
+    if (skinBatches.empty()) return;
+
+    std::vector<SceneGpu::Batch>& merged = packed.classScratch;
+    merged.clear();
+    u32 begin[kDrawClassCount + 1];
+    for (u32 cls = 0; cls < kDrawClassCount; ++cls) {
+        begin[cls] = static_cast<u32>(merged.size());
+        merged.insert(merged.end(), packed.batches.begin() + packed.classBegin[cls], packed.batches.begin() + packed.classBegin[cls + 1]);
+        for (const SkinBatch& sb : skinBatches)
+            if (sb.cls == cls) merged.push_back(sb.batch);
+    }
+    begin[kDrawClassCount] = static_cast<u32>(merged.size());
+    packed.batches.swap(merged);
+    std::copy(begin, begin + kDrawClassCount + 1, packed.classBegin);
 }
 
 void Renderer::beginFrame() {

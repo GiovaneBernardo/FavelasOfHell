@@ -29,6 +29,8 @@ const char* kindName(AssetKind k) {
         case AssetKind::Texture: return "Texture";
         case AssetKind::Prefab: return "Prefab";
         case AssetKind::PrefabVariant: return "Prefab variant";
+        case AssetKind::Skeleton: return "Skeleton";
+        case AssetKind::AnimationClip: return "Animation clip";
         default: return "Asset";
     }
 }

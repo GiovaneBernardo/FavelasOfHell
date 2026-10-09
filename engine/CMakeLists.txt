@@ -9,7 +9,8 @@
 #   core -> platform -> host
 #   core -> jobs, platform, ecs -> renderer   (the renderer extracts render data through ECS plugins)
 #   core -> assets, physics
-#   assets, ecs, renderer -> scene           (prefab instantiation, mesh upload, reimport sync)
+#   core, jobs, ecs, assets, renderer -> animation   (pose evaluation; produces SkinPalette for the renderer)
+#   assets, ecs, renderer, animation -> scene           (prefab instantiation, mesh upload, reimport sync)
 add_subdirectory(core)
 add_subdirectory(jobs)
 add_subdirectory(platform)
@@ -17,6 +18,7 @@ add_subdirectory(ecs)
 add_subdirectory(host)
 add_subdirectory(assets)
 add_subdirectory(renderer)
+add_subdirectory(animation)
 add_subdirectory(scene)
 add_subdirectory(physics)
 

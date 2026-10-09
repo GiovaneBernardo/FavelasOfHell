@@ -4,7 +4,8 @@
 // unit-testable; AssetSceneBridge supplies the asset lookups.
 //
 // Layout of an instance:
-//   <instance root>            Name + Transform (where the prefab was placed)
+//   <instance root>            Name + Transform (where the prefab was placed); a skinned character also gets
+//                              Animator, SkinPalette and the Locomotion* components (RegisterAnimation registers them)
 //     <prefab node>            Name + Transform [+ MeshRenderer for the mesh's first submesh]
 //       <name>.sub<k>          one extra entity per further submesh of the node's mesh
 //

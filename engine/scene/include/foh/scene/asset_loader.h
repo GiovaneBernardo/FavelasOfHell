@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "foh/animation/animation_library.h"
 #include "foh/asset_db.h"
 #include "foh/jobs.h"
 #include "foh/platform.h"
@@ -48,6 +49,9 @@ public:
     // A source was reimported: reloads what is loaded, releases what is gone.
     void assetChanged(AssetId id);
 
+    // Where loaded skeletons and animation clips go (they are not renderer data). Without one they are not loaded.
+    void setAnimationLibrary(AnimationLibrary* library) { m_animation = library; }
+
     // Textures larger than this are loaded without their largest mips (VRAM budget on the minimum spec).
     void setMaxTextureSize(u32 size) { m_maxTextureSize = size; }
 
@@ -71,6 +75,7 @@ private:
     AssetDb& m_db;
     Renderer& m_renderer;
     JobSystem* m_jobs;
+    AnimationLibrary* m_animation = nullptr;
     u32 m_maxTextureSize = 4096;
     std::unordered_map<AssetId, Entry, AssetIdHash> m_entries;
     std::deque<AssetId> m_queue;

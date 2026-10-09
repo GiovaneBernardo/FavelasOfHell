@@ -24,6 +24,12 @@ struct ExtractedMesh {
     u64 entity; // Entity::id, for picking
 };
 
+// A skinned mesh instance: its first SkinMatrix is skinMatrices[palette] (one per skeleton joint).
+struct ExtractedSkinned {
+    ExtractedMesh mesh;
+    u32 palette;
+};
+
 struct ExtractedCamera {
     u64 entity; // Entity::id of the owner
     Mat4 world;
@@ -39,6 +45,8 @@ struct ExtractedSun {
 
 struct ExtractedScene {
     std::vector<ExtractedMesh> meshes;
+    std::vector<ExtractedSkinned> skinned;
+    std::vector<SkinMatrix> skinMatrices; // the palettes of all characters, back to back
     std::vector<ExtractedCamera> cameras;
     ExtractedSun sun;
     u64 frame = 0;
@@ -115,6 +123,9 @@ public:
     const MeshLookup* meshLookup = nullptr;
     const MaterialLookup* materialLookup = nullptr;
 
+    // Scratch of the extraction: character entity -> offset of its palette in ExtractedScene::skinMatrices.
+    std::unordered_map<u64, u32>& paletteOffsets() { return m_paletteOffsets; }
+
     // Per-job-thread staging used by the parallel extraction.
     std::vector<ExtractedMesh>& staging(u32 threadSlot) { return m_staging[threadSlot]; }
 
@@ -123,6 +134,7 @@ private:
     u32 m_writeIndex = 0;
     bool m_dirty = false;
     std::vector<ExtractedMesh> m_staging[kMaxJobThreads];
+    std::unordered_map<u64, u32> m_paletteOffsets;
 };
 
 // Resource that ties an ECS world to its RenderScene. Holds a pointer into

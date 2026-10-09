@@ -81,6 +81,11 @@ struct MeshGeometry {
     std::span<const Vec2> uvs;
     std::span<const Vec4> tangents; // xyz + bitangent sign; may be empty (normal maps then look flat-shaded)
     std::span<const u32> indices;
+    // Skinning (empty for a static mesh, else one entry per vertex): four joint indices (one byte each, low byte
+    // first) and four weights (unorm8, summing to 255) packed in a u32 each. Joints index the skeleton of the pose
+    // that deforms the mesh (SkinnedMesh / SkinPalette).
+    std::span<const u32> skinJoints;
+    std::span<const u32> skinWeights;
 };
 // A draw range inside MeshGeometry::indices (one per submesh; MeshRenderer::submesh picks it).
 struct MeshIndexRange {

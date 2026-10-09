@@ -15,6 +15,7 @@ add_executable(foh_tests
     test_observers.cpp
     test_assets.cpp
     test_animation_assets.cpp
+    test_animation_runtime.cpp
     test_asset_import.cpp
     test_prefab_instance.cpp
     test_texture_cook.cpp
