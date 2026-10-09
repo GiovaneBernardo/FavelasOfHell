@@ -16,12 +16,16 @@
 #include "foh/rhi/swapchain.h"
 #include "foh/scene/asset_scene_bridge.h"
 #include "foh/window.h"
+#include "atmosphere_panel.h"
+#include "asset_inspector.h"
+#include "asset_picker.h"
 #include "content_browser.h"
 #include "editor_prefs.h"
 #include "fly_camera.h"
 #include "imgui_platform.h"
 #include "imgui_renderer.h"
 #include "inspector.h"
+#include "prefab_editor.h"
 #include "theme.h"
 #include "thumbnails.h"
 #include "workshop/workshop.h"
@@ -49,6 +53,9 @@ struct EditorOptions {
     bool workshopTest = false; // --workshop-test: download + import the first result with the smallest variant (QA)
     bool openWorkshop = false; // --workshop: open the assets workshop at startup (QA)
     std::string importFile;    // --import <file>: imports it at startup and places it like a drop (QA)
+    std::string prefabEdit;    // --prefab-edit <model>: opens the prefab editor on an imported model (QA)
+    bool prefabQa = false;     // --prefab-qa: with --prefab-edit, fits/rotates/saves/places the model like a user would (QA)
+    std::string inspect;       // --inspect <path>: shows a file in the asset inspector (QA)
 };
 
 // The editor: one window, one renderer, any number of scenes (ECS worlds) and
@@ -86,6 +93,7 @@ private:
         u32 stableFrames = 0;
         bool sizeApplied = false;
         AssetId pendingMaterial; // dropped on the view: applied to whatever the next pick returns
+        float initialW = 0.0f, initialH = 0.0f; // logical size when the panel floats the first time (0: dock default)
         // Where the image was drawn last frame (logical window coordinates): drops land by it.
         float imageX = 0.0f, imageY = 0.0f, imageW = 0.0f, imageH = 0.0f;
     };
@@ -119,6 +127,11 @@ private:
     // Where a dropped model goes: the ground point under the cursor in the viewport it was dropped on.
     Transform dropPlacement(float x, float y, bool hasPosition, size_t& sceneIndex) const;
     void createDebugScene();
+    void createPreviewScene();
+    void openPrefabEditor(const std::string& relPath);
+    // Prefab editor: replaces what the preview scene shows with `prefab`.
+    void showPrefabPreview(const PrefabAsset& prefab);
+    void framePreview(Vec3 center, float radius);
     void runStress();
     void drawGizmo(ViewportPanel& panel, const ImVec2& origin, const ImVec2& size, int panelIndex);
     void handlePicking(ViewportPanel& panel, const ImVec2& origin, const ImVec2& size, bool hovered);
@@ -175,11 +188,24 @@ private:
         const char* worstPhase = "";
     } m_streaming;
     bool m_showAssets = true;
+    // Asset reference widgets, the asset inspector and the prefab editor (with its own scene and viewport).
+    AssetPicker m_picker;
+    AssetInspector m_assetInspector;
+    PrefabEditor m_prefabEditor;
+    bool m_showAssetInspector = true;
+    bool m_showPrefabEditor = false;
+    bool m_prefabEditorWasShown = false;
+    std::string m_lastBrowserSelection;
+    size_t m_previewScene = 0;
+    size_t m_previewViewport = 0;
+    Entity m_previewRoot{};
     bool m_showWorkshop = false;
 
     bool m_dockLayoutBuilt = false;
     bool m_showRenderGraph = true;
     bool m_showStats = true;
+    bool m_showAtmosphere = false;
+    AtmospherePanel m_atmospherePanel;
     bool m_showEntities = true;
     bool m_showInspector = true;
     EntityInspector m_inspector;

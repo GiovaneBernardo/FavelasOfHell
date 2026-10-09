@@ -40,6 +40,33 @@ std::string safeName(const std::string& s) {
     return out.empty() ? "asset" : out;
 }
 
+// A readable folder/file name from an asset title: "Old Brick Wall (v2)" -> "Old_Brick_Wall_v2".
+std::string slugify(const std::string& s, size_t maxLen = 48) {
+    std::string out;
+    for (unsigned char c : s) {
+        const bool keep = std::isalnum(c) || c == '-';
+        if (keep) out += static_cast<char>(c);
+        else if (!out.empty() && out.back() != '_') out += '_';
+    }
+    while (!out.empty() && out.back() == '_') out.pop_back();
+    if (out.size() > maxLen) out.resize(maxLen);
+    while (!out.empty() && out.back() == '_') out.pop_back();
+    return out;
+}
+
+// The "Page:" line of an ATTRIBUTION.txt (empty when missing): tells whether a folder holds the same asset.
+std::string attributionPage(const fs::path& dir) {
+    std::ifstream in(dir / "ATTRIBUTION.txt");
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("Page:", 0) == 0) {
+            const size_t b = line.find_first_not_of(" 	", 5);
+            return b == std::string::npos ? std::string() : line.substr(b);
+        }
+    }
+    return {};
+}
+
 std::string ellipsize(ImFont* font, float fs, const std::string& text, float width) {
     if (font->CalcTextSizeA(fs, 1e9f, 0.0f, text.c_str()).x <= width) return text;
     std::string cut = text;
@@ -217,6 +244,24 @@ Workshop::Download* Workshop::findDownload(unsigned id) {
     return nullptr;
 }
 
+// Workshop/<source>/<Asset_Name>[_<variant>]: named after the asset as the workshop shows it. The variant is only part
+// of the name when the asset offers several (texture resolutions), and a different asset that happens to share the
+// title gets its id appended instead of overwriting the first one.
+fs::path Workshop::packageDir(const WorkshopAsset& asset, const std::string& variant) const {
+    std::string name = slugify(asset.name);
+    if (name.empty()) name = slugify(asset.id);
+    if (name.empty()) name = "asset";
+    if (asset.variants.size() > 1 && !variant.empty()) name += "_" + safeName(variant);
+    const fs::path base = m_host.assetRoot / "workshop" / safeName(asset.provider);
+    std::error_code ec;
+    const std::string page = attributionPage(base / name);
+    if (fs::exists(base / name, ec) && !page.empty() && page != asset.pageUrl) {
+        std::string id = slugify(asset.id, 8);
+        name += "_" + (id.empty() ? std::string("2") : id);
+    }
+    return base / name;
+}
+
 void Workshop::startDownload(const WorkshopAsset& asset, const std::string& variant, bool place) {
     auto d = std::make_unique<Download>();
     d->id = m_nextDownload++;
@@ -224,7 +269,7 @@ void Workshop::startDownload(const WorkshopAsset& asset, const std::string& vari
     d->variant = variant;
     d->place = place && asset.kind == WorkshopKind::Model;
     d->message = "Resolving files...";
-    d->dir = m_host.assetRoot / "workshop" / safeName(asset.provider) / (safeName(asset.id) + "_" + safeName(variant));
+    d->dir = packageDir(asset, variant);
     const unsigned id = d->id;
     WorkshopProvider* provider = nullptr;
     for (auto& p : m_providers)
@@ -319,6 +364,18 @@ void Workshop::beginImport(Download& d) {
             d.pack->out = d.dir / (safeName(d.asset.id) + "_ORM.png");
             m_jobs->submit(&PackTask::run, d.pack.get(), d.pack->counter, JobPriority::Low);
             return;
+        }
+    }
+    if (models.size() == 1) {
+        // "scene.gltf" tells nothing in a list of imports: name the model after the asset. glTF references its
+        // buffers and textures by their own names, so renaming the .gltf file alone is safe.
+        const fs::path from = models[0];
+        const std::string slug = slugify(d.asset.name);
+        const fs::path to = from.parent_path() / PathFromUtf8(slug + PathToUtf8(from.extension()));
+        std::error_code rc;
+        if (!slug.empty() && from != to && !fs::exists(to, rc)) {
+            fs::rename(from, to, rc);
+            if (!rc) models[0] = to;
         }
     }
     if (!models.empty()) {

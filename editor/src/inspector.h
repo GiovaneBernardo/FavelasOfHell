@@ -3,6 +3,7 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "foh/ecs.h"
@@ -36,8 +37,13 @@ struct Selection {
 // but cannot be edited field by field.
 //
 // Thread-safety: main thread only.
+class AssetPicker;
+
 class EntityInspector {
 public:
+    // Reference fields (AssetId) get a picker button instead of two raw numbers. Optional.
+    void setAssetPicker(AssetPicker* picker) { m_picker = picker; }
+
     void drawEntities(std::span<const SceneRef> scenes, Selection& selection, bool* open);
     void drawInspector(std::span<const SceneRef> scenes, Selection& selection, bool* open);
 
@@ -53,6 +59,21 @@ private:
     char m_search[64] = {};
     std::vector<ComponentInfoView> m_components; // of the listed scene's world
     std::vector<Entity> m_entities;              // after all filters
+    // What the list shows: a flattened tree (only the expanded branches) while no filter is active, else the
+    // matches as a flat list. Flat rows keep the list clipper usable with 100k entities.
+    struct Row {
+        Entity entity;
+        u32 depth = 0;
+        u32 children = 0;
+    };
+    std::vector<Row> m_rows;
+    std::unordered_set<u64> m_expanded;
+    Entity m_lastSelected{};
+    Entity m_revealTarget{}; // selected from elsewhere (viewport pick): open its ancestors and scroll to it
+    AssetPicker* m_picker = nullptr;
+    bool m_scrollToReveal = false;
+    bool m_pickedHere = false; // this window set the selection this frame: no need to reveal it
+    void buildTreeRows(const World& world);
     size_t m_matchedByComponents = 0;
     size_t m_total = 0;
     double m_sinceRefresh = 1e9;

@@ -7,6 +7,7 @@
 
 #include <imgui.h>
 
+#include "asset_picker.h"
 #include "foh/renderer/components.h"
 
 namespace foh {
@@ -65,6 +66,31 @@ bool nameLooksLikeColor(const std::string& n) {
 
 // ---- Entities window --------------------------------------------------------------------
 
+void EntityInspector::buildTreeRows(const World& w) {
+    std::vector<Entity> kids;
+    struct Frame {
+        Entity entity;
+        u32 depth;
+    };
+    std::vector<Frame> stack;
+    for (auto it = m_entities.rbegin(); it != m_entities.rend(); ++it) {
+        if (w.parentOf(*it).isNull()) stack.push_back({*it, 0});
+    }
+    while (!stack.empty()) {
+        const Frame f = stack.back();
+        stack.pop_back();
+        const size_t n = w.childCount(f.entity);
+        m_rows.push_back({f.entity, f.depth, static_cast<u32>(n)});
+        if (n == 0 || !m_expanded.count(f.entity.id)) continue;
+        kids.clear();
+        w.forEachChild(f.entity, [&](Entity c) { kids.push_back(c); });
+        // Child order is unspecified: sort so the tree does not shuffle between refreshes. Pushed in reverse
+        // because the stack pops the last one first.
+        std::sort(kids.begin(), kids.end(), [](Entity a, Entity b) { return a.index() > b.index(); });
+        for (Entity c : kids) stack.push_back({c, f.depth + 1});
+    }
+}
+
 void EntityInspector::refresh(const SceneRef& scene) {
     World& w = *scene.world;
     listComponents(w, m_components);
@@ -82,6 +108,16 @@ void EntityInspector::refresh(const SceneRef& scene) {
 
     if (m_search[0]) {
         std::erase_if(m_entities, [&](Entity e) { return !containsNoCase(entityLabel(w, e), m_search); });
+    }
+    m_rows.clear();
+    if (with.empty() && without.empty() && !m_search[0]) {
+        // Selected from elsewhere (a click in the viewport): open the branches above it.
+        if (!m_revealTarget.isNull() && w.isAlive(m_revealTarget)) {
+            for (Entity p = w.parentOf(m_revealTarget); !p.isNull(); p = w.parentOf(p)) m_expanded.insert(p.id);
+        }
+        buildTreeRows(w);
+    } else {
+        for (Entity e : m_entities) m_rows.push_back({e, 0, 0});
     }
     m_dirty = false;
     m_sinceRefresh = 0.0;
@@ -183,23 +219,82 @@ void EntityInspector::drawEntities(std::span<const SceneRef> scenes, Selection& 
     // The match is recomputed a few times per second (and at once when the filter
     // changes): cheap, and entities come and go while the game runs.
     m_sinceRefresh += static_cast<double>(ImGui::GetIO().DeltaTime);
+    // Something else selected an entity (a click in a viewport, a freshly placed model): reveal it in the tree.
+    if (selection.scene == m_scene && selection.entity != m_lastSelected && !selection.entity.isNull() && !m_pickedHere) {
+        m_revealTarget = selection.entity;
+        m_scrollToReveal = true;
+        m_dirty = true;
+    }
+    m_lastSelected = selection.entity;
+    m_pickedHere = false;
     if (changed || m_dirty || m_sinceRefresh > 0.25) refresh(scenes[m_scene]);
 
     ImGui::TextDisabled("%zu shown, %zu match the components, %zu total", m_entities.size(), m_matchedByComponents,
                         m_total);
 
     World& world = *scenes[m_scene].world;
+    if (!m_expanded.empty()) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("collapse all")) {
+            m_expanded.clear();
+            m_dirty = true;
+        }
+    }
     if (ImGui::BeginChild("##entities", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
+        const float lineH = ImGui::GetTextLineHeightWithSpacing();
+        const float indent = ImGui::GetFontSize() * 1.1f;
+        if (m_scrollToReveal) {
+            m_scrollToReveal = false;
+            for (size_t i = 0; i < m_rows.size(); ++i) {
+                if (m_rows[i].entity == m_revealTarget) {
+                    ImGui::SetScrollY(std::max(0.0f, static_cast<float>(i) * lineH - ImGui::GetWindowHeight() * 0.5f));
+                    break;
+                }
+            }
+            m_revealTarget = kNullEntity;
+        }
+        ImDrawList* dl = ImGui::GetWindowDrawList();
         ImGuiListClipper clipper;
-        clipper.Begin(static_cast<int>(m_entities.size()));
+        clipper.Begin(static_cast<int>(m_rows.size()), lineH);
         while (clipper.Step()) {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-                const Entity e = m_entities[static_cast<size_t>(i)];
+                const Row row = m_rows[static_cast<size_t>(i)];
+                const Entity e = row.entity;
                 const bool selected = selection.scene == m_scene && selection.entity == e;
+                const bool expanded = row.children && m_expanded.count(e.id);
                 ImGui::PushID(static_cast<int>(e.index()));
-                if (ImGui::Selectable(entityLabel(world, e).c_str(), selected)) {
+                const ImVec2 p0 = ImGui::GetCursorScreenPos();
+                const float arrowW = ImGui::GetFontSize();
+                const float x0 = p0.x + static_cast<float>(row.depth) * indent;
+                // The row is one full-width selectable; the arrow and the text are painted over it.
+                ImGui::Selectable("##row", selected, ImGuiSelectableFlags_AllowDoubleClick, ImVec2(0, ImGui::GetTextLineHeight()));
+                const ImVec2 mouse = ImGui::GetMousePos();
+                const bool onArrow = row.children && mouse.x >= x0 && mouse.x < x0 + arrowW;
+                const bool toggle = [&] {
+                    if (!row.children) return false;
+                    if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && onArrow) return true;
+                    return ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+                }();
+                if (toggle) {
+                    if (expanded) m_expanded.erase(e.id); else m_expanded.insert(e.id);
+                    m_dirty = true;
+                } else if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !onArrow) {
                     selection.scene = m_scene;
                     selection.entity = e;
+                    m_pickedHere = true;
+                }
+                if (row.children) {
+                    const float cx = x0 + arrowW * 0.45f, cy = p0.y + ImGui::GetTextLineHeight() * 0.5f, r = arrowW * 0.22f;
+                    const ImU32 col = ImGui::GetColorU32(onArrow ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+                    if (expanded) dl->AddTriangleFilled(ImVec2(cx - r, cy - r * 0.6f), ImVec2(cx + r, cy - r * 0.6f), ImVec2(cx, cy + r * 0.9f), col);
+                    else dl->AddTriangleFilled(ImVec2(cx - r * 0.6f, cy - r), ImVec2(cx - r * 0.6f, cy + r), ImVec2(cx + r * 0.9f, cy), col);
+                }
+                const std::string label = entityLabel(world, e);
+                dl->AddText(ImVec2(x0 + arrowW, p0.y), ImGui::GetColorU32(ImGuiCol_Text), label.c_str());
+                if (row.children) {
+                    const std::string count = std::format("({})", row.children);
+                    const float w = ImGui::CalcTextSize(label.c_str()).x;
+                    dl->AddText(ImVec2(x0 + arrowW + w + indent * 0.4f, p0.y), ImGui::GetColorU32(ImGuiCol_TextDisabled), count.c_str());
                 }
                 ImGui::PopID();
             }
@@ -214,6 +309,7 @@ void EntityInspector::drawEntities(std::span<const SceneRef> scenes, Selection& 
 namespace {
 
 struct FieldContext {
+    AssetPicker* picker;
     World* world;
     std::span<const SceneRef> scenes;
     Selection* selection;
@@ -221,6 +317,23 @@ struct FieldContext {
     unsigned* eulerId;
     Vec3* euler;
 };
+
+// AssetId as reflected: { hi: u64, lo: u64 }.
+bool isAssetRef(const SchemaField& f) {
+    return f.kind == FieldKind::Struct && f.elemSize == sizeof(AssetId) && f.children.size() == 2 && f.children[0].name == "hi" &&
+           f.children[1].name == "lo";
+}
+
+// What a field named like this can hold: narrows the picker's list.
+AssetKind assetKindOfField(const std::string& name) {
+    std::string l;
+    for (char ch : name) l += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (l.find("material") != std::string::npos) return AssetKind::Material;
+    if (l.find("texture") != std::string::npos || l.find("map") != std::string::npos) return AssetKind::Texture;
+    if (l.find("prefab") != std::string::npos) return AssetKind::Prefab;
+    if (l.find("mesh") != std::string::npos || l == "asset") return AssetKind::Mesh;
+    return AssetKind::None;
+}
 
 void drawField(FieldContext& c, const SchemaField& f, std::byte* base, const std::string& prefix, int depth);
 
@@ -283,12 +396,18 @@ void drawElement(FieldContext& c, const SchemaField& f, std::byte* p, const std:
         }
         case FieldKind::Text: ImGui::InputText("##v", reinterpret_cast<char*>(p), f.count); break;
         case FieldKind::Struct:
+            if (c.picker && isAssetRef(f)) {
+                // The field value is the AssetId itself: hi and lo, 16 bytes.
+                auto* id = reinterpret_cast<AssetId*>(p);
+                c.picker->field("##asset", *id, assetKindOfField(f.name));
+                break;
+            }
             ImGui::TextDisabled("{ %zu fields }", f.children.size());
             break;
         case FieldKind::Buffer: ImGui::TextDisabled("<buffer>"); break;
     }
     ImGui::PopID();
-    if (f.kind == FieldKind::Struct) {
+    if (f.kind == FieldKind::Struct && !(c.picker && isAssetRef(f))) {
         for (const SchemaField& child : f.children) drawField(c, child, p, label + ".", depth + 1);
     }
 }
@@ -321,7 +440,7 @@ void EntityInspector::drawComponent(World& world, Entity entity, ComponentId id,
         } else if (!schema.reflected) {
             ImGui::TextDisabled("no FOH_REFLECT: %u bytes, not editable", schema.size);
         } else if (auto* data = static_cast<std::byte*>(world.componentPtr(entity, id))) {
-            FieldContext ctx{&world, scenes, &selection, selection.scene, &m_eulerId, &m_euler};
+            FieldContext ctx{m_picker, &world, scenes, &selection, selection.scene, &m_eulerId, &m_euler};
             // The widgets write straight into component storage. Compare before/after so that ONLY a real edit
             // is announced (World::markModified): announcing every frame would mark the whole archetype table of
             // the selected entity as changed and make change-driven systems (transform propagation) redo it.

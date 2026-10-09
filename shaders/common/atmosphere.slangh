@@ -1,0 +1,151 @@
+// Per-frame atmosphere lookups (Bruneton precomputed scattering). Cost per query: a few fetches from three small
+// LUTs, no ray marching.
+//
+// The including shader must declare, before this header:
+//     Texture2D<float4> g_atmoTransmittance;  Texture3D<float4> g_atmoScattering;
+//     Texture2D<float4> g_atmoIrradiance;     SamplerState g_atmoSampler;   (bilinear, clamp)
+// and include common/view.slangh first (the parameters come from ViewConstants).
+//
+// The LUTs are baked for a sun of irradiance 1: multiply the results by the sun color (irradiance,
+// ViewConstants::sunColor). Positions are meters in the world; the atmosphere works in kilometers around a
+// planet whose center is straight below the camera (the world is ~1.5 km wide, curvature is irrelevant there
+// but the atmosphere's is not).
+#pragma once
+#include "common/atmosphere_core.slangh"
+
+struct AtmoRt {
+    AtmoGeom geom;
+    float miePhaseG;
+    float3 mieExtrap;
+    float3 groundAlbedo;
+};
+
+AtmoRt atmoFromView(ViewConstants v)
+{
+    AtmoRt a;
+    a.geom.bottom = v.atmosphere0.x;
+    a.geom.top = v.atmosphere0.y;
+    a.geom.muSMin = v.atmosphere0.z;
+    a.miePhaseG = v.atmosphere0.w;
+    a.geom.sunAngularRadius = v.atmosphere1.x;
+    a.mieExtrap = v.atmosphere2.xyz;
+    a.groundAlbedo = v.atmosphere3.xyz;
+    return a;
+}
+
+// Planet-centered position (km) of a world position: x/z relative to the camera, y above the sea level plane.
+float3 atmoPosition(AtmoRt a, float3 world, float3 cameraWorld)
+{
+    float height = max(world.y, 1.0) * 0.001; // keep off the exact surface: float precision at r ~ 6360 km is ~0.5 m
+    return float3((world.x - cameraWorld.x) * 0.001, a.geom.bottom + height, (world.z - cameraWorld.z) * 0.001);
+}
+
+float3 atmoTransmittanceToTop(AtmoRt a, float r, float mu)
+{
+    return g_atmoTransmittance.SampleLevel(g_atmoSampler, transmittanceUvFromRMu(a.geom, r, mu), 0).rgb;
+}
+
+float3 atmoTransmittance(AtmoRt a, float r, float mu, float d, bool intersectsGround)
+{
+    float rd = clampRadius(a.geom, sqrt(d * d + 2.0 * r * mu * d + r * r));
+    float mud = clampCosine((r * mu + d) / rd);
+    if (intersectsGround) {
+        return min(atmoTransmittanceToTop(a, rd, -mud) / atmoTransmittanceToTop(a, r, -mu), float3(1.0));
+    }
+    return min(atmoTransmittanceToTop(a, r, mu) / atmoTransmittanceToTop(a, rd, mud), float3(1.0));
+}
+
+// Transmittance from a point to the sun, including the sun disc's partial occlusion by the horizon.
+float3 atmoTransmittanceToSun(AtmoRt a, float r, float muS)
+{
+    float sinThetaH = a.geom.bottom / r;
+    float cosThetaH = -sqrt(max(1.0 - sinThetaH * sinThetaH, 0.0));
+    return atmoTransmittanceToTop(a, r, muS) *
+           smoothstep(-sinThetaH * a.geom.sunAngularRadius, sinThetaH * a.geom.sunAngularRadius, muS - cosThetaH);
+}
+
+// Scattering (Rayleigh rgb, single Mie in alpha) blended between the two neighbouring nu slices.
+float4 atmoCombinedScattering(AtmoRt a, float r, float mu, float muS, float nu, bool intersectsGround)
+{
+    float3 uvw0, uvw1;
+    float lerpNu;
+    scatteringLookup(a.geom, r, mu, muS, nu, intersectsGround, uvw0, uvw1, lerpNu);
+    return g_atmoScattering.SampleLevel(g_atmoSampler, uvw0, 0) * (1.0 - lerpNu) +
+           g_atmoScattering.SampleLevel(g_atmoSampler, uvw1, 0) * lerpNu;
+}
+
+// The tables store the single Mie term in the alpha channel only (red); the other channels follow from the
+// ratio of the Rayleigh and Mie spectra.
+float3 atmoMieFromCombined(AtmoRt a, float4 combined)
+{
+    if (combined.r == 0.0) return float3(0.0);
+    return combined.rgb * (combined.a / combined.r) * a.mieExtrap;
+}
+
+float3 atmoApplyPhase(AtmoRt a, float4 combined, float nu)
+{
+    return combined.rgb * rayleighPhase(nu) + atmoMieFromCombined(a, combined) * miePhase(a.miePhaseG, nu);
+}
+
+// Sky radiance seen from `camera` (km, planet centered) along `viewRay`, per unit of sun irradiance.
+float3 atmoSkyRadiance(AtmoRt a, float3 camera, float3 viewRay, float3 sunDir, out float3 transmittance)
+{
+    float r = length(camera);
+    float rmu = dot(camera, viewRay);
+    float distToTop = -rmu - sqrt(rmu * rmu - r * r + a.geom.top * a.geom.top);
+    if (distToTop > 0.0) { // viewer in space: start at the top of the atmosphere
+        camera += viewRay * distToTop;
+        r = a.geom.top;
+        rmu += distToTop;
+    } else if (r > a.geom.top) {
+        transmittance = float3(1.0);
+        return float3(0.0);
+    }
+    float mu = rmu / r;
+    float muS = dot(camera, sunDir) / r;
+    float nu = dot(viewRay, sunDir);
+    bool hitsGround = rayIntersectsGround(a.geom, r, mu);
+
+    transmittance = hitsGround ? float3(0.0) : atmoTransmittanceToTop(a, r, mu);
+    return atmoApplyPhase(a, atmoCombinedScattering(a, r, mu, muS, nu, hitsGround), nu);
+}
+
+// In-scattered radiance between `camera` and `p` (km, planet centered): the aerial perspective.
+float3 atmoSkyRadianceToPoint(AtmoRt a, float3 camera, float3 p, float3 sunDir, out float3 transmittance)
+{
+    float3 viewRay = normalize(p - camera);
+    float r = length(camera);
+    float rmu = dot(camera, viewRay);
+    float distToTop = -rmu - sqrt(rmu * rmu - r * r + a.geom.top * a.geom.top);
+    if (distToTop > 0.0) {
+        camera += viewRay * distToTop;
+        r = a.geom.top;
+        rmu += distToTop;
+    }
+    float mu = rmu / r;
+    float muS = dot(camera, sunDir) / r;
+    float nu = dot(viewRay, sunDir);
+    float d = length(p - camera);
+    bool hitsGround = rayIntersectsGround(a.geom, r, mu);
+
+    transmittance = atmoTransmittance(a, r, mu, d, hitsGround);
+    float4 s0 = atmoCombinedScattering(a, r, mu, muS, nu, hitsGround);
+
+    // Second lookup at the end point; the difference is what scatters in between.
+    float rp = clampRadius(a.geom, sqrt(d * d + 2.0 * r * mu * d + r * r));
+    float mup = (r * mu + d) / rp;
+    float muSp = (r * muS + d * nu) / rp;
+    float4 s1 = atmoCombinedScattering(a, rp, mup, muSp, nu, hitsGround);
+
+    float4 s = max(s0 - float4(transmittance, transmittance.r) * s1, float4(0.0));
+    // Hack from the reference implementation: no Mie glow when the sun is below the horizon.
+    s.a *= smoothstep(0.0, 0.01, muS);
+    return atmoApplyPhase(a, s, nu);
+}
+
+// Light that reaches a surface at planet-centered radius r from the sky dome, per unit of sun irradiance, on a
+// horizontal surface (scale by (1 + n.up) / 2 for tilted ones).
+float3 atmoSkyIrradiance(AtmoRt a, float r, float muS)
+{
+    return g_atmoIrradiance.SampleLevel(g_atmoSampler, irradianceUvFromRMuS(a.geom, r, muS), 0).rgb;
+}

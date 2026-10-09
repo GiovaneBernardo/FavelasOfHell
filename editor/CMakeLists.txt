@@ -9,6 +9,9 @@ find_path(FOH_STB_INCLUDE_DIR stb_image.h REQUIRED)
 find_package(CURL CONFIG REQUIRED)
 find_package(miniz CONFIG REQUIRED)
 add_executable(foh_editor
+    src/atmosphere_panel.cpp
+    src/asset_inspector.cpp
+    src/asset_picker.cpp
     src/content_browser.cpp
     src/editor.cpp
     src/editor_prefs.cpp
@@ -17,6 +20,7 @@ add_executable(foh_editor
     src/imgui_renderer.cpp
     src/inspector.cpp
     src/main.cpp
+    src/prefab_editor.cpp
     src/stb_impl.cpp
     src/theme.cpp
     src/thumb_loaders.cpp

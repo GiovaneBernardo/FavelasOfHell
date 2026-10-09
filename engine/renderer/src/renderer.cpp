@@ -43,6 +43,7 @@ Renderer::~Renderer() {
     // Drop everything that holds GPU objects before the device goes away.
     m_impl->viewports.clear();
     m_impl->windowGraph.reset();
+    m_impl->atmosphere.shutdown();
     m_impl->gpu = {};
     m_impl->pipelines.reset();
     m_impl->shaders.reset();
@@ -89,9 +90,17 @@ std::unique_ptr<Renderer> Renderer::create(const RendererDesc& desc) {
         nvrhi::BindingLayoutDesc dl;
         dl.visibility = nvrhi::ShaderType::All;
         dl.addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(0));
-        for (u32 t = 0; t < 5; ++t) dl.addItem(nvrhi::BindingLayoutItem::Texture_SRV(t));
+        for (u32 t = 0; t < 8; ++t) dl.addItem(nvrhi::BindingLayoutItem::Texture_SRV(t));
         dl.addItem(nvrhi::BindingLayoutItem::Sampler(0));
+        dl.addItem(nvrhi::BindingLayoutItem::Sampler(1)); // bilinear clamp for the atmosphere tables
         s.gpu.layoutDeferred = dev->createBindingLayout(dl);
+
+        nvrhi::BindingLayoutDesc sl;
+        sl.visibility = nvrhi::ShaderType::All;
+        sl.addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(0));
+        for (u32 t = 0; t < 4; ++t) sl.addItem(nvrhi::BindingLayoutItem::Texture_SRV(t));
+        sl.addItem(nvrhi::BindingLayoutItem::Sampler(0));
+        s.gpu.layoutSky = dev->createBindingLayout(sl);
 
         // Passes that sample materials: view constants, the material buffer and one sampler (register space 0),
         // plus the bindless texture table (register space 1, a layout of its own).
@@ -174,6 +183,12 @@ std::unique_ptr<Renderer> Renderer::create(const RendererDesc& desc) {
     s.gpu.materials.upload(dev);
     s.warmPipelines();
 
+    // Atmosphere tables: loaded from the cache, or generated once (in the background of the first frames).
+    {
+        const std::filesystem::path cacheDir = desc.cacheDirectory.empty() ? GetExecutableDirectory() / "cache" : desc.cacheDirectory;
+        s.atmosphere.init(dev, s.shaders.get(), s.pipelines.get(), desc.jobs, cacheDir / "atmosphere.lut");
+    }
+
     RenderGraphConfig gc;
     gc.jobs = desc.jobs;
     gc.minPassesPerGroup = desc.minPassesPerGroup;
@@ -198,6 +213,12 @@ SceneSlot* Renderer::Impl::findScene(SceneId id) {
     }
     return nullptr;
 }
+
+// ---- atmosphere ---------------------------------------------------------------------------------
+
+void Renderer::generateAtmosphere(const AtmosphereDesc& desc) { m_impl->atmosphere.request(desc); }
+const AtmosphereDesc& Renderer::atmosphereDesc() const { return m_impl->atmosphere.desc(); }
+AtmosphereStatus Renderer::atmosphereStatus() const { return m_impl->atmosphere.status(); }
 
 // ---- scenes ---------------------------------------------------------------------------------
 
@@ -478,6 +499,7 @@ void Renderer::beginFrame() {
     s.device->beginFrame();
     s.frame = s.device->frameNumber();
     s.shaders->pollReload();
+    s.atmosphere.pump();
     s.pipelines->collect(s.frame, 3600); // a minute: rarely used variants (masked, double-sided) must not recompile on every use
     {
         // Background texture uploads under a byte budget; materials then pick up the new slots.

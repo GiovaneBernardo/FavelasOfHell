@@ -5,8 +5,8 @@
 //   ShadowCascades           sun shadow map: 4 cascades tiled in one depth atlas
 //   Opaque                   G-buffer fill (albedo, normal, material), depth-tested
 //                            against the pre-pass so every pixel is shaded once
-//   Sky | ClearHdr           background into the HDR target
-//   Deferred                 fullscreen lighting from the G-buffer + shadows -> HDR
+//   Sky | ClearHdr           background into the HDR target (sky: precomputed atmosphere, empty-depth pixels only)
+//   Deferred                 fullscreen lighting from the G-buffer + shadows + atmosphere -> HDR
 //   Grid (editor views)      ground grid over the HDR color, occluded by depth
 //   Tonemap                  HDR -> sRGB RGBA8, the viewport's output image
 //
@@ -140,6 +140,7 @@ struct OpaqueData {
 };
 struct SkyData {
     RgTexture hdr;
+    RgTexture depth; // invalid for the flat clear
 };
 struct DeferredData {
     RgTexture albedo;
@@ -358,8 +359,25 @@ nvrhi::IBindingSet* deferredBindings(Impl& s, const ViewFrame& vf, const Deferre
     bd.addItem(nvrhi::BindingSetItem::Texture_SRV(2, ctx.texture(d.material)));
     bd.addItem(nvrhi::BindingSetItem::Texture_SRV(3, ctx.texture(d.depth), nvrhi::Format::R32_FLOAT));
     bd.addItem(nvrhi::BindingSetItem::Texture_SRV(4, ctx.texture(d.atlas), nvrhi::Format::R32_FLOAT));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(5, s.atmosphere.transmittance()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(6, s.atmosphere.scattering()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(7, s.atmosphere.irradiance()));
     bd.addItem(nvrhi::BindingSetItem::Sampler(0, s.gpu.shadowSampler));
+    bd.addItem(nvrhi::BindingSetItem::Sampler(1, s.atmosphere.sampler()));
     return ctx.bindingSet(bd, s.gpu.layoutDeferred);
+}
+
+// The sky shades only the pixels the depth buffer says are empty, from the atmosphere tables.
+nvrhi::IBindingSet* skyBindings(Impl& s, const ViewFrame& vf, const SkyData& d, RgPassContext& ctx) {
+    ctx.cmd()->writeBuffer(vf.viewCb, &vf.constants, sizeof(ViewConstants));
+    nvrhi::BindingSetDesc bd;
+    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, vf.viewCb));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(0, ctx.texture(d.depth), nvrhi::Format::R32_FLOAT));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(1, s.atmosphere.transmittance()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(2, s.atmosphere.scattering()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(3, s.atmosphere.irradiance()));
+    bd.addItem(nvrhi::BindingSetItem::Sampler(0, s.atmosphere.sampler()));
+    return ctx.bindingSet(bd, s.gpu.layoutSky);
 }
 
 // Entity ids instead of colors, same geometry and depth test as the G-buffer pass.
@@ -462,6 +480,9 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
     const RenderViewParams view = resolveView(vp, slot, aspect);
     fillConstants(vf.constants, view, slot, vp.width, vp.height, time);
     fillShadows(vf, view, desc);
+    // Sky light and aerial perspective need the tables, a sun to light them, and a view that draws the sky.
+    atmosphere.fillView(vf.constants);
+    if (vf.constants.sunDirection.w < 0.5f || !HasFlag(vp.flags, ViewportFlags::Sky)) vf.constants.atmosphere1.y = 0.0f;
 
     RenderGraph& g = *vp.graph;
     g.reset(frame);
@@ -560,17 +581,17 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
             [self, frameData](const OpaqueData& d, RgPassContext& ctx) { recordOpaque(*self, *frameData, d, ctx); });
     }
 
-    // Background. The sky draws every pixel (no clear needed); without it a flat clear.
+    // Background. The sky shades the pixels with empty depth and the lighting pass shades the rest, so together they
+    // cover the target (no clear needed); without the sky flag a flat clear.
     if (HasFlag(vp.flags, ViewportFlags::Sky)) {
         AddFullscreenPass<SkyData>(
-            g, services, "Sky", {"sky.psSky", gpu.layoutView.Get()},
+            g, services, "Sky", {"sky.psSky", gpu.layoutSky.Get()},
             [&](RgPassBuilder& b, SkyData& d) {
                 hdr = b.createTexture(hdrDesc);
                 d.hdr = b.colorTarget(0, hdr);
+                d.depth = b.read(depth, RgAccess::SampledRead);
             },
-            [self, frameData](const SkyData&, RgPassContext& ctx) {
-                return viewBindings(ctx, *self, *frameData, nullptr, nvrhi::Format::UNKNOWN);
-            });
+            [self, frameData](const SkyData& d, RgPassContext& ctx) { return skyBindings(*self, *frameData, d, ctx); });
     } else {
         g.addPass<SkyData>(
             "ClearHdr",

@@ -121,6 +121,7 @@ bool Editor::init() {
         if (const auto c = DefaultShaderBuilderConfig(); c.isValid()) m_shaderBuilder.emplace(c);
     }
     createDebugScene();
+    createPreviewScene();
 
     // ---- viewport panels ----
     auto addViewport = [&](const char* title, size_t sceneIndex, bool editorCamera, bool grid) {
@@ -142,6 +143,12 @@ bool Editor::init() {
     addViewport("Game", 0, false, false);
     addViewport("Animation Debug", 1, true, true);
     m_viewports[2].camera.position = Vec3(0.0f, 3.0f, 9.0f);
+    addViewport("Prefab Preview", m_previewScene, true, true);
+    m_previewViewport = m_viewports.size() - 1;
+    m_viewports[m_previewViewport].open = false; // shown while the prefab editor is
+    m_viewports[m_previewViewport].initialW = 560.0f;
+    m_viewports[m_previewViewport].initialH = 460.0f;
+    m_viewports[m_previewViewport].camera.farZ = 500.0f;
 
     m_thumbs.init(*m_renderer, *m_jobs);
     m_showWorkshop = m_options.openWorkshop;
@@ -169,6 +176,7 @@ void Editor::initAssets() {
     actions.applyMaterial = [this](const std::string& rel) { applyMaterialToSelection(rel); };
     actions.placeModel = [this](const std::string& rel) { placeAssetByPath(rel, 0, 0, false); };
     actions.openWorkshop = [this] { m_showWorkshop = true; };
+    actions.editPrefab = [this](const std::string& rel) { openPrefabEditor(rel); };
     m_browser.init(*m_assets, m_thumbs, m_prefs, m_assetLog, std::move(actions));
 
     WorkshopHost host;
@@ -180,9 +188,80 @@ void Editor::initAssets() {
     host.placeModel = [this](const std::string& rel) { placeAssetByPath(rel, 0, 0, false); };
     host.refreshBrowser = [this] { m_browser.refresh(); };
     m_workshop.init(*m_jobs, m_thumbs, m_prefs, std::move(host));
+
+    AssetPickerHost pickerHost;
+    pickerHost.assigned = [this](AssetId id) { m_assetBridge->loader().request(id); }; // streams in what a field now points at
+    pickerHost.inspect = [this](AssetId id) {
+        m_assetInspector.inspectAsset(id);
+        m_showAssetInspector = true;
+        ImGui::SetWindowFocus("Asset Inspector");
+    };
+    m_picker.init(*m_assets, m_thumbs, std::move(pickerHost));
+    m_inspector.setAssetPicker(&m_picker);
+
+    AssetInspectorHost inspectorHost;
+    inspectorHost.changed = [this](AssetId id) {
+        const AssetId ids[] = {id};
+        m_assetBridge->assetsChanged(ids); // reloads the material where it is in use
+    };
+    inspectorHost.editPrefab = [this](const std::string& rel) { openPrefabEditor(rel); };
+    inspectorHost.reimport = [this](const std::string& rel) { m_assets->beginImport(m_assets->sourceRoot() / PathFromUtf8(rel), true); };
+    inspectorHost.refreshBrowser = [this] { m_browser.refresh(); };
+    m_assetInspector.init(*m_assets, m_picker, std::move(inspectorHost));
+
+    PrefabEditorHost prefabHost;
+    prefabHost.show = [this](const PrefabAsset& p) { showPrefabPreview(p); };
+    prefabHost.frame = [this](Vec3 c, float r) { framePreview(c, r); };
+    prefabHost.setPreviewVisible = [this](bool v) { m_viewports[m_previewViewport].open = v; };
+    prefabHost.place = [this](const std::string& rel) { placeAssetByPath(rel, 0, 0, false); };
+    prefabHost.refreshBrowser = [this] { m_browser.refresh(); };
+    m_prefabEditor.init(*m_assets, m_picker, *m_jobs, std::move(prefabHost));
+}
+
+void Editor::openPrefabEditor(const std::string& relPath) {
+    m_showPrefabEditor = true;
+    if (!m_prefabEditor.open(relPath)) {
+        logAsset("Prefab editor: " + m_prefabEditor.lastError());
+        return;
+    }
+    ImGui::SetWindowFocus("Prefab Editor");
+}
+
+void Editor::showPrefabPreview(const PrefabAsset& prefab) {
+    World& world = m_scenes[m_previewScene].app->world();
+    if (!m_previewRoot.isNull() && world.isAlive(m_previewRoot)) world.despawn(m_previewRoot); // children go with it
+    const PrefabInstanceResult inst = InstantiatePrefab(world, prefab, Transform{});
+    m_previewRoot = inst.root;
+    for (const PrefabNode& node : prefab.nodes) {
+        if (node.mesh.isValid()) m_assetBridge->loader().request(node.mesh);
+        for (const AssetId& material : node.materials)
+            if (material.isValid()) m_assetBridge->loader().request(material);
+    }
+}
+
+void Editor::framePreview(Vec3 center, float radius) {
+    ViewportPanel& p = m_viewports[m_previewViewport];
+    p.camera.yaw = 0.55f;
+    p.camera.pitch = -0.3f;
+    const f32 dist = std::max(radius / std::tan(p.camera.fovY * 0.5f) * 1.15f, 0.5f);
+    p.camera.position = center - p.camera.rotation() * Vec3(0, 0, -1) * dist;
+    p.camera.nearZ = std::clamp(dist * 0.01f, 0.005f, 0.2f);
+    p.camera.farZ = std::max(500.0f, dist * 20.0f);
+    p.camera.speed = std::clamp(radius * 1.5f, 1.0f, 100.0f);
 }
 
 void Editor::placeAssetByPath(const std::string& relPath, float x, float y, bool hasPosition) {
+    if (PathFromUtf8(relPath).extension() == ".fvariant") {
+        const AssetId variant = m_assets->findAuthored(relPath);
+        if (!variant.isValid()) {
+            logAsset("Cannot place '" + relPath + "': unknown prefab variant.");
+            return;
+        }
+        size_t sceneIndex = 0;
+        const Transform at = dropPlacement(x, y, hasPosition, sceneIndex);
+        instantiateAsset(variant, sceneIndex, at);
+        return;
+    }
     const SourceRecord* rec = m_assets->findSource(relPath);
     AssetId prefab;
     if (rec) {
@@ -192,6 +271,11 @@ void Editor::placeAssetByPath(const std::string& relPath, float x, float y, bool
     if (!prefab.isValid()) {
         importFile(m_assets->sourceRoot() / PathFromUtf8(relPath), x, y, hasPosition, true); // imports and places
         return;
+    }
+    // A model fixed in the prefab editor is placed with its fixes (the variant stored next to it).
+    if (const AssetId variant = m_assets->findAuthored(PrefabEditor::VariantPathFor(relPath)); variant.isValid()) {
+        PrefabVariantAsset v;
+        if (m_assets->load(variant, v) && v.base == prefab) prefab = variant;
     }
     size_t sceneIndex = 0;
     const Transform at = dropPlacement(x, y, hasPosition, sceneIndex);
@@ -472,10 +556,33 @@ void Editor::createDebugScene() {
     m_scenes.push_back(std::move(dbg));
 }
 
+// The prefab editor's stage: an empty world with a sun and a 1.8 m reference figure to judge scale against.
+void Editor::createPreviewScene() {
+    AppConfig cfg;
+    cfg.jobs = m_jobs.get();
+    SceneEntry scene;
+    scene.name = "Prefab Preview";
+    scene.app = std::make_unique<App>(cfg);
+    RenderExtractPlugin extract;
+    scene.app->addPlugin(extract);
+    scene.renderScene = m_renderer->createScene("Prefab Preview");
+    scene.app->world().resource<RenderSceneLink>()->scene = m_renderer->scene(scene.renderScene);
+
+    World& w = scene.app->world();
+    w.spawn(Transform{{-1.5f, 0.9f, 0}, Quat(1, 0, 0, 0), {0.45f, 1.8f, 0.3f}},
+            MeshRenderer{static_cast<u32>(BuiltinMesh::Cube), {0.35f, 0.4f, 0.55f, 1}}, Name::Make("Reference 1.8 m"));
+    w.spawn(Transform{{0, 0, 0}, glm::quatLookAt(glm::normalize(Vec3(0.5f, -0.8f, -0.35f)), Vec3(0, 1, 0)), {1, 1, 1}},
+            DirectionalLight{{1.0f, 0.96f, 0.9f}, 3.2f});
+    m_previewScene = m_scenes.size();
+    m_scenes.push_back(std::move(scene));
+}
+
 void Editor::shutdown() {
     if (m_renderer) m_renderer->device().waitIdle();
     m_prefs.save();
     m_workshop.shutdown();
+    m_assetInspector.flush();
+    m_prefabEditor.shutdown();
     m_thumbs.shutdown();
     m_gameBuilder.reset();
     m_shaderBuilder.reset();
@@ -514,6 +621,9 @@ int Editor::run() {
             const ViewportPanel& p = m_viewports.front();
             importFile(PathFromUtf8(m_options.importFile), p.imageX + p.imageW * 0.5f, p.imageY + p.imageH * 0.62f, true);
         }
+        if (rendered == 5 && !m_options.prefabEdit.empty()) openPrefabEditor(m_options.prefabEdit);
+        if (rendered >= 30 && rendered < 200 && m_options.prefabQa && m_prefabEditor.isOpen() && m_prefabEditor.runSelfTest(1.8f)) m_options.prefabQa = false;
+        if (rendered == 5 && !m_options.inspect.empty()) m_assetInspector.inspectPath(m_options.inspect);
         const auto now = Clock::now();
         const float dt = std::min(std::chrono::duration<float>(now - last).count(), 0.1f);
         last = now;
@@ -549,6 +659,7 @@ bool Editor::frame(float dt) {
     // 1. UI (also decides viewport sizes, activity and cameras).
     m_theme.update(*m_window);
     m_workshop.update();
+    m_prefabEditor.update();
     m_thumbs.beginFrame();
     m_platform.newFrame(dt);
     ImGui::NewFrame();
@@ -641,7 +752,10 @@ void Editor::drawMenuBar() {
         ImGui::MenuItem("Entities", nullptr, &m_showEntities);
         ImGui::MenuItem("Inspector", nullptr, &m_showInspector);
         ImGui::MenuItem("Content Browser", nullptr, &m_showAssets);
+        ImGui::MenuItem("Asset Inspector", nullptr, &m_showAssetInspector);
+        ImGui::MenuItem("Prefab Editor", nullptr, &m_showPrefabEditor);
         ImGui::MenuItem("Assets Workshop", nullptr, &m_showWorkshop);
+        ImGui::MenuItem("Atmosphere", nullptr, &m_showAtmosphere);
         ImGui::MenuItem("Render Graph", nullptr, &m_showRenderGraph);
         ImGui::MenuItem("Stats", nullptr, &m_showStats);
         ImGui::EndMenu();
@@ -669,15 +783,19 @@ void Editor::buildDockLayout(unsigned int dockspaceId) {
     sideBottom = ImGui::DockBuilderSplitNode(side, ImGuiDir_Down, 0.58f, nullptr, &sideTop);
     ImGui::DockBuilderDockWindow("Entities", sideTop);
     ImGui::DockBuilderDockWindow("Inspector", sideBottom);
+    ImGui::DockBuilderDockWindow("Asset Inspector", sideBottom);
+    ImGui::DockBuilderDockWindow("Prefab Editor", sideBottom);
     bottom = ImGui::DockBuilderSplitNode(main, ImGuiDir_Down, 0.44f, nullptr, &top);
     right = ImGui::DockBuilderSplitNode(top, ImGuiDir_Right, 0.34f, nullptr, &left);
     bottomRight = ImGui::DockBuilderSplitNode(bottom, ImGuiDir_Right, 0.24f, nullptr, &bottomLeft);
     ImGui::DockBuilderDockWindow("Scene", left);
     ImGui::DockBuilderDockWindow("Game", right);
     ImGui::DockBuilderDockWindow("Animation Debug", right);
+    ImGui::DockBuilderDockWindow("Prefab Preview", right);
     ImGui::DockBuilderDockWindow("Content Browser", bottomLeft);
     ImGui::DockBuilderDockWindow("Render Graph", bottomRight);
     ImGui::DockBuilderDockWindow("Stats", bottomRight);
+    ImGui::DockBuilderDockWindow("Atmosphere", sideBottom);
     ImGui::DockBuilderFinish(dockspaceId);
 }
 
@@ -693,7 +811,20 @@ void Editor::buildUi(float dt) {
     if (m_showEntities) m_inspector.drawEntities(m_sceneRefs, m_selection, &m_showEntities);
     if (m_showInspector) m_inspector.drawInspector(m_sceneRefs, m_selection, &m_showInspector);
     if (m_showAssets) m_browser.draw(&m_showAssets, m_theme.scale());
+    {
+        // The asset inspector follows the content browser's selection.
+        const std::string selected = m_browser.singleSelection();
+        if (selected != m_lastBrowserSelection) {
+            m_lastBrowserSelection = selected;
+            if (!selected.empty()) m_assetInspector.inspectPath(selected);
+        }
+        if (m_showAssetInspector) m_assetInspector.draw(&m_showAssetInspector);
+        if (m_showPrefabEditor) m_prefabEditor.draw(&m_showPrefabEditor);
+        if (m_prefabEditorWasShown && !m_showPrefabEditor) m_viewports[m_previewViewport].open = false;
+        m_prefabEditorWasShown = m_showPrefabEditor;
+    }
     if (m_showWorkshop) m_workshop.draw(&m_showWorkshop, m_theme.scale());
+    if (m_showAtmosphere) m_atmospherePanel.draw(*m_renderer, &m_showAtmosphere);
     if (m_showRenderGraph) drawRenderGraphPanel();
     if (m_showStats) drawStatsPanel(dt);
 }
@@ -708,6 +839,7 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
         return;
     }
 
+    if (p.initialW > 0.0f) ImGui::SetNextWindowSize(ImVec2(p.initialW * m_theme.scale(), p.initialH * m_theme.scale()), ImGuiCond_FirstUseEver);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     const bool visible = ImGui::Begin(p.title.c_str(), &p.open, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
@@ -758,7 +890,7 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
                     p.pendingMaterial = m_assets->findAuthored(rel);
                     m_renderer->requestPick(p.id, static_cast<u32>(std::clamp(fx, 0.0f, 0.999f) * static_cast<float>(m_renderer->viewportWidth(p.id))),
                                             static_cast<u32>(std::clamp(fy, 0.0f, 0.999f) * static_cast<float>(m_renderer->viewportHeight(p.id))));
-                } else if (type.category == FileCategory::Model) placeAssetByPath(rel, mouse.x, mouse.y, true);
+                } else if (type.category == FileCategory::Model || type.category == FileCategory::Prefab) placeAssetByPath(rel, mouse.x, mouse.y, true);
                 else logAsset("'" + rel + "' cannot be placed in a scene (only models can).");
             }
             ImGui::EndDragDropTarget();
@@ -1015,6 +1147,13 @@ void Editor::runStress() {
     }
     if (f == 40) m_viewports[2].open = false;
     if (f == 55) m_viewports[2].open = true;
+    // The atmosphere panel and a regeneration (compute passes + cache dump) while frames are in flight.
+    if (f == 20) m_showAtmosphere = true;
+    if (f == 70) {
+        AtmosphereDesc d = m_renderer->atmosphereDesc();
+        d.mieScale = 2.0f;
+        m_renderer->generateAtmosphere(d);
+    }
 }
 
 // ---- screenshot (smoke runs) --------------------------------------------------------------------

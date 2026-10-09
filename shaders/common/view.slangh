@@ -19,6 +19,12 @@ struct ViewConstants {
     float4 cascadeSplits;        // view-space depth where each cascade ends
     float4 cascadeTexel;         // world-space size of one shadow texel, per cascade
     float4 shadowParams;         // x = 1 / atlas size (texels), y = tile size (uv), z = unused, w = 1 if shadows are on
+
+    // Precomputed atmosphere (common/atmosphere.slangh); atmosphere1.y = 0 when the tables are not ready or the view has no sun.
+    float4 atmosphere0; // x = bottom radius (km), y = top radius, z = mu_s_min, w = Mie phase g
+    float4 atmosphere1; // x = sun angular radius (rad), y = 1 if the atmosphere is on
+    float4 atmosphere2; // xyz = single-Mie extrapolation factor
+    float4 atmosphere3; // xyz = ground albedo
 };
 
 // World-space point under a pixel at the given depth (reverse-Z: near plane is depth 1).

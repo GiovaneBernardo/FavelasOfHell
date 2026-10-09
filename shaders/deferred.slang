@@ -1,5 +1,8 @@
 // Deferred lighting: reads the G-buffer + depth, lights every covered pixel with the
-// sun (GGX specular, Lambert diffuse, cascaded shadow map) plus hemisphere ambient.
+// sun (GGX specular, Lambert diffuse, cascaded shadow map) plus ambient, then veils it with aerial perspective.
+// With the precomputed atmosphere (common/atmosphere.slangh) the sun is attenuated by the air it crosses, the
+// ambient comes from the sky irradiance table and distant surfaces pick up in-scattered light; without it
+// (tables not generated, or no sun) the old hemisphere ambient is used.
 // Sky pixels (depth 0 in reverse-Z) are discarded: the sky pass already drew them.
 #include "common/view.slangh"
 #include "common/fullscreen.slangh"
@@ -12,6 +15,12 @@ Texture2D<float4> g_material : register(t2);
 Texture2D<float> g_depth : register(t3);
 Texture2D<float> g_shadowAtlas : register(t4);
 SamplerComparisonState g_shadowSampler : register(s0);
+Texture2D<float4> g_atmoTransmittance : register(t5);
+Texture3D<float4> g_atmoScattering : register(t6);
+Texture2D<float4> g_atmoIrradiance : register(t7);
+SamplerState g_atmoSampler : register(s1);
+
+#include "common/atmosphere.slangh"
 
 static const float kPi = 3.14159265;
 
@@ -86,6 +95,22 @@ float4 psDeferred(FullscreenOut i) : SV_Target0
     float3 f0 = lerp(float3(0.04), albedo, metallic);
     float3 diffuseColor = albedo * (1.0 - metallic);
 
+    bool atmosphereOn = g_view.atmosphere1.y > 0.5;
+    AtmoRt atmo = atmoFromView(g_view);
+    float3 sunDir = -g_view.sunDirection.xyz;
+    float3 sunRadiance = g_view.sunColor.rgb; // irradiance on a surface facing the sun
+    float3 pointKm = atmoPosition(atmo, worldPos, g_view.cameraPos.xyz);
+    float pointR = length(pointKm);
+    float muS = dot(pointKm, sunDir) / pointR;
+    float3 skyIrradiance = float3(0.0);
+    if (atmosphereOn) {
+        sunRadiance *= atmoTransmittanceToSun(atmo, pointR, muS);
+        // Sky dome light, scaled by how much of the dome the normal sees; the ground bounce fills the lower half.
+        float3 sky = atmoSkyIrradiance(atmo, pointR, muS) * g_view.sunColor.rgb;
+        float3 bounce = atmo.groundAlbedo * (sunRadiance * max(muS, 0.0) + sky) * (1.0 / kPi);
+        skyIrradiance = sky * (n.y * 0.5 + 0.5) + bounce * (0.5 - n.y * 0.5) * kPi;
+    }
+
     float3 color = 0.0;
     if (nl > 0.0) {
         float3 h = normalize(v + toSun);
@@ -96,11 +121,21 @@ float4 psDeferred(FullscreenOut i) : SV_Target0
         float3 fresnel = f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);
         float3 specular = distributionGGX(nh, a) * visibilitySmith(nl, nv, a) * fresnel;
         float3 diffuse = diffuseColor * (1.0 - fresnel) / kPi;
-        // sunColor is irradiance on a surface facing the sun.
-        color += (diffuse + specular) * g_view.sunColor.rgb * nl * sunShadow(worldPos, n, toSun, nl);
+        color += (diffuse + specular) * sunRadiance * nl * sunShadow(worldPos, n, toSun, nl);
     }
 
-    float3 ambient = lerp(float3(0.10, 0.09, 0.08), float3(0.30, 0.38, 0.52), n.y * 0.5 + 0.5);
-    color += diffuseColor * ambient * ao;
+    if (atmosphereOn) {
+        color += diffuseColor * skyIrradiance * (1.0 / kPi) * ao;
+        // A faint floor so moonless nights are dark but not pitch black.
+        color += diffuseColor * float3(0.002, 0.0025, 0.0045) * ao;
+
+        float3 cameraKm = atmoPosition(atmo, g_view.cameraPos.xyz, g_view.cameraPos.xyz);
+        float3 transmittance;
+        float3 inscatter = atmoSkyRadianceToPoint(atmo, cameraKm, pointKm, sunDir, transmittance);
+        color = color * transmittance + inscatter * g_view.sunColor.rgb;
+    } else {
+        float3 ambient = lerp(float3(0.10, 0.09, 0.08), float3(0.30, 0.38, 0.52), n.y * 0.5 + 0.5);
+        color += diffuseColor * ambient * ao;
+    }
     return float4(color, 1.0);
 }

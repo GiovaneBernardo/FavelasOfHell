@@ -10,6 +10,8 @@
 //   --screenshot f   with --frames: save the last frame as a PNG
 //   --group-passes N passes per command list before a graph is split (1: one list per pass, QA)
 //   --import file    import a model/texture at startup and place it, exactly like dropping it on the window
+//   --prefab-edit m  open the prefab editor on an imported model (path relative to assets/)
+//   --inspect p      show a file in the asset inspector (path relative to assets/)
 //   --window WxH     window size for smoke runs (default 1600x900)
 //   --stress         scripted resizes / scene switches / panel toggles (QA)
 int main(int argc, char** argv) {
@@ -27,6 +29,12 @@ int main(int argc, char** argv) {
             options.minPassesPerGroup = static_cast<foh::u32>(std::atoi(argv[++i]));
         } else if (!std::strcmp(argv[i], "--import") && i + 1 < argc) {
             options.importFile = argv[++i];
+        } else if (!std::strcmp(argv[i], "--prefab-edit") && i + 1 < argc) {
+            options.prefabEdit = argv[++i];
+        } else if (!std::strcmp(argv[i], "--prefab-qa")) {
+            options.prefabQa = true;
+        } else if (!std::strcmp(argv[i], "--inspect") && i + 1 < argc) {
+            options.inspect = argv[++i];
         } else if (!std::strcmp(argv[i], "--window") && i + 1 < argc) {
             unsigned w = 0, h = 0;
             if (std::sscanf(argv[++i], "%ux%u", &w, &h) == 2 && w >= 640 && h >= 360) {

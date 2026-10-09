@@ -76,5 +76,5 @@ Slang sources in `/shaders`, compiled by `slangc` at build time to one DXIL (D3D
 3. Sub-resource granularity in the graph (mips/array slices); today every access is whole-resource.
 4. Async compute passes (the pass flags have room for it; queue sync is not implemented).
 5. Frustum culling and GPU-driven instance culling (extraction currently submits every instance to every viewport that shows the scene), a shared per-scene instance buffer instead of one upload per viewport.
-6. Atmosphere, local lights (tiled/clustered), per-cascade culling, materials/textures and the mesh asset path replacing the built-in primitives (the deferred pipeline and sun cascades are done, see section 7).
+6. Local lights (tiled/clustered), per-cascade culling, materials/textures and the mesh asset path replacing the built-in primitives (the deferred pipeline and sun cascades are done, see section 7; the atmosphere is done, see [ADR 0007](0007-precomputed-atmosphere.md)).
 7. ImGui multi-viewport (OS windows) and a dedicated render thread consuming the published scene snapshots.

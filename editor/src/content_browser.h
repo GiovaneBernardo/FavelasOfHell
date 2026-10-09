@@ -31,6 +31,8 @@ struct ContentBrowserActions {
     // Puts a material (path relative to the asset root) on the selected scene object.
     std::function<void(const std::string& relPath)> applyMaterial;
     std::function<void()> openWorkshop;
+    // Opens the prefab editor on a model or a prefab variant (path relative to the asset root).
+    std::function<void(const std::string& relPath)> editPrefab;
 };
 
 // Drag-and-drop payload type: a null-terminated source path relative to the asset root.
@@ -45,6 +47,8 @@ public:
     // Re-reads the current folder and the tree on the next frame (call after imports and downloads).
     void refresh();
     void navigateTo(const std::string& relFolder);
+    // The one selected file or folder (relative to the root); empty when nothing or several are selected.
+    std::string singleSelection() const { return m_selected.size() == 1 ? *m_selected.begin() : std::string(); }
 
 private:
     struct Entry {

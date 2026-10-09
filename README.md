@@ -281,6 +281,7 @@ flecs (MIT; ECS storage and queries, private to `engine/ecs`), glm, Jolt Physics
 | Asset import dependencies: cgltf (glTF), ufbx (FBX, vendored), stb_image (decoding), bc7enc_rdo (BC7/BC5, vendored) (2026-10-08) | Decided |
 | Transforms: `Transform` local + computed `GlobalTransform`, change-driven propagation ([ADR 0006](docs/adr/0006-materials-streaming-transforms.md)) (2026-10-08) | Decided, implemented |
 | Materials: material buffer + bindless texture table, draw classes for alpha mask / double sided, textures BC7/BC5, async import + streaming under byte/time budgets, low-priority job class ([ADR 0006](docs/adr/0006-materials-streaming-transforms.md)) (2026-10-08) | Decided, implemented |
+| Atmosphere: Bruneton precomputed scattering (transmittance/scattering/irradiance LUTs from compute shaders, 8.1 MiB), sun/ambient/aerial perspective from the LUTs, tables cached on disk and rebuilt from an editor button ([ADR 0007](docs/adr/0007-precomputed-atmosphere.md)) (2026-10-09) | Decided, implemented |
 | Hybrid real-data + procedural world | Decided |
 | Hardware: min RTX 2060 / RX 6600, dev RTX 5070 Ti; RT optional | Decided |
 | Hot reload goal: save code, see it live in ~1-3 s with state preserved (DLL reload baseline, Live++ optional) | Decided |

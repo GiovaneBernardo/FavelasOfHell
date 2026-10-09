@@ -133,6 +133,36 @@ struct ViewportDesc {
     ViewportFlags flags = ViewportFlags::Sky;
 };
 
+// Physical model behind the precomputed atmosphere (Bruneton & Neyret). Earth defaults; a change only takes effect
+// through Renderer::generateAtmosphere, which rebuilds the lookup tables (and the cache file).
+struct AtmosphereDesc {
+    f32 bottomRadiusKm = 6360.0f; // planet radius (sea level)
+    f32 topRadiusKm = 6420.0f;    // top of the atmosphere
+    f32 rayleighScale = 1.0f;     // air density multiplier (blue sky strength)
+    f32 mieScale = 1.0f;          // aerosol density multiplier (haze, humidity, pollution)
+    f32 mieAnisotropy = 0.8f;     // Mie phase function asymmetry g, 0..0.99 (sun glow width)
+    f32 ozoneScale = 1.0f;        // ozone absorption multiplier (deep blue twilight)
+    Vec3 groundAlbedo{0.1f};      // bounce light of the terrain, part of the multiple scattering
+    u32 scatteringOrders = 4;     // 1 = single scattering only, 4 is the reference default
+};
+
+struct AtmosphereStatus {
+    enum class Phase : u8 {
+        Missing,    // no tables yet: the sky falls back to a plain gradient
+        Generating, // compute passes submitted, waiting for the GPU
+        Saving,     // tables usable, cache file being written in the background
+        Ready,
+    };
+    Phase phase = Phase::Missing;
+    bool ready = false;     // the sky and lighting use the tables
+    bool fromCache = false; // the tables in use were loaded from the cache file
+    f32 lastGenerateMs = 0.0f; // wall time of the last generation, from request until the GPU was done
+    u64 lutBytes = 0;          // GPU memory of the three tables
+    u64 cacheBytes = 0;        // size of the cache file on disk (0: none)
+    std::string cachePath;
+    std::string message; // what happened last (loaded / generated / error)
+};
+
 struct RendererDesc {
     JobSystem* jobs = nullptr; // not owned; recording and per-viewport work run on it
     bool validation =
@@ -152,6 +182,8 @@ struct RendererDesc {
     u32 shadowCascadeSize = 2048;
     f32 shadowDistance = 400.0f; // meters from the camera; farther surfaces are unshadowed
     std::filesystem::path shaderDirectory; // default: <exe dir>/shaders
+    // Generated data that is expensive to rebuild (the atmosphere tables). Default: <exe dir>/cache.
+    std::filesystem::path cacheDirectory;
 };
 
 // For the render graph debugger panel.
@@ -200,6 +232,17 @@ public:
     void releaseMaterial(const AssetId& id);
     bool hasMaterial(const AssetId& id) const;
     TextureStats textureStats() const;
+
+    // ---- atmosphere ----
+    // The sky, the sun's color and the ambient light come from lookup tables precomputed on the GPU. They are
+    // loaded from the cache file at start-up and generated (then cached) once if there is none. This rebuilds
+    // them with new parameters: the compute passes are submitted at the start of the next frame, the tables
+    // switch over without stalling, and the cache file is rewritten in the background. Ignored while a
+    // generation is still running (check atmosphereStatus().phase).
+    void generateAtmosphere(const AtmosphereDesc& desc);
+    // The parameters the tables in use were generated with.
+    const AtmosphereDesc& atmosphereDesc() const;
+    AtmosphereStatus atmosphereStatus() const;
 
     // ---- scenes ----
     SceneId createScene(const char* name);

@@ -15,9 +15,17 @@ float3 linearToSrgb(float3 c)
     return select(c <= 0.0031308, c * 12.92, 1.055 * pow(c, 1.0 / 2.4) - 0.055);
 }
 
+// Interleaved gradient noise (Jimenez 2014): a cheap blue-ish dither that hides the 8-bit banding of smooth
+// gradients such as the sky.
+float ditherNoise(float2 p)
+{
+    return frac(52.9829189 * frac(dot(p, float2(0.06711056, 0.00583715))));
+}
+
 [shader("fragment")]
 float4 psTonemap(FullscreenOut i) : SV_Target0
 {
     float3 hdr = g_hdr.Load(int3(int2(i.position.xy), 0)).rgb * g_view.params.x;
-    return float4(linearToSrgb(acesFit(hdr)), 1.0);
+    float3 srgb = linearToSrgb(acesFit(hdr));
+    return float4(srgb + (ditherNoise(i.position.xy) - 0.5) / 255.0, 1.0);
 }

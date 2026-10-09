@@ -81,6 +81,7 @@ private:
 
     // downloads
     void startDownload(const WorkshopAsset& asset, const std::string& variant, bool place);
+    std::filesystem::path packageDir(const WorkshopAsset& asset, const std::string& variant) const;
     Download* findDownload(unsigned id);
     void onPlan(unsigned id, DownloadPlan& plan);
     void onFileDone(unsigned id, size_t index, HttpResult& result);

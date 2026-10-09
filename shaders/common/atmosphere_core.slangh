@@ -1,0 +1,204 @@
+// Bruneton precomputed atmospheric scattering (Bruneton & Neyret 2008, reference implementation 2017):
+// the parts shared by the precomputation (atmosphere_precompute.slang) and the per-frame lookups
+// (common/atmosphere.slangh). Pure math: no resources, everything the functions need is passed in.
+//
+// Units: kilometers, measured from the planet center (r = distance to the center, mu = cosine of the view
+// zenith angle, mu_s = cosine of the sun zenith angle, nu = cosine of the angle between view and sun).
+// The LUT sizes below are MIRRORED by the constants in engine/renderer/src/atmosphere.cpp.
+#pragma once
+
+static const int kTransmittanceW = 256;
+static const int kTransmittanceH = 64;
+static const int kScatteringNuSize = 8;
+static const int kScatteringMuSSize = 32;
+static const int kScatteringMuSize = 128;
+static const int kScatteringRSize = 32;
+static const int kScatteringW = kScatteringNuSize * kScatteringMuSSize; // 256
+static const int kIrradianceW = 64;
+static const int kIrradianceH = 16;
+
+static const float kAtmoPi = 3.14159265358979;
+
+struct AtmoGeom {
+    float bottom;
+    float top;
+    float sunAngularRadius;
+    float muSMin; // cos of the largest sun zenith angle the tables cover
+};
+
+float clampCosine(float mu) { return clamp(mu, -1.0, 1.0); }
+float clampRadius(AtmoGeom a, float r) { return clamp(r, a.bottom, a.top); }
+float safeSqrt(float x) { return sqrt(max(x, 0.0)); }
+
+float distanceToTop(AtmoGeom a, float r, float mu)
+{
+    float discriminant = r * r * (mu * mu - 1.0) + a.top * a.top;
+    return max(-r * mu + safeSqrt(discriminant), 0.0);
+}
+
+float distanceToBottom(AtmoGeom a, float r, float mu)
+{
+    float discriminant = r * r * (mu * mu - 1.0) + a.bottom * a.bottom;
+    return max(-r * mu - safeSqrt(discriminant), 0.0);
+}
+
+bool rayIntersectsGround(AtmoGeom a, float r, float mu)
+{
+    return mu < 0.0 && r * r * (mu * mu - 1.0) + a.bottom * a.bottom >= 0.0;
+}
+
+float distanceToNearestBoundary(AtmoGeom a, float r, float mu, bool intersectsGround)
+{
+    return intersectsGround ? distanceToBottom(a, r, mu) : distanceToTop(a, r, mu);
+}
+
+// Half-texel correction so that 0 and 1 land on texel centers.
+float coordFromUnitRange(float x, int size) { return 0.5 / float(size) + x * (1.0 - 1.0 / float(size)); }
+float unitRangeFromCoord(float u, int size) { return (u - 0.5 / float(size)) / (1.0 - 1.0 / float(size)); }
+
+float rayleighPhase(float nu) { return (3.0 / (16.0 * kAtmoPi)) * (1.0 + nu * nu); }
+
+float miePhase(float g, float nu)
+{
+    float k = 3.0 / (8.0 * kAtmoPi) * (1.0 - g * g) / (2.0 + g * g);
+    return k * (1.0 + nu * nu) / pow(1.0 + g * g - 2.0 * g * nu, 1.5);
+}
+
+// ---- transmittance table: (mu, r) -> exp(-optical depth to the top of the atmosphere) ----
+
+float2 transmittanceUvFromRMu(AtmoGeom a, float r, float mu)
+{
+    float H = sqrt(a.top * a.top - a.bottom * a.bottom);
+    float rho = safeSqrt(r * r - a.bottom * a.bottom);
+    float d = distanceToTop(a, r, mu);
+    float dMin = a.top - r;
+    float dMax = rho + H;
+    float xMu = (d - dMin) / (dMax - dMin);
+    float xR = rho / H;
+    return float2(coordFromUnitRange(xMu, kTransmittanceW), coordFromUnitRange(xR, kTransmittanceH));
+}
+
+void rMuFromTransmittanceUv(AtmoGeom a, float2 uv, out float r, out float mu)
+{
+    float xMu = unitRangeFromCoord(uv.x, kTransmittanceW);
+    float xR = unitRangeFromCoord(uv.y, kTransmittanceH);
+    float H = sqrt(a.top * a.top - a.bottom * a.bottom);
+    float rho = H * xR;
+    r = sqrt(rho * rho + a.bottom * a.bottom);
+    float dMin = a.top - r;
+    float dMax = rho + H;
+    float d = dMin + xMu * (dMax - dMin);
+    mu = d == 0.0 ? 1.0 : (H * H - rho * rho - d * d) / (2.0 * r * d);
+    mu = clampCosine(mu);
+}
+
+// ---- scattering table: 4D (r, mu, mu_s, nu) packed in a 3D texture ----
+
+// (u_nu, u_mu_s, u_mu, u_r)
+float4 scatteringUvwzFromRMuMuSNu(AtmoGeom a, float r, float mu, float muS, float nu, bool intersectsGround)
+{
+    float H = sqrt(a.top * a.top - a.bottom * a.bottom);
+    float rho = safeSqrt(r * r - a.bottom * a.bottom);
+    float uR = coordFromUnitRange(rho / H, kScatteringRSize);
+
+    float rMu = r * mu;
+    float discriminant = rMu * rMu - r * r + a.bottom * a.bottom;
+    float uMu;
+    if (intersectsGround) {
+        float d = -rMu - safeSqrt(discriminant);
+        float dMin = r - a.bottom;
+        float dMax = rho;
+        uMu = 0.5 - 0.5 * coordFromUnitRange(dMax == dMin ? 0.0 : (d - dMin) / (dMax - dMin), kScatteringMuSize / 2);
+    } else {
+        float d = -rMu + safeSqrt(discriminant + H * H);
+        float dMin = a.top - r;
+        float dMax = rho + H;
+        uMu = 0.5 + 0.5 * coordFromUnitRange((d - dMin) / (dMax - dMin), kScatteringMuSize / 2);
+    }
+
+    float d = distanceToTop(a, a.bottom, muS);
+    float dMin = a.top - a.bottom;
+    float dMax = H;
+    float aa = (d - dMin) / (dMax - dMin);
+    float D = distanceToTop(a, a.bottom, a.muSMin);
+    float A = (D - dMin) / (dMax - dMin);
+    float uMuS = coordFromUnitRange(max(1.0 - aa / A, 0.0) / (1.0 + aa), kScatteringMuSSize);
+
+    float uNu = (nu + 1.0) / 2.0;
+    return float4(uNu, uMuS, uMu, uR);
+}
+
+void rMuMuSNuFromScatteringUvwz(AtmoGeom a, float4 uvwz, out float r, out float mu, out float muS, out float nu,
+                                out bool intersectsGround)
+{
+    float H = sqrt(a.top * a.top - a.bottom * a.bottom);
+    float rho = H * unitRangeFromCoord(uvwz.w, kScatteringRSize);
+    r = sqrt(rho * rho + a.bottom * a.bottom);
+
+    if (uvwz.z < 0.5) {
+        float dMin = r - a.bottom;
+        float dMax = rho;
+        float d = dMin + (dMax - dMin) * unitRangeFromCoord(1.0 - 2.0 * uvwz.z, kScatteringMuSize / 2);
+        mu = d == 0.0 ? -1.0 : clampCosine(-(rho * rho + d * d) / (2.0 * r * d));
+        intersectsGround = true;
+    } else {
+        float dMin = a.top - r;
+        float dMax = rho + H;
+        float d = dMin + (dMax - dMin) * unitRangeFromCoord(2.0 * uvwz.z - 1.0, kScatteringMuSize / 2);
+        mu = d == 0.0 ? 1.0 : clampCosine((H * H - rho * rho - d * d) / (2.0 * r * d));
+        intersectsGround = false;
+    }
+
+    float xMuS = unitRangeFromCoord(uvwz.y, kScatteringMuSSize);
+    float dMin = a.top - a.bottom;
+    float dMax = H;
+    float D = distanceToTop(a, a.bottom, a.muSMin);
+    float A = (D - dMin) / (dMax - dMin);
+    float aa = (A - xMuS * A) / (1.0 + xMuS * A);
+    float d = dMin + min(aa, A) * (dMax - dMin);
+    muS = d == 0.0 ? 1.0 : clampCosine((H * H - d * d) / (2.0 * a.bottom * d));
+    nu = clampCosine(uvwz.x * 2.0 - 1.0);
+}
+
+// `texel` = integer texel + 0.5 (x runs over nu * mu_s, y over mu, z over r).
+void rMuMuSNuFromScatteringTexel(AtmoGeom a, float3 texel, out float r, out float mu, out float muS, out float nu,
+                                 out bool intersectsGround)
+{
+    float fragNu = floor(texel.x / float(kScatteringMuSSize));
+    float fragMuS = fmod(texel.x, float(kScatteringMuSSize));
+    float4 size = float4(kScatteringNuSize - 1, kScatteringMuSSize, kScatteringMuSize, kScatteringRSize);
+    float4 uvwz = float4(fragNu, fragMuS, texel.y, texel.z) / size;
+    rMuMuSNuFromScatteringUvwz(a, uvwz, r, mu, muS, nu, intersectsGround);
+    // nu is only valid within the range the other two angles allow.
+    float s = sqrt((1.0 - mu * mu) * (1.0 - muS * muS));
+    nu = clamp(nu, mu * muS - s, mu * muS + s);
+}
+
+// The two texture lookups (neighbouring nu slices) and their blend weight for a scattering fetch.
+void scatteringLookup(AtmoGeom a, float r, float mu, float muS, float nu, bool intersectsGround, out float3 uvw0,
+                      out float3 uvw1, out float lerpNu)
+{
+    float4 uvwz = scatteringUvwzFromRMuMuSNu(a, r, mu, muS, nu, intersectsGround);
+    float texX = uvwz.x * float(kScatteringNuSize - 1);
+    float x = floor(texX);
+    lerpNu = texX - x;
+    uvw0 = float3((x + uvwz.y) / float(kScatteringNuSize), uvwz.z, uvwz.w);
+    uvw1 = float3((x + 1.0 + uvwz.y) / float(kScatteringNuSize), uvwz.z, uvwz.w);
+}
+
+// ---- irradiance table: (mu_s, r) -> ground irradiance from the sky ----
+
+float2 irradianceUvFromRMuS(AtmoGeom a, float r, float muS)
+{
+    float xR = (r - a.bottom) / (a.top - a.bottom);
+    float xMuS = muS * 0.5 + 0.5;
+    return float2(coordFromUnitRange(xMuS, kIrradianceW), coordFromUnitRange(xR, kIrradianceH));
+}
+
+void rMuSFromIrradianceUv(AtmoGeom a, float2 uv, out float r, out float muS)
+{
+    float xMuS = unitRangeFromCoord(uv.x, kIrradianceW);
+    float xR = unitRangeFromCoord(uv.y, kIrradianceH);
+    r = a.bottom + xR * (a.top - a.bottom);
+    muS = clampCosine(2.0 * xMuS - 1.0);
+}

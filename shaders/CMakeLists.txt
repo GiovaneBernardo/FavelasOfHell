@@ -21,7 +21,9 @@ set(_common_headers
     "${CMAKE_CURRENT_SOURCE_DIR}/common/fullscreen.slangh"
     "${CMAKE_CURRENT_SOURCE_DIR}/common/gbuffer.slangh"
     "${CMAKE_CURRENT_SOURCE_DIR}/common/material.slangh"
-    "${CMAKE_CURRENT_SOURCE_DIR}/common/instance.slangh")
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/instance.slangh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/atmosphere_core.slangh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/atmosphere.slangh")
 
 set(FOH_SHADER_OUTPUTS "")
 
@@ -69,6 +71,12 @@ if(FOH_SLANGC)
     foh_shader(opaque.slang psPickMasked fragment)
     foh_shader(deferred.slang psDeferred fragment)
     foh_shader(sky.slang psSky fragment)
+    # Precomputed atmosphere (Bruneton): LUT generation (on demand) and the cache dump.
+    foreach(_entry csTransmittance csDirectIrradiance csIndirectIrradiance csSingleScattering csScatteringDensity csMultipleScattering)
+        foh_shader(atmosphere_precompute.slang ${_entry} compute)
+    endforeach()
+    foh_shader(atmosphere_pack.slang csPack2D compute)
+    foh_shader(atmosphere_pack.slang csPack3D compute)
     foh_shader(grid.slang psGrid fragment)
     foh_shader(tonemap.slang psTonemap fragment)
     foh_shader(blit.slang psBlit fragment)

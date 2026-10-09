@@ -925,7 +925,7 @@ void ContentBrowser::open(const Entry& e) {
     }
     if (e.type.category == FileCategory::Material) {
         if (m_actions.applyMaterial) m_actions.applyMaterial(e.rel);
-    } else if (e.type.modelPreview || e.type.category == FileCategory::Model) {
+    } else if (e.type.modelPreview || e.type.category == FileCategory::Model || e.type.category == FileCategory::Prefab) {
         if (m_actions.placeModel) m_actions.placeModel(e.rel);
         refresh();
     } else if (e.type.importable) {
@@ -943,11 +943,15 @@ void ContentBrowser::entryContextMenu(const Entry& e) {
         if (ImGui::MenuItem("Open")) open(e);
     } else if (e.type.category == FileCategory::Material) {
         if (ImGui::MenuItem("Apply to selected object") && m_actions.applyMaterial) m_actions.applyMaterial(e.rel);
+    } else if (e.type.category == FileCategory::Prefab) {
+        if (ImGui::MenuItem("Place in scene") && m_actions.placeModel) m_actions.placeModel(e.rel);
+        if (ImGui::MenuItem("Edit prefab...") && m_actions.editPrefab) m_actions.editPrefab(e.rel);
     } else if (e.type.category == FileCategory::Model) {
         if (ImGui::MenuItem("Place in scene")) {
             if (m_actions.placeModel) m_actions.placeModel(e.rel);
             refresh();
         }
+        if (ImGui::MenuItem("Edit prefab...") && m_actions.editPrefab) m_actions.editPrefab(e.rel);
         if (ImGui::MenuItem(isImported(e) ? "Reimport" : "Import")) {
             if (m_actions.importFile) m_actions.importFile(absolute(e.rel));
             refresh();

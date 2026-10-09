@@ -18,6 +18,7 @@
 #include "foh/rhi/render_graph_helpers.h"
 #include "foh/rhi/shader_library.h"
 #include "foh/rhi/swapchain.h"
+#include "atmosphere.h"
 #include "gpu_structs.h"
 #include "material_store.h"
 #include "mesh_store.h"
@@ -102,7 +103,8 @@ struct GpuResources {
     nvrhi::BindingLayoutHandle layoutView;       // b0
     nvrhi::BindingLayoutHandle layoutViewTexture; // b0 + t0
     nvrhi::BindingLayoutHandle layoutTexture;     // t0
-    nvrhi::BindingLayoutHandle layoutDeferred;    // b0 + t0..t4 (G-buffer, depth, shadow atlas) + s0
+    nvrhi::BindingLayoutHandle layoutDeferred;    // b0 + t0..t4 (G-buffer, depth, shadow atlas) + t5..t7 (atmosphere) + s0, s1
+    nvrhi::BindingLayoutHandle layoutSky;         // b0 + t0 (depth) + t1..t3 (atmosphere) + s0
     nvrhi::BindingLayoutHandle layoutMaterial;    // b0 + t0 (material buffer) + s0, for the passes that sample materials
     nvrhi::BindingLayoutHandle layoutBindless;    // the unbounded texture table, register space 1
     nvrhi::SamplerHandle materialSampler;         // anisotropic wrap
@@ -119,6 +121,7 @@ struct Renderer::Impl {
     std::unique_ptr<ShaderLibrary> shaders;
     std::unique_ptr<PipelineCache> pipelines;
     GpuResources gpu;
+    Atmosphere atmosphere; // after `device`/`pipelines`/`shaders`: it must be destroyed before them
     MeshLookup meshLookup; // imported mesh asset -> mesh ids in gpu.meshes
     // Replaced/released mesh ids stay valid for a few frames: scene snapshots already extracted
     // (and frames in flight) may still reference them.
