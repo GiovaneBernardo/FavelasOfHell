@@ -71,7 +71,9 @@ float perlinFbm(float3 uvw, int freq)
         norm += a;
         a *= 0.5;
     }
-    return sum / norm;
+    // Gradient noise clusters tightly around 0.5 (and averaging octaves tightens it more): stretch it back to the
+    // full 0..1 range, or every threshold downstream sees almost the same value everywhere.
+    return saturate((sum / norm - 0.5) * 2.6 + 0.5);
 }
 
 float remap(float v, float lo, float hi, float newLo, float newHi)

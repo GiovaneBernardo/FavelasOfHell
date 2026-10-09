@@ -239,6 +239,7 @@ AtmosphereStatus Renderer::atmosphereStatus() const { return m_impl->atmosphere.
 
 void Renderer::setClouds(const CloudDesc& desc) { m_impl->clouds.set(desc); }
 const CloudDesc& Renderer::clouds() const { return m_impl->clouds.desc(); }
+CloudWeather Renderer::cloudWeather() const { return m_impl->clouds.state(); }
 
 // ---- scenes ---------------------------------------------------------------------------------
 

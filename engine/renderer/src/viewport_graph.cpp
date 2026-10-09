@@ -417,7 +417,7 @@ nvrhi::IBindingSet* cloudTraceBindings(Impl& s, const ViewFrame& vf, const Cloud
     bd.addItem(nvrhi::BindingSetItem::Texture_SRV(3, s.atmosphere.irradiance()));
     bd.addItem(nvrhi::BindingSetItem::Texture_SRV(4, s.clouds.shape()));
     bd.addItem(nvrhi::BindingSetItem::Texture_SRV(5, s.clouds.detail()));
-    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(6, s.clouds.weather()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(6, s.clouds.weatherMap()));
     bd.addItem(nvrhi::BindingSetItem::Sampler(0, s.atmosphere.sampler()));
     bd.addItem(nvrhi::BindingSetItem::Sampler(1, s.clouds.wrapSampler()));
     return ctx.bindingSet(bd, s.clouds.traceLayout());

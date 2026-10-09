@@ -22,12 +22,32 @@ const char* PhaseName(AtmosphereStatus::Phase p) {
 
 // Volumetric clouds apply live (no tables to rebuild): every change goes straight to the renderer.
 void DrawClouds(Renderer& renderer) {
+    static const char* kPresetNames[kCloudPresetCount] = {"Clear (few fair-weather cumulus)", "Fair (scattered cumulus)",
+                                                          "Broken (big gaps)", "Stratocumulus (low lumpy deck)",
+                                                          "Overcast (flat stratus)", "Storm (cumulonimbus)"};
     CloudDesc d = renderer.clouds();
     bool changed = ImGui::Checkbox("Enabled", &d.enabled);
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
-    changed |= ImGui::SliderFloat("Coverage", &d.coverage, 0.0f, 1.0f, "%.2f");
+
+    ImGui::SeparatorText("Weather");
+    int preset = static_cast<int>(d.preset);
+    if (ImGui::Combo("Preset", &preset, kPresetNames, static_cast<int>(kCloudPresetCount))) {
+        d.preset = static_cast<CloudPreset>(preset);
+        changed = true;
+    }
+    changed |= ImGui::Checkbox("Change by itself", &d.autoCycle);
+    if (d.autoCycle) {
+        changed |= ImGui::SliderFloat("Every (s)", &d.cycleSeconds, 10.0f, 1200.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+    }
+    changed |= ImGui::SliderFloat("Transition (s)", &d.transitionSeconds, 0.0f, 300.0f, "%.0f");
+    const CloudWeather w = renderer.cloudWeather();
+    ImGui::TextDisabled("Now: coverage %.2f, type %.2f (0 stratus, 1 cumulus), storm %.2f -> %s", w.coverage, w.type,
+                        w.storm, kPresetNames[static_cast<u32>(w.target)]);
+    changed |= ImGui::SliderFloat("Coverage bias", &d.coverageBias, -0.5f, 0.5f, "%+.2f");
     changed |= ImGui::SliderFloat("Density", &d.density, 0.1f, 3.0f, "%.2f");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Higher = darker, more opaque clouds.");
+
+    ImGui::SeparatorText("Layer");
     changed |= ImGui::DragFloat("Base altitude (m)", &d.baseAltitude, 10.0f, 200.0f, 8000.0f, "%.0f");
     changed |= ImGui::DragFloat("Thickness (m)", &d.thickness, 10.0f, 200.0f, 6000.0f, "%.0f");
     changed |= ImGui::SliderFloat("Feature size", &d.cloudScale, 0.25f, 4.0f, "%.2f", ImGuiSliderFlags_Logarithmic);

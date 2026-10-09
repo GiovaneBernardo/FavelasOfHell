@@ -46,3 +46,17 @@ RTX 5070 Ti, Debug build, 1600x900, all three passes: 0.07 ms (mostly looking up
 - The slab is flat (the atmosphere is not): fine up to the 25 km limit, would need a spherical shell for a space view.
 - The sky and the clouds are lit from the same sun, so a time-of-day control moves both.
 - The noise volumes are generated at start-up without a cache: `clouds_noise.slang` / `clouds_weather.slang` changes need a restart (the compute shaders are not re-run on hot reload).
+
+## Update: weather system (2026-10-09)
+
+The first version was one fixed noise pattern at one coverage: simplistic, thin, far away and never changing. Changes:
+
+- **Weather map** (`clouds_weather.slang`, 256^2 RGBA16F; half float because the coverage curve amplifies it about 6x and 8 bits showed as terraces): R coverage blobs, G type noise, B column height noise, A wide clear / cloudy regions. Two independent layers (different scale, drifting in different directions) are sampled and cross-faded over minutes, so the pattern reshapes instead of only sliding.
+- **Presets** (`CloudPreset`: Clear, Fair, Broken, Stratocumulus, Overcast, Storm) are templates of (coverage, type 0 stratus..1 cumulus, storminess, density). `Renderer::cloudWeather()` is what the sky shows now; it eases toward the target over `transitionSeconds`. With `autoCycle` (default on) a new preset is picked every `cycleSeconds` along a fixed pseudo-random walk, so the sky changes character by itself.
+- **Per-column structure**: each column picks its own type around the global one and its own height (stratus hugs the bottom fifth of the slab, cumulus heaps up to about half, storm columns tower through most of it), with a height gradient per type. The shape volume also drifts upward ("boiling") and the detail erosion scrolls faster.
+- **Thicker and closer**: default layer 900 m + 2600 m (was 1500 + 1800), denser cores (`d * 1.6`), wind 10 m/s, noise tiles shrunk so more structure is visible at once.
+- **Lighting**: a diffusion tail on the sun transmittance (`max(Beer-Lambert, 0.35 / (1 + k * depth))`) and a floor on the sky light, because pure Beer-Lambert turned every thick cloud black; storms get darker undersides and a smaller tail.
+- **Noise**: `perlinFbm` is stretched back to the full 0..1 range (gradient noise clusters around 0.5, so every threshold saw nearly the same value everywhere). The coverage field is re-centred in the shader so `coverage` is about the fraction of sky covered.
+- Editor: preset picker, "change by itself", cycle / transition times, live readout of the current weather, coverage bias.
+- Cost: one more weather-map fetch per density sample (also on the light taps). **Not re-measured** after this change; expect somewhat above the numbers in "Measurements".
+- Not done: preset-specific cloud scale, cirrus layer, cloud shadows on the scene, rain.

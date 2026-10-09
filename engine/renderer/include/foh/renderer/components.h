@@ -100,7 +100,7 @@ struct MeshRenderer {
 // Perspective camera looking down the entity's local -Z (Y up).
 struct Camera {
     f32 fovY = 1.0471976f; // 60 degrees
-    f32 nearZ = 0.01f;
+    f32 nearZ = 0.0001f;
     f32 farZ = 15000.0f;
     bool active = true;
 };

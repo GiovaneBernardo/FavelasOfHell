@@ -54,8 +54,14 @@ float4 psSky(FullscreenOut i) : SV_Target0
         float muS = dot(up, sunDir);
         float3 irradiance = atmoTransmittanceToSun(atmo, atmo.geom.bottom, muS) * max(muS, 0.0) +
                             atmoSkyIrradiance(atmo, atmo.geom.bottom, muS);
-        radiance = atmo.groundAlbedo * (1.0 / 3.14159265) * irradiance * sunIrradiance * transmittanceToGround +
-                   inscatter * sunIrradiance;
+        float3 ground = max(atmo.groundAlbedo, float3(0.25)) * (1.0 / 3.14159265) * irradiance * sunIrradiance * transmittanceToGround +
+                        inscatter * sunIrradiance;
+        // Far ground disappears into the haze: towards the horizon fade to the horizon sky instead of showing the
+        // planet's dark surface, so the seam where a finite or far-clipped ground plane ends is not visible.
+        float3 horizonDir = normalize(float3(dir.x, 0.0, dir.z));
+        float3 horizonTransmittance;
+        float3 horizon = atmoSkyRadiance(atmo, camera, horizonDir, sunDir, horizonTransmittance) * sunIrradiance;
+        radiance = lerp(horizon, ground, smoothstep(0.0, 0.5, -dir.y));
     } else {
         radiance *= sunIrradiance;
         // The sun disc, dimmed by the air it shines through (reddens towards the horizon).

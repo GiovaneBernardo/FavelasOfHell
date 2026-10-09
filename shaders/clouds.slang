@@ -62,13 +62,24 @@ float interleavedGradientNoise(float2 p)
     return frac(52.9829189 * frac(dot(p, float2(0.06711056, 0.00583715))));
 }
 
-// Rounded bottom, fluffy top for cumulus (type 1); a flat sheet for stratus (type 0).
+// `h` is the height inside the cloud column (0 = its base, 1 = its top). Rounded, fluffy top for cumulus
+// (type 1); a flat slab with a soft top for stratus (type 0).
 float heightGradient(float h, float type)
 {
-    float bottom = saturate(remap(h, 0.0, 0.12, 0.0, 1.0));
-    float cumulus = bottom * saturate(remap(h, 0.55, 1.0, 1.0, 0.0));
-    float stratus = bottom * saturate(remap(h, 0.15, 0.35, 1.0, 0.0));
+    float bottom = saturate(remap(h, 0.0, 0.1, 0.0, 1.0));
+    float cumulus = bottom * saturate(remap(h, 0.35, 1.0, 1.0, 0.0));
+    float stratus = bottom * saturate(remap(h, 0.65, 1.0, 1.0, 0.0));
     return lerp(stratus, cumulus, type);
+}
+
+// The weather layers: two independent noise fields drifting in different directions at different scales and
+// cross-faded by the CPU, so the pattern keeps reshaping instead of just sliding by.
+float4 sampleWeather(float3 p)
+{
+    float2 uv = (p.xz + g_cloud.wind.xz) * g_cloud.noise.z;
+    float4 a = g_weather.SampleLevel(g_wrap, uv, 0);
+    float4 b = g_weather.SampleLevel(g_wrap, uv.yx * 0.63 + 0.37 - g_cloud.wind.xz * g_cloud.noise.z * 0.45, 0);
+    return lerp(a, b, g_cloud.weather.w);
 }
 
 // Cloud density (1 / extinction scale) at a world position. `withDetail` adds the erosion noise, which only the
@@ -78,24 +89,41 @@ float cloudDensity(float3 p, bool withDetail)
     float h = (p.y - g_cloud.layer.x) / (g_cloud.layer.y - g_cloud.layer.x);
     if (h <= 0.0 || h >= 1.0) return 0.0;
 
-    float2 weatherUv = (p.xz + g_cloud.wind.xz) * g_cloud.noise.z;
-    float4 weather = g_weather.SampleLevel(g_wrap, weatherUv, 0);
-    float mask = saturate((weather.r + g_cloud.layer.z - 1.0) * 2.5);
+    float4 weather = sampleWeather(p);
+    float coverage = g_cloud.weather.x;
+    float storm = g_cloud.weather.z;
+    // Local coverage: the patchy field plus the wide clear / cloudy regions.
+    float field = lerp(weather.r, weather.a, 0.4);
+    // The noise sits in the upper middle of 0..1: re-centre and stretch it so `coverage` is about the fraction of sky
+    // that gets cloud (0.2 = a few islands, 0.5 = half, 0.9 = nearly closed).
+    field = saturate((field - 0.6) * 2.2 + 0.5);
+    float mask = saturate((field - (1.0 - coverage)) * 3.0);
     if (mask <= 0.0) return 0.0; // nothing here: skip the 3D fetches
 
-    float grad = heightGradient(h, saturate(weather.g * 1.6 - 0.2));
+    // Each column picks its own type around the global one, and its own height: stratus hugs the bottom of the slab,
+    // cumulus heaps up, storm columns tower through most of it.
+    float type = saturate(g_cloud.weather.y + (weather.g - 0.5) * 0.7);
+    float columnTop = lerp(0.2, 0.5, type) + (weather.b - 0.5) * 0.25 * type;
+    columnTop = lerp(columnTop, 0.5 + 0.5 * weather.b, storm * smoothstep(0.2, 0.7, mask));
+    columnTop = max(columnTop, 0.12);
+    float hc = h / columnTop;
+    if (hc >= 1.0) return 0.0;
+    float grad = heightGradient(hc, type);
     if (grad <= 0.0) return 0.0;
 
-    float4 s = g_shape.SampleLevel(g_wrap, (p + g_cloud.wind.xyz) * g_cloud.noise.x, 0);
+    // "Boiling": the shape volume drifts upward a little as it travels, so clouds churn instead of only sliding.
+    float3 q = (p + g_cloud.wind.xyz + float3(0.0, g_cloud.wind.w * 3.0, 0.0)) * g_cloud.noise.x;
+    float4 s = g_shape.SampleLevel(g_wrap, q, 0);
     float shapeFbm = s.g * 0.625 + s.b * 0.25 + s.a * 0.125;
     float baseShape = saturate(remap(s.r, shapeFbm - 1.0, 1.0, 0.0, 1.0));
     float d = saturate((baseShape * grad - (1.0 - mask)) / max(mask, 1e-3)) * mask;
     if (d <= 0.0) return 0.0;
+    d = saturate(d * 1.6); // dense, opaque cores instead of translucent smears
 
     if (withDetail) {
-        float4 t = g_detail.SampleLevel(g_wrap, (p + g_cloud.wind.xyz * 1.7) * g_cloud.noise.y, 0);
+        float4 t = g_detail.SampleLevel(g_wrap, (p + g_cloud.wind.xyz * 1.7 + float3(0.0, g_cloud.wind.w * 6.0, 0.0)) * g_cloud.noise.y, 0);
         float detailFbm = t.r * 0.625 + t.g * 0.25 + t.b * 0.125;
-        float erode = lerp(detailFbm, 1.0 - detailFbm, saturate(h * 4.0)) * g_cloud.noise.w;
+        float erode = lerp(detailFbm, 1.0 - detailFbm, saturate(hc * 3.0)) * g_cloud.noise.w * lerp(0.6, 1.0, type);
         d = saturate(remap(d, erode, 1.0, 0.0, 1.0));
     }
     return d * g_cloud.layer.w;
@@ -142,8 +170,10 @@ float4 psClouds(FullscreenOut i) : SV_Target0
     float muSMid = dot(midKm, sunDir) / rMid;
     float3 sunE = g_view.sunColor.rgb * atmoTransmittanceToSun(atmo, rMid, muSMid);
     float3 skyE = atmoSkyIrradiance(atmo, rMid, muSMid) * g_view.sunColor.rgb;
+    float storm = g_cloud.weather.z;
     float3 ambientTop = skyE * (1.0 / kPi);
     float3 ambientBottom = atmo.groundAlbedo * (sunE * max(muSMid, 0.0) + skyE) * (1.0 / kPi) * 0.5 + ambientTop * 0.25;
+    ambientBottom *= lerp(1.0, 0.45, storm); // storm undersides are dark: the thick column above blocks the sky light
 
     // Phase function values do not change along the ray: one per multiple-scattering octave.
     float phase[3];
@@ -168,16 +198,19 @@ float4 psClouds(FullscreenOut i) : SV_Target0
         [unroll] for (int k = 0; k < 5; ++k) {
             lightDepth += cloudDensity(p + sunDir * kLightDist[k], false) * kLightStep[k];
         }
-        lightDepth *= extinction;
+        lightDepth *= extinction * 0.6; // forward scattering lets light through thicker cloud than Beer-Lambert says
 
         float h = saturate((p.y - base) / (top - base));
         float3 inscatter = 0.0;
         [unroll] for (int o = 0; o < 3; ++o) {
             float octave = pow(0.5, o); // scattering, extinction and anisotropy all drop by half per order
-            inscatter += octave * phase[o] * exp(-lightDepth * octave) * sunE;
+            // Beer-Lambert plus a diffusion tail: deep inside thick cloud the light is not gone, it is scattered around.
+            float direct = exp(-lightDepth * octave);
+            float diffuse = lerp(0.35, 0.12, g_cloud.weather.z) / (1.0 + lightDepth * 0.5 * octave); // storm cores stay darker
+            inscatter += octave * phase[o] * max(direct, diffuse) * sunE;
         }
         inscatter *= kSunScatterBoost;
-        float3 ambient = lerp(ambientBottom, ambientTop, smoothstep(0.0, 0.8, h)) * exp(-lightDepth * 0.15) * g_cloud.misc.w;
+        float3 ambient = lerp(ambientBottom, ambientTop, smoothstep(0.0, 0.8, h)) * (0.25 + 0.75 * exp(-lightDepth * 0.12)) * g_cloud.misc.w;
 
         // Energy-conserving integration over the step: sigma_s cancels against the extinction in the integral.
         float stepTransmittance = exp(-d * extinction * dt);

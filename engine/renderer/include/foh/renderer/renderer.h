@@ -149,18 +149,45 @@ struct AtmosphereDesc {
 // Volumetric clouds: one horizontal layer, ray marched at half resolution and lit by the sun through the
 // atmosphere tables (so they redden at dusk and darken at night). Applies to every viewport with the Sky flag from
 // the next frame. Only visible sky pixels cost anything; `quality` trades ray march steps for noise.
+//
+// The kind of sky comes from a weather preset (coverage, cloud type, storminess, thickness). The renderer eases from
+// the current weather to the preset over `transitionSeconds`, and with `autoCycle` picks a new preset every
+// `cycleSeconds`, so the sky changes character over time on its own.
+enum class CloudPreset : u8 {
+    Clear,         // a few small fair-weather cumulus
+    Fair,          // scattered cumulus
+    Broken,        // broken cumulus, big gaps
+    Stratocumulus, // a low, lumpy, nearly closed deck
+    Overcast,      // flat grey stratus
+    Storm,         // dark, tall cumulonimbus
+};
+inline constexpr u32 kCloudPresetCount = 6;
+
 struct CloudDesc {
     bool enabled = true;
-    f32 baseAltitude = 1500.0f; // m above sea level
-    f32 thickness = 1800.0f;    // m
-    f32 coverage = 0.5f;        // 0 = clear sky, 1 = overcast
-    f32 density = 1.0f;         // multiplier of the extinction: higher = darker, more opaque clouds
-    f32 windSpeed = 6.0f;       // m/s
-    f32 windDirection = 40.0f;  // degrees in the ground plane (0 = +X, 90 = +Z)
-    f32 cloudScale = 1.0f;      // feature size multiplier
-    f32 detail = 0.4f;          // strength of the small-scale erosion, 0..1
-    f32 ambient = 1.0f;         // multiplier of the sky-light part of the shading
-    u32 quality = 1;            // 0 low, 1 medium, 2 high (ray march steps)
+    CloudPreset preset = CloudPreset::Fair; // the target weather (with autoCycle: where the cycle starts)
+    bool autoCycle = true;
+    f32 cycleSeconds = 240.0f;      // time between automatic weather changes
+    f32 transitionSeconds = 60.0f;  // how long a change takes
+    f32 coverageBias = 0.0f;        // added to the preset's coverage, -0.5..0.5
+    f32 density = 1.0f;             // multiplier of the extinction: higher = darker, more opaque clouds
+    f32 baseAltitude = 900.0f;      // m above sea level
+    f32 thickness = 2600.0f;        // m (stratus uses the bottom fifth, cumulonimbus most of it)
+    f32 windSpeed = 10.0f;          // m/s
+    f32 windDirection = 40.0f;      // degrees in the ground plane (0 = +X, 90 = +Z)
+    f32 cloudScale = 1.0f;          // feature size multiplier
+    f32 detail = 0.6f;              // strength of the small-scale erosion, 0..1
+    f32 ambient = 1.0f;             // multiplier of the sky-light part of the shading
+    u32 quality = 1;                // 0 low, 1 medium, 2 high (ray march steps)
+};
+
+// The weather the sky is showing right now (between presets while a transition runs).
+struct CloudWeather {
+    f32 coverage = 0.0f; // 0 clear .. 1 overcast
+    f32 type = 1.0f;     // 0 flat stratus .. 1 heaped cumulus
+    f32 storm = 0.0f;    // 0 calm .. 1 cumulonimbus towers, dark undersides
+    f32 density = 1.0f;
+    CloudPreset target = CloudPreset::Fair;
 };
 
 struct AtmosphereStatus {
@@ -279,6 +306,7 @@ public:
     // ---- clouds ----
     void setClouds(const CloudDesc& desc);
     const CloudDesc& clouds() const;
+    CloudWeather cloudWeather() const;
 
     // ---- scenes ----
     SceneId createScene(const char* name);

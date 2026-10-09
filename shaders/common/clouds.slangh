@@ -4,9 +4,10 @@
 
 struct CloudConstants {
     float4x4 prevViewProj; // last frame's world -> clip, for the temporal reprojection
-    float4 layer;          // x = base altitude (m), y = top altitude (m), z = coverage 0..1, w = density multiplier
+    float4 layer;          // x = base altitude (m), y = top altitude (m), z = unused, w = density multiplier
+    float4 weather;        // x = coverage, y = type (0 stratus .. 1 cumulus), z = storminess, w = cross-fade between the two weather layers
     float4 noise;          // x = shape scale (1 / m), y = detail scale (1 / m), z = weather scale (1 / m), w = detail erosion
-    float4 wind;           // xyz = how far the wind moved the clouds since start (m)
+    float4 wind;           // xyz = how far the wind moved the clouds since start (m), w = time (s)
     float4 misc;           // x = frame index, y = weight of the new sample (1 = history unusable), z = max distance (m), w = ambient scale
     float4 march;          // x = view steps (looking up), y = view steps (grazing), z = extinction (1 / m) at density 1, w = unused
 };
