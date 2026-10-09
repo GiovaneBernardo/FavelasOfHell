@@ -170,3 +170,22 @@ TEST_CASE("camera and sun extraction use the world transform of their entities")
     REQUIRE(out.sun.present);
     CHECK(out.sun.direction.y == doctest::Approx(-1.0f).epsilon(1e-4));
 }
+
+TEST_CASE("rotating the sun after the first frame changes the extracted direction") {
+    Fixture f;
+    World& w = f.app.world();
+    // Other entities share nothing with the sun's table; the sun is alone in its archetype like in the game.
+    w.spawn(Transform{{0, 0, 0}, Quat(1, 0, 0, 0), {1, 1, 1}}, MeshRenderer{});
+    const Entity sun = w.spawn(Transform{{0, 0, 0}, glm::quatLookAt(Vec3(0, -1, 0), Vec3(0, 0, -1)), {1, 1, 1}},
+                               DirectionalLight{});
+    f.app.update(0.016f);
+    f.scene.publish();
+    CHECK(f.scene.read().sun.direction.y == doctest::Approx(-1.0f).epsilon(0.001));
+
+    // The editor inspector/gizmo path: write in place, then announce.
+    w.get<Transform>(sun)->rotation = glm::quatLookAt(Vec3(1, 0, 0), Vec3(0, 1, 0));
+    w.markModified<Transform>(sun);
+    f.app.update(0.016f);
+    f.scene.publish();
+    CHECK(f.scene.read().sun.direction.x == doctest::Approx(1.0f).epsilon(0.001));
+}

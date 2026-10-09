@@ -129,10 +129,12 @@ float4 psDeferred(FullscreenOut i) : SV_Target0
         // A faint floor so moonless nights are dark but not pitch black.
         color += diffuseColor * float3(0.002, 0.0025, 0.0045) * ao;
 
-        float3 cameraKm = atmoPosition(atmo, g_view.cameraPos.xyz, g_view.cameraPos.xyz);
-        float3 transmittance;
-        float3 inscatter = atmoSkyRadianceToPoint(atmo, cameraKm, pointKm, sunDir, transmittance);
-        color = color * transmittance + inscatter * g_view.sunColor.rgb;
+        if (g_view.render.y > 0.5) {
+            float3 cameraKm = atmoPosition(atmo, g_view.cameraPos.xyz, g_view.cameraPos.xyz);
+            float3 transmittance;
+            float3 inscatter = atmoSkyRadianceToPoint(atmo, cameraKm, pointKm, sunDir, transmittance);
+            color = color * transmittance + inscatter * g_view.sunColor.rgb;
+        }
     } else {
         float3 ambient = lerp(float3(0.10, 0.09, 0.08), float3(0.30, 0.38, 0.52), n.y * 0.5 + 0.5);
         color += diffuseColor * ambient * ao;

@@ -28,10 +28,10 @@ bool RecordFullscreen(RgPassContext& ctx, const RgShaderServices& services, cons
         pd.renderState.depthStencilState.depthTestEnable = false;
         pd.renderState.depthStencilState.depthWriteEnable = false;
         pd.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
-        if (state.blend == RgBlend::Alpha) {
+        if (state.blend != RgBlend::Opaque) {
             pd.renderState.blendState.targets[0]
                 .setBlendEnable(true)
-                .setSrcBlend(nvrhi::BlendFactor::SrcAlpha)
+                .setSrcBlend(state.blend == RgBlend::Alpha ? nvrhi::BlendFactor::SrcAlpha : nvrhi::BlendFactor::One)
                 .setDestBlend(nvrhi::BlendFactor::InvSrcAlpha)
                 .setSrcBlendAlpha(nvrhi::BlendFactor::Zero)
                 .setDestBlendAlpha(nvrhi::BlendFactor::One);

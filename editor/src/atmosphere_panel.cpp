@@ -20,6 +20,33 @@ const char* PhaseName(AtmosphereStatus::Phase p) {
     return "";
 }
 
+// Volumetric clouds apply live (no tables to rebuild): every change goes straight to the renderer.
+void DrawClouds(Renderer& renderer) {
+    CloudDesc d = renderer.clouds();
+    bool changed = ImGui::Checkbox("Enabled", &d.enabled);
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
+    changed |= ImGui::SliderFloat("Coverage", &d.coverage, 0.0f, 1.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Density", &d.density, 0.1f, 3.0f, "%.2f");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Higher = darker, more opaque clouds.");
+    changed |= ImGui::DragFloat("Base altitude (m)", &d.baseAltitude, 10.0f, 200.0f, 8000.0f, "%.0f");
+    changed |= ImGui::DragFloat("Thickness (m)", &d.thickness, 10.0f, 200.0f, 6000.0f, "%.0f");
+    changed |= ImGui::SliderFloat("Feature size", &d.cloudScale, 0.25f, 4.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+    changed |= ImGui::SliderFloat("Detail", &d.detail, 0.0f, 1.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Sky light", &d.ambient, 0.0f, 3.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Wind speed (m/s)", &d.windSpeed, 0.0f, 40.0f, "%.1f");
+    changed |= ImGui::SliderFloat("Wind direction", &d.windDirection, 0.0f, 360.0f, "%.0f deg");
+    int quality = static_cast<int>(d.quality);
+    if (ImGui::Combo("Quality", &quality, "Low (20-36 steps)\0Medium (32-56 steps)\0High (48-96 steps)\0")) {
+        d.quality = static_cast<u32>(quality);
+        changed = true;
+    }
+    ImGui::PopItemWidth();
+    if (changed) renderer.setClouds(d);
+    if (ImGui::Button("Defaults##clouds")) renderer.setClouds(CloudDesc{});
+    ImGui::TextWrapped("Half-resolution ray march, accumulated over time; only visible sky is shaded. Lit by the sun "
+                       "through the atmosphere tables, so they follow the time of day.");
+}
+
 } // namespace
 
 void AtmospherePanel::draw(Renderer& renderer, bool* open) {
@@ -74,6 +101,8 @@ void AtmospherePanel::draw(Renderer& renderer, bool* open) {
     ImGui::TextWrapped("The tables are loaded from the cache file when the editor or game starts; generating them takes "
                        "a moment on the GPU and only has to be repeated after changing a parameter here "
                        "(or the precompute shaders).");
+    ImGui::Separator();
+    if (ImGui::CollapsingHeader("Clouds", ImGuiTreeNodeFlags_DefaultOpen)) DrawClouds(renderer);
     ImGui::End();
 }
 

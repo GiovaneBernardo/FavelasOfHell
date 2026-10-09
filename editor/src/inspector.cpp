@@ -427,7 +427,11 @@ void drawField(FieldContext& c, const SchemaField& f, std::byte* base, const std
 void EntityInspector::drawComponent(World& world, Entity entity, ComponentId id, const Schema& schema,
                                     std::span<const SceneRef> scenes, Selection& selection) {
     ImGui::PushID(static_cast<int>(id & 0x7FFFFFFF));
-    const bool open = ImGui::CollapsingHeader(std::string(shortName(schema.name)).c_str(), ImGuiTreeNodeFlags_DefaultOpen);
+    // GlobalTransform is recomputed from Transform every time Transform (or a parent) changes: editing it does
+    // nothing lasting (the next propagation overwrites it), so it is shown read-only and collapsed.
+    const bool computed = schema.name == "foh::GlobalTransform";
+    const bool open = ImGui::CollapsingHeader(std::string(shortName(schema.name)).c_str(),
+                                              computed ? 0 : ImGuiTreeNodeFlags_DefaultOpen);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s (%u bytes)", schema.name.c_str(), schema.size);
     bool remove = false;
     if (ImGui::BeginPopupContextItem("##ctx")) {
@@ -445,13 +449,18 @@ void EntityInspector::drawComponent(World& world, Entity entity, ComponentId id,
             // is announced (World::markModified): announcing every frame would mark the whole archetype table of
             // the selected entity as changed and make change-driven systems (transform propagation) redo it.
             m_editBefore.assign(data, data + schema.size);
+            if (computed) {
+                ImGui::TextDisabled("computed from Transform and the parents: edit Transform instead");
+                ImGui::BeginDisabled();
+            }
             if (ImGui::BeginTable("##fields", 2, ImGuiTableFlags_SizingFixedFit)) {
                 ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthFixed, 110.0f);
                 ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch);
                 for (const SchemaField& f : schema.fields) drawField(ctx, f, data, "", 0);
                 ImGui::EndTable();
             }
-            if (std::memcmp(m_editBefore.data(), data, schema.size) != 0) world.markModified(entity, id);
+            if (computed) ImGui::EndDisabled();
+            else if (std::memcmp(m_editBefore.data(), data, schema.size) != 0) world.markModified(entity, id);
         }
     }
     ImGui::PopID();

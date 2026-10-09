@@ -25,6 +25,8 @@ struct ViewConstants {
     float4 atmosphere1; // x = sun angular radius (rad), y = 1 if the atmosphere is on
     float4 atmosphere2; // xyz = single-Mie extrapolation factor
     float4 atmosphere3; // xyz = ground albedo
+
+    float4 render; // x = 1 to dither the tonemapped output, y = 1 for aerial perspective (needs atmosphere1.y)
 };
 
 // World-space point under a pixel at the given depth (reverse-Z: near plane is depth 1).

@@ -23,7 +23,9 @@ set(_common_headers
     "${CMAKE_CURRENT_SOURCE_DIR}/common/material.slangh"
     "${CMAKE_CURRENT_SOURCE_DIR}/common/instance.slangh"
     "${CMAKE_CURRENT_SOURCE_DIR}/common/atmosphere_core.slangh"
-    "${CMAKE_CURRENT_SOURCE_DIR}/common/atmosphere.slangh")
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/atmosphere.slangh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/clouds.slangh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/noise.slangh")
 
 set(FOH_SHADER_OUTPUTS "")
 
@@ -77,6 +79,14 @@ if(FOH_SLANGC)
     endforeach()
     foh_shader(atmosphere_pack.slang csPack2D compute)
     foh_shader(atmosphere_pack.slang csPack3D compute)
+    # Volumetric clouds: noise volumes (generated once), half-resolution ray march, temporal resolve, composite.
+    foreach(_entry csShape csDetail)
+        foh_shader(clouds_noise.slang ${_entry} compute)
+    endforeach()
+    foh_shader(clouds_weather.slang csWeather compute)
+    foh_shader(clouds.slang psClouds fragment)
+    foh_shader(clouds_post.slang psCloudResolve fragment)
+    foh_shader(clouds_post.slang psCloudComposite fragment)
     foh_shader(grid.slang psGrid fragment)
     foh_shader(tonemap.slang psTonemap fragment)
     foh_shader(blit.slang psBlit fragment)

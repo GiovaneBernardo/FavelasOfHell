@@ -1,0 +1,80 @@
+// Tileable hash / Worley / Perlin noise shared by the cloud noise generators (clouds_noise.slang, clouds_weather.slang).
+// Every function tiles with the period it is given, so the generated textures can use wrap addressing.
+#pragma once
+
+uint3 pcg3d(uint3 v)
+{
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    return v;
+}
+
+float3 hash3(int3 cell, int period)
+{
+    int3 c = ((cell % period) + period) % period;
+    return float3(pcg3d(uint3(c))) * (1.0 / 4294967295.0);
+}
+
+// 1 at a feature point, 0 far from all of them. `freq` cells per unit of uvw.
+float worley(float3 uvw, int freq)
+{
+    float3 p = uvw * freq;
+    int3 cell = int3(floor(p));
+    float3 f = p - float3(cell);
+    float best = 1e9;
+    [unroll] for (int z = -1; z <= 1; ++z) {
+        [unroll] for (int y = -1; y <= 1; ++y) {
+            [unroll] for (int x = -1; x <= 1; ++x) {
+                int3 o = int3(x, y, z);
+                float3 d = float3(o) + hash3(cell + o, freq) - f;
+                best = min(best, dot(d, d));
+            }
+        }
+    }
+    return 1.0 - saturate(sqrt(best));
+}
+
+float3 gradientAt(int3 cell, int period)
+{
+    return normalize(hash3(cell, period) * 2.0 - 1.0 + 1e-4);
+}
+
+float perlin(float3 uvw, int freq)
+{
+    float3 p = uvw * freq;
+    int3 cell = int3(floor(p));
+    float3 f = p - float3(cell);
+    float3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float v[8];
+    [unroll] for (int i = 0; i < 8; ++i) {
+        int3 o = int3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        v[i] = dot(gradientAt(cell + o, freq), f - float3(o));
+    }
+    float x00 = lerp(v[0], v[1], u.x);
+    float x10 = lerp(v[2], v[3], u.x);
+    float x01 = lerp(v[4], v[5], u.x);
+    float x11 = lerp(v[6], v[7], u.x);
+    return lerp(lerp(x00, x10, u.y), lerp(x01, x11, u.y), u.z) * 0.5 + 0.5;
+}
+
+float perlinFbm(float3 uvw, int freq)
+{
+    float a = 0.5, sum = 0.0, norm = 0.0;
+    [unroll] for (int i = 0; i < 4; ++i) {
+        sum += a * perlin(uvw, freq << i);
+        norm += a;
+        a *= 0.5;
+    }
+    return sum / norm;
+}
+
+float remap(float v, float lo, float hi, float newLo, float newHi)
+{
+    return newLo + (v - lo) / (hi - lo) * (newHi - newLo);
+}

@@ -39,3 +39,6 @@ The sky, the sun's color at the surface, the ambient light and the aerial perspe
 - Light comes from the sun only: the night has no moon or stars (a 0.002 ambient floor keeps it from being pitch black) and exposure is fixed at 1.0, so twilight below about -3 degrees renders black until auto-exposure exists.
 - The ground below the horizon is a lit planet sphere (albedo `groundAlbedo`) until terrain and water render there.
 - Not done: volumetric clouds, light shafts (the reference's shadow_length), sky-light occlusion by the scene (ambient is not shadowed), a moon, stars, per-view time-of-day control in the editor (rotate the sun entity for now), a sky-view LUT / half-resolution sky (not needed at the measured cost).
+
+## Addendum (2026-10-09): render settings
+`Renderer::setRenderSettings(RenderSettings)` holds the switches the editor's Render Graph panel edits: shadows on/off, cascade resolution and distance, atmosphere lookups, aerial perspective, exposure, output dither. They apply to every viewport from the next frame (`ViewConstants::params.x`, `render`, `atmosphere1.y`) and are stored in the editor prefs. Per-viewport pass switches (sky, grid) go through `ViewportFlags`. The graph itself is still declared in code (`viewport_graph.cpp`); a data-driven graph editor would need its own ADR.

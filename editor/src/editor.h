@@ -86,6 +86,7 @@ private:
         size_t sceneIndex = 0;
         bool useEditorCamera = true;
         bool grid = true;
+        bool sky = true;
         bool open = true;
         bool capturing = false; // RMB look/fly in progress
         FlyCamera camera;
@@ -106,6 +107,8 @@ private:
     void drawMenuBar();
     void drawViewport(ViewportPanel& panel, float dt);
     void drawRenderGraphPanel();
+    void drawRenderSettings();
+    void loadRenderSettings();
     void drawStatsPanel(float dt);
     void saveScreenshot();
     void initAssets();

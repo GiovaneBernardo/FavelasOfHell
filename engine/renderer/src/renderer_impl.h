@@ -19,6 +19,7 @@
 #include "foh/rhi/shader_library.h"
 #include "foh/rhi/swapchain.h"
 #include "atmosphere.h"
+#include "clouds.h"
 #include "gpu_structs.h"
 #include "material_store.h"
 #include "mesh_store.h"
@@ -56,6 +57,8 @@ struct ViewFrame {
     bool shadowsOn = false;
     u32 shadowTile = 0; // texels per cascade side
     const SceneGpu* scene = nullptr;
+    CloudConstants clouds{};
+    nvrhi::IBuffer* cloudCb = nullptr;
     nvrhi::IBuffer* viewCb = nullptr;
     nvrhi::IBuffer* shadowCb = nullptr;
     u32 width = 0;
@@ -88,6 +91,15 @@ struct Viewport {
     ViewFrame frame;
     bool graphReady = false; // compiled this frame and waiting to be recorded/submitted
 
+    // Clouds: temporal history (half resolution, ping-pong), created on first use and when the size changes.
+    nvrhi::BufferHandle cloudCb; // volatile
+    nvrhi::TextureHandle cloudHistory[2];
+    u32 cloudHistoryWidth = 0, cloudHistoryHeight = 0;
+    u32 cloudWrite = 0; // index of the history texture written this frame
+    bool cloudHistoryValid = false;
+    u64 cloudLastFrame = 0;
+    Mat4 cloudPrevViewProj{1.0f};
+
     ViewportDebugInfo debug;
 
     enum class PickState : u8 { Idle, Requested, InFlight, Ready };
@@ -117,10 +129,12 @@ struct GpuResources {
 
 struct Renderer::Impl {
     RendererDesc desc;
+    RenderSettings settings; // what the passes read (starts from `desc`)
     std::unique_ptr<GraphicsDevice> device;
     std::unique_ptr<ShaderLibrary> shaders;
     std::unique_ptr<PipelineCache> pipelines;
     GpuResources gpu;
+    Clouds clouds;
     Atmosphere atmosphere; // after `device`/`pipelines`/`shaders`: it must be destroyed before them
     MeshLookup meshLookup; // imported mesh asset -> mesh ids in gpu.meshes
     // Replaced/released mesh ids stay valid for a few frames: scene snapshots already extracted

@@ -26,9 +26,10 @@ struct ViewConstants {
     Vec4 cascadeTexel;
     Vec4 shadowParams;
     Vec4 atmosphere0, atmosphere1, atmosphere2, atmosphere3;
+    Vec4 render;
 };
 static_assert(kShadowCascades == 4, "view.slangh declares four cascades");
-static_assert(sizeof(ViewConstants) == 4 * 64 + 5 * 16 + 4 * 64 + 3 * 16 + 4 * 16, "ViewConstants must match view.slangh");
+static_assert(sizeof(ViewConstants) == 4 * 64 + 5 * 16 + 4 * 64 + 3 * 16 + 4 * 16 + 16, "ViewConstants must match view.slangh");
 static_assert(offsetof(ViewConstants, cascadeViewProj) == 336, "ViewConstants layout drifted from view.slangh");
 static_assert(offsetof(ViewConstants, shadowParams) == 624, "ViewConstants layout drifted from view.slangh");
 static_assert(offsetof(ViewConstants, atmosphere0) == 640, "ViewConstants layout drifted from view.slangh");

@@ -12,6 +12,7 @@ endif()
 foh_add_engine_module(renderer
     SOURCES
         src/atmosphere.cpp
+        src/clouds.cpp
         src/gpu_format.cpp
         src/material_store.cpp
         src/mesh_store.cpp

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <thread>
 
@@ -95,6 +96,7 @@ bool Editor::init() {
     m_iniPath = (GetExecutableDirectory() / "editor_layout_v3.ini").string();
     io.IniFilename = m_iniPath.c_str();
     m_prefs.load(GetExecutableDirectory() / "editor_prefs.txt");
+    loadRenderSettings();
     m_theme.init(*m_window);
     m_platform.init(*m_window);
     if (!m_imguiRenderer.init(*m_renderer)) return false;
@@ -955,7 +957,8 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
                 ImGui::SameLine();
             }
             if (ImGui::Checkbox("Grid", &p.grid)) {
-                m_renderer->setViewportFlags(p.id, ViewportFlags::Sky | (p.grid ? ViewportFlags::Grid : ViewportFlags::None));
+                m_renderer->setViewportFlags(p.id, (p.sky ? ViewportFlags::Sky : ViewportFlags::None) |
+                                                       (p.grid ? ViewportFlags::Grid : ViewportFlags::None));
             }
         }
         ImGui::EndChild();
@@ -970,17 +973,89 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
     ImGui::End();
 }
 
+// Quality and pass settings shared by every viewport (Renderer::setRenderSettings), kept in the editor prefs.
+void Editor::loadRenderSettings() {
+    RenderSettings r = m_renderer->renderSettings();
+    r.shadows = m_prefs.getBool("render.shadows", r.shadows);
+    r.shadowCascadeSize = static_cast<u32>(m_prefs.getFloat("render.shadowSize", static_cast<float>(r.shadowCascadeSize)));
+    r.shadowDistance = m_prefs.getFloat("render.shadowDistance", r.shadowDistance);
+    r.atmosphere = m_prefs.getBool("render.atmosphere", r.atmosphere);
+    r.aerialPerspective = m_prefs.getBool("render.aerial", r.aerialPerspective);
+    r.exposure = m_prefs.getFloat("render.exposure", r.exposure);
+    r.dither = m_prefs.getBool("render.dither", r.dither);
+    m_renderer->setRenderSettings(r);
+}
+
+void Editor::drawRenderSettings() {
+    RenderSettings r = m_renderer->renderSettings();
+    const RenderSettings before = r;
+    if (ImGui::CollapsingHeader("Pass settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.5f);
+        if (ImGui::TreeNodeEx("ShadowCascades", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Enabled##shadows", &r.shadows);
+            ImGui::BeginDisabled(!r.shadows);
+            static const u32 kSizes[] = {512, 1024, 2048, 4096};
+            int idx = 0;
+            for (int i = 0; i < 4; ++i) if (kSizes[i] <= r.shadowCascadeSize) idx = i;
+            const char* labels[] = {"512", "1024", "2048", "4096"};
+            if (ImGui::Combo("Cascade resolution", &idx, labels, 4)) r.shadowCascadeSize = kSizes[idx];
+            ImGui::SliderFloat("Distance (m)", &r.shadowDistance, 20.0f, 2000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+            ImGui::EndDisabled();
+            ImGui::TreePop();
+        }
+        if (ImGui::TreeNodeEx("Sky + Deferred (atmosphere)", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Atmosphere lookups", &r.atmosphere);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Off: gradient sky and constant ambient (the tables themselves are edited in the Atmosphere panel).");
+            ImGui::BeginDisabled(!r.atmosphere);
+            ImGui::Checkbox("Aerial perspective", &r.aerialPerspective);
+            ImGui::EndDisabled();
+            ImGui::TreePop();
+        }
+        if (ImGui::TreeNodeEx("Tonemap", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::SliderFloat("Exposure", &r.exposure, 0.01f, 64.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            ImGui::Checkbox("Dither", &r.dither);
+            ImGui::TreePop();
+        }
+        ImGui::PopItemWidth();
+        if (ImGui::Button("Reset")) r = RenderSettings{};
+        ImGui::SameLine();
+        ImGui::TextDisabled("Applies to every viewport, saved with the editor prefs.");
+    }
+    if (std::memcmp(&before, &r, sizeof(r)) != 0) {
+        m_renderer->setRenderSettings(r);
+        r = m_renderer->renderSettings(); // clamped
+        m_prefs.setBool("render.shadows", r.shadows);
+        m_prefs.setFloat("render.shadowSize", static_cast<float>(r.shadowCascadeSize));
+        m_prefs.setFloat("render.shadowDistance", r.shadowDistance);
+        m_prefs.setBool("render.atmosphere", r.atmosphere);
+        m_prefs.setBool("render.aerial", r.aerialPerspective);
+        m_prefs.setFloat("render.exposure", r.exposure);
+        m_prefs.setBool("render.dither", r.dither);
+    }
+}
+
 void Editor::drawRenderGraphPanel() {
     if (!ImGui::Begin("Render Graph", &m_showRenderGraph)) {
         ImGui::End();
         return;
     }
+    drawRenderSettings();
     ImGui::TextDisabled("One graph instance per viewport; passes run in declaration order, culled ones are skipped.");
-    for (const ViewportPanel& p : m_viewports) {
+    for (ViewportPanel& p : m_viewports) {
         ViewportDebugInfo info;
         if (!m_renderer->viewportDebugInfo(p.id, info)) continue;
         const bool open = ImGui::CollapsingHeader(info.name.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
         if (!open) continue;
+        ImGui::PushID(info.name.c_str());
+        // Per-viewport pass switches: the sky pass (off = flat clear) and the editor grid pass.
+        bool changed = ImGui::Checkbox("Sky pass", &p.sky);
+        ImGui::SameLine();
+        changed |= ImGui::Checkbox("Grid pass", &p.grid);
+        if (changed) {
+            m_renderer->setViewportFlags(p.id, (p.sky ? ViewportFlags::Sky : ViewportFlags::None) |
+                                                   (p.grid ? ViewportFlags::Grid : ViewportFlags::None));
+        }
+        ImGui::PopID();
         ImGui::Text("%ux%u  |  %u instances  |  %u command list group(s)  |  %u/%u physical/virtual transients  |  %u barriers",
                     info.width, info.height, info.instances, info.groups, info.physicalTextures,
                     info.transientTextures, info.barriers);
@@ -1149,6 +1224,15 @@ void Editor::runStress() {
     if (f == 55) m_viewports[2].open = true;
     // The atmosphere panel and a regeneration (compute passes + cache dump) while frames are in flight.
     if (f == 20) m_showAtmosphere = true;
+    // Pass settings changing under load: shadow atlas resize, shadows off, atmosphere off, back to defaults.
+    if (f == 120 || f == 180 || f == 220 || f == 260) {
+        RenderSettings r = m_renderer->renderSettings();
+        if (f == 120) r.shadowCascadeSize = 1024;
+        if (f == 180) r.shadows = false;
+        if (f == 220) { r.shadows = true; r.atmosphere = false; }
+        if (f == 260) r = RenderSettings{};
+        m_renderer->setRenderSettings(r);
+    }
     if (f == 70) {
         AtmosphereDesc d = m_renderer->atmosphereDesc();
         d.mieScale = 2.0f;

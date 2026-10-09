@@ -7,6 +7,8 @@
 //                            against the pre-pass so every pixel is shaded once
 //   Sky | ClearHdr           background into the HDR target (sky: precomputed atmosphere, empty-depth pixels only)
 //   Deferred                 fullscreen lighting from the G-buffer + shadows + atmosphere -> HDR
+//   CloudTrace/Resolve/Composite (volumetric clouds, sky viewports with the atmosphere on)
+//                            half-resolution ray march, temporal accumulation, blend over the empty HDR pixels
 //   Grid (editor views)      ground grid over the HDR color, occluded by depth
 //   Tonemap                  HDR -> sRGB RGBA8, the viewport's output image
 //
@@ -55,7 +57,8 @@ RenderViewParams resolveView(const Viewport& vp, const SceneSlot* slot, f32 aspe
     return MakeViewParams(world, 1.0471976f, aspect, 0.1f, 4000.0f);
 }
 
-void fillConstants(ViewConstants& c, const RenderViewParams& v, const SceneSlot* slot, u32 w, u32 h, f32 time) {
+void fillConstants(ViewConstants& c, const RenderViewParams& v, const SceneSlot* slot, u32 w, u32 h, f32 time,
+                   const RenderSettings& settings) {
     c = ViewConstants{};
     c.view = v.view;
     c.proj = v.proj;
@@ -72,14 +75,15 @@ void fillConstants(ViewConstants& c, const RenderViewParams& v, const SceneSlot*
         }
     }
     c.viewport = Vec4(static_cast<f32>(w), static_cast<f32>(h), 1.0f / static_cast<f32>(w), 1.0f / static_cast<f32>(h));
-    c.params = Vec4(1.0f, time, v.nearZ, v.farZ);
+    c.params = Vec4(settings.exposure, time, v.nearZ, v.farZ);
+    c.render = Vec4(settings.dither ? 1.0f : 0.0f, settings.aerialPerspective ? 1.0f : 0.0f, 0.0f, 0.0f);
 }
 
 // Fits the sun's cascades to the view and publishes them in the view constants.
-void fillShadows(ViewFrame& vf, const RenderViewParams& v, const RendererDesc& desc) {
+void fillShadows(ViewFrame& vf, const RenderViewParams& v, const RenderSettings& settings) {
     ViewConstants& c = vf.constants;
-    vf.shadowTile = std::clamp(desc.shadowCascadeSize, 256u, 8192u);
-    vf.shadowsOn = vf.scene && !vf.scene->instances.empty() && c.sunDirection.w > 0.5f;
+    vf.shadowTile = std::clamp(settings.shadowCascadeSize, 256u, 8192u);
+    vf.shadowsOn = settings.shadows && vf.scene && !vf.scene->instances.empty() && c.sunDirection.w > 0.5f;
     if (!vf.shadowsOn) return;
 
     ShadowCascadeDesc cd;
@@ -88,7 +92,7 @@ void fillShadows(ViewFrame& vf, const RenderViewParams& v, const RendererDesc& d
     cd.nearZ = v.nearZ;
     cd.farZ = v.farZ;
     cd.lightDirection = Vec3(c.sunDirection);
-    cd.shadowDistance = desc.shadowDistance;
+    cd.shadowDistance = settings.shadowDistance;
     cd.resolution = vf.shadowTile;
     vf.cascades = ComputeShadowCascades(cd);
     for (u32 i = 0; i < kShadowCascades; ++i) {
@@ -148,6 +152,20 @@ struct DeferredData {
     RgTexture material;
     RgTexture depth;
     RgTexture atlas;
+    RgTexture hdr;
+};
+struct CloudTraceData {
+    RgTexture depth;
+    RgTexture out;
+};
+struct CloudResolveData {
+    RgTexture current;
+    RgTexture history;
+    RgTexture out;
+};
+struct CloudCompositeData {
+    RgTexture clouds;
+    RgTexture depth;
     RgTexture hdr;
 };
 struct GridData {
@@ -380,6 +398,73 @@ nvrhi::IBindingSet* skyBindings(Impl& s, const ViewFrame& vf, const SkyData& d, 
     return ctx.bindingSet(bd, s.gpu.layoutSky);
 }
 
+// ---- clouds ----
+
+// Both the view constants and the cloud constants are volatile buffers: every pass that reads them writes them first.
+void writeCloudConstants(const ViewFrame& vf, RgPassContext& ctx) {
+    ctx.cmd()->writeBuffer(vf.viewCb, &vf.constants, sizeof(ViewConstants));
+    ctx.cmd()->writeBuffer(vf.cloudCb, &vf.clouds, sizeof(CloudConstants));
+}
+
+nvrhi::IBindingSet* cloudTraceBindings(Impl& s, const ViewFrame& vf, const CloudTraceData& d, RgPassContext& ctx) {
+    writeCloudConstants(vf, ctx);
+    nvrhi::BindingSetDesc bd;
+    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, vf.viewCb));
+    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(1, vf.cloudCb));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(0, ctx.texture(d.depth), nvrhi::Format::R32_FLOAT));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(1, s.atmosphere.transmittance()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(2, s.atmosphere.scattering()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(3, s.atmosphere.irradiance()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(4, s.clouds.shape()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(5, s.clouds.detail()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(6, s.clouds.weather()));
+    bd.addItem(nvrhi::BindingSetItem::Sampler(0, s.atmosphere.sampler()));
+    bd.addItem(nvrhi::BindingSetItem::Sampler(1, s.clouds.wrapSampler()));
+    return ctx.bindingSet(bd, s.clouds.traceLayout());
+}
+
+// Two textures for the resolve (new trace, history) and for the composite (resolved clouds, scene depth).
+nvrhi::IBindingSet* cloudPostBindings(Impl& s, const ViewFrame& vf, nvrhi::ITexture* a, nvrhi::ITexture* b,
+                                      nvrhi::Format formatB, RgPassContext& ctx) {
+    writeCloudConstants(vf, ctx);
+    nvrhi::BindingSetDesc bd;
+    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, vf.viewCb));
+    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(1, vf.cloudCb));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(0, a));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(1, b, formatB));
+    bd.addItem(nvrhi::BindingSetItem::Sampler(0, s.atmosphere.sampler()));
+    return ctx.bindingSet(bd, s.clouds.postLayout());
+}
+
+// Half-resolution history of a viewport cloud image. A new one (first use, resize) has nothing to reproject from.
+void ensureCloudTargets(Impl& s, Viewport& vp, u32 width, u32 height) {
+    nvrhi::IDevice* dev = s.device->nvrhi();
+    if (!vp.cloudCb) {
+        nvrhi::BufferDesc cb;
+        cb.byteSize = sizeof(CloudConstants);
+        cb.isConstantBuffer = true;
+        cb.isVolatile = true;
+        cb.maxVersions = 16;
+        cb.debugName = vp.name + " (cloud constants)";
+        vp.cloudCb = dev->createBuffer(cb);
+    }
+    if (vp.cloudHistory[0] && vp.cloudHistoryWidth == width && vp.cloudHistoryHeight == height) return;
+    for (u32 i = 0; i < 2; ++i) {
+        nvrhi::TextureDesc td;
+        td.width = width;
+        td.height = height;
+        td.format = kHdrFormat;
+        td.isRenderTarget = true;
+        td.initialState = nvrhi::ResourceStates::ShaderResource; // imported into the graph with this as initial AND final state
+        td.keepInitialState = false;
+        td.debugName = vp.name + " (cloud history)";
+        vp.cloudHistory[i] = dev->createTexture(td);
+    }
+    vp.cloudHistoryWidth = width;
+    vp.cloudHistoryHeight = height;
+    vp.cloudHistoryValid = false;
+}
+
 // Entity ids instead of colors, same geometry and depth test as the G-buffer pass.
 void recordPick(Impl& s, const ViewFrame& vf, const PickData& d, RgPassContext& ctx) {
     nvrhi::ICommandList* cmd = ctx.cmd();
@@ -478,11 +563,11 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
     const f32 aspect = static_cast<f32>(vp.width) / static_cast<f32>(vp.height);
     const f32 time = std::chrono::duration<f32>(std::chrono::steady_clock::now() - startTime).count();
     const RenderViewParams view = resolveView(vp, slot, aspect);
-    fillConstants(vf.constants, view, slot, vp.width, vp.height, time);
-    fillShadows(vf, view, desc);
+    fillConstants(vf.constants, view, slot, vp.width, vp.height, time, settings);
+    fillShadows(vf, view, settings);
     // Sky light and aerial perspective need the tables, a sun to light them, and a view that draws the sky.
     atmosphere.fillView(vf.constants);
-    if (vf.constants.sunDirection.w < 0.5f || !HasFlag(vp.flags, ViewportFlags::Sky)) vf.constants.atmosphere1.y = 0.0f;
+    if (!settings.atmosphere || vf.constants.sunDirection.w < 0.5f || !HasFlag(vp.flags, ViewportFlags::Sky)) vf.constants.atmosphere1.y = 0.0f;
 
     RenderGraph& g = *vp.graph;
     g.reset(frame);
@@ -620,6 +705,64 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
                 return deferredBindings(*self, *frameData, d, ctx);
             });
     }
+
+    // Volumetric clouds over the empty pixels: trace (half res) -> resolve with the history -> composite.
+    const bool cloudsOn = clouds.ready() && clouds.desc().enabled && HasFlag(vp.flags, ViewportFlags::Sky) &&
+                          vf.constants.atmosphere1.y > 0.5f;
+    if (cloudsOn) {
+        const u32 cw = std::max(1u, (vp.width + 1) / 2), ch = std::max(1u, (vp.height + 1) / 2);
+        ensureCloudTargets(*this, vp, cw, ch);
+        // History from a frame that was not the previous one (viewport hidden, camera cut) is not trusted.
+        if (vp.cloudLastFrame + 1 != frame) vp.cloudHistoryValid = false;
+        clouds.fill(vf.clouds, time, frame, vp.cloudHistoryValid ? 0.12f : 1.0f);
+        vf.clouds.prevViewProj = vp.cloudPrevViewProj;
+        vf.cloudCb = vp.cloudCb.Get();
+
+        const u32 write = vp.cloudWrite ^ 1;
+        vp.cloudWrite = write;
+        const RgTexture historyPrev = g.importTexture(vp.cloudHistory[write ^ 1].Get(), nvrhi::ResourceStates::ShaderResource,
+                                                      nvrhi::ResourceStates::ShaderResource, "CloudHistoryPrev");
+        const RgTexture historyNext = g.importTexture(vp.cloudHistory[write].Get(), nvrhi::ResourceStates::ShaderResource,
+                                                      nvrhi::ResourceStates::ShaderResource, "CloudHistoryNext");
+        RgTextureDesc cloudDesc;
+        cloudDesc.width = cw;
+        cloudDesc.height = ch;
+        cloudDesc.format = kHdrFormat;
+        cloudDesc.renderTarget = true;
+        cloudDesc.name = "CloudsRaw";
+        RgTexture raw;
+        AddFullscreenPass<CloudTraceData>(
+            g, services, "CloudTrace", {"clouds.psClouds", clouds.traceLayout()},
+            [&](RgPassBuilder& b, CloudTraceData& d) {
+                d.depth = b.read(depth, RgAccess::SampledRead);
+                raw = b.createTexture(cloudDesc);
+                d.out = b.colorTarget(0, raw);
+            },
+            [self, frameData](const CloudTraceData& d, RgPassContext& ctx) { return cloudTraceBindings(*self, *frameData, d, ctx); });
+        AddFullscreenPass<CloudResolveData>(
+            g, services, "CloudResolve", {"clouds_post.psCloudResolve", clouds.postLayout()},
+            [&](RgPassBuilder& b, CloudResolveData& d) {
+                d.current = b.read(raw, RgAccess::SampledRead);
+                d.history = b.read(historyPrev, RgAccess::SampledRead);
+                d.out = b.colorTarget(0, historyNext);
+            },
+            [self, frameData](const CloudResolveData& d, RgPassContext& ctx) {
+                return cloudPostBindings(*self, *frameData, ctx.texture(d.current), ctx.texture(d.history), nvrhi::Format::UNKNOWN, ctx);
+            });
+        AddFullscreenPass<CloudCompositeData>(
+            g, services, "CloudComposite", {"clouds_post.psCloudComposite", clouds.postLayout(), RgBlend::Premultiplied},
+            [&](RgPassBuilder& b, CloudCompositeData& d) {
+                d.clouds = b.read(historyNext, RgAccess::SampledRead);
+                d.depth = b.read(depth, RgAccess::SampledRead);
+                d.hdr = b.colorTarget(0, hdr);
+            },
+            [self, frameData](const CloudCompositeData& d, RgPassContext& ctx) {
+                return cloudPostBindings(*self, *frameData, ctx.texture(d.clouds), ctx.texture(d.depth), nvrhi::Format::R32_FLOAT, ctx);
+            });
+        vp.cloudHistoryValid = true;
+        vp.cloudLastFrame = frame;
+    }
+    vp.cloudPrevViewProj = vf.constants.viewProj;
 
     if (HasFlag(vp.flags, ViewportFlags::Grid)) {
         AddFullscreenPass<GridData>(

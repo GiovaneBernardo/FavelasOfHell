@@ -146,6 +146,23 @@ struct AtmosphereDesc {
     u32 scatteringOrders = 4;     // 1 = single scattering only, 4 is the reference default
 };
 
+// Volumetric clouds: one horizontal layer, ray marched at half resolution and lit by the sun through the
+// atmosphere tables (so they redden at dusk and darken at night). Applies to every viewport with the Sky flag from
+// the next frame. Only visible sky pixels cost anything; `quality` trades ray march steps for noise.
+struct CloudDesc {
+    bool enabled = true;
+    f32 baseAltitude = 1500.0f; // m above sea level
+    f32 thickness = 1800.0f;    // m
+    f32 coverage = 0.5f;        // 0 = clear sky, 1 = overcast
+    f32 density = 1.0f;         // multiplier of the extinction: higher = darker, more opaque clouds
+    f32 windSpeed = 6.0f;       // m/s
+    f32 windDirection = 40.0f;  // degrees in the ground plane (0 = +X, 90 = +Z)
+    f32 cloudScale = 1.0f;      // feature size multiplier
+    f32 detail = 0.4f;          // strength of the small-scale erosion, 0..1
+    f32 ambient = 1.0f;         // multiplier of the sky-light part of the shading
+    u32 quality = 1;            // 0 low, 1 medium, 2 high (ray march steps)
+};
+
 struct AtmosphereStatus {
     enum class Phase : u8 {
         Missing,    // no tables yet: the sky falls back to a plain gradient
@@ -163,6 +180,17 @@ struct AtmosphereStatus {
     std::string message; // what happened last (loaded / generated / error)
 };
 
+// Quality and pass switches, applied to every viewport from the next frame (editor: Render Graph panel).
+struct RenderSettings {
+    bool shadows = true;           // ShadowCascades pass (off: the pass only clears a 1x1 stand-in)
+    u32 shadowCascadeSize = 2048;  // texels per cascade side (four cascades, one 2x2 atlas)
+    f32 shadowDistance = 400.0f;   // meters from the camera; farther surfaces are unshadowed
+    bool atmosphere = true;        // sky, sun color and ambient from the atmosphere tables (off: gradient sky, constant ambient)
+    bool aerialPerspective = true; // distance haze on lit pixels (needs `atmosphere`)
+    f32 exposure = 1.0f;           // linear multiplier before tonemapping
+    bool dither = true;            // sub-LSB noise on the output against 8-bit banding
+};
+
 struct RendererDesc {
     JobSystem* jobs = nullptr; // not owned; recording and per-viewport work run on it
     bool validation =
@@ -178,7 +206,7 @@ struct RendererDesc {
     u32 minPassesPerGroup = 4;
     // Imported textures are uploaded in the background: at most this many bytes of texture data per frame.
     u64 textureUploadBudget = 32ull << 20;
-    // Sun shadows: four cascades of shadowCascadeSize^2 texels (one 2x2 atlas per viewport).
+    // Initial values of RenderSettings::shadowCascadeSize / shadowDistance.
     u32 shadowCascadeSize = 2048;
     f32 shadowDistance = 400.0f; // meters from the camera; farther surfaces are unshadowed
     std::filesystem::path shaderDirectory; // default: <exe dir>/shaders
@@ -233,6 +261,10 @@ public:
     bool hasMaterial(const AssetId& id) const;
     TextureStats textureStats() const;
 
+    // ---- settings ----
+    void setRenderSettings(const RenderSettings& settings);
+    const RenderSettings& renderSettings() const;
+
     // ---- atmosphere ----
     // The sky, the sun's color and the ambient light come from lookup tables precomputed on the GPU. They are
     // loaded from the cache file at start-up and generated (then cached) once if there is none. This rebuilds
@@ -243,6 +275,10 @@ public:
     // The parameters the tables in use were generated with.
     const AtmosphereDesc& atmosphereDesc() const;
     AtmosphereStatus atmosphereStatus() const;
+
+    // ---- clouds ----
+    void setClouds(const CloudDesc& desc);
+    const CloudDesc& clouds() const;
 
     // ---- scenes ----
     SceneId createScene(const char* name);

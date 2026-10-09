@@ -1,0 +1,209 @@
+// Volumetric clouds: a ray march through a horizontal slab, at HALF resolution and one jittered sample per
+// pixel (clouds_post.slang accumulates the jitter over time and composites). The result is premultiplied:
+// rgb = radiance the clouds add, a = transmittance (1 = clear sky).
+//
+// What keeps it cheap:
+//  - pixels whose 2x2 full-resolution block is all geometry exit at once, so only the visible sky is marched;
+//  - the ray only covers the slab (a handful of metres looking up, capped at the max distance when grazing);
+//  - the weather map is read first: where it says "no cloud" the 3D noise is never fetched;
+//  - the detail noise and the light march (5 cheap taps toward the sun) only run inside actual cloud.
+//
+// Lighting: the sun is attenuated by the Bruneton transmittance table at the cloud layer, scattered with a
+// dual-lobe Henyey-Greenstein phase and three octaves of "multiple scattering" (Hillaire), and shadowed by the
+// light march. The ambient comes from the sky irradiance table (and the ground bounce for the dark underside).
+// The result is veiled by the aerial perspective table at the cloud's mean distance.
+#include "common/view.slangh"
+#include "common/fullscreen.slangh"
+#include "common/clouds.slangh"
+
+ConstantBuffer<ViewConstants> g_view : register(b0);
+ConstantBuffer<CloudConstants> g_cloud : register(b1);
+Texture2D<float> g_depth : register(t0);
+Texture2D<float4> g_atmoTransmittance : register(t1);
+Texture3D<float4> g_atmoScattering : register(t2);
+Texture2D<float4> g_atmoIrradiance : register(t3);
+Texture3D<float4> g_shape : register(t4);
+Texture3D<float4> g_detail : register(t5);
+Texture2D<float4> g_weather : register(t6);
+SamplerState g_atmoSampler : register(s0);
+SamplerState g_wrap : register(s1);
+
+#include "common/atmosphere.slangh"
+
+static const float kPi = 3.14159265;
+
+// Three octaves of multiple scattering still lose the higher orders: a thick cloud should return about E / pi of the
+// sun irradiance and the octaves alone give about half of that. Calibrated against that, not a physical constant.
+static const float kSunScatterBoost = 2.4;
+
+// Light march: five cheap taps toward the sun, each step twice the last (length, distance of the tap's middle).
+static const float kLightStep[5] = {30.0, 60.0, 120.0, 240.0, 480.0};
+static const float kLightDist[5] = {15.0, 60.0, 150.0, 330.0, 690.0};
+
+float remap(float v, float lo, float hi, float newLo, float newHi)
+{
+    return newLo + (v - lo) / (hi - lo) * (newHi - newLo);
+}
+
+float henyeyGreenstein(float cosTheta, float g)
+{
+    float g2 = g * g;
+    return (1.0 - g2) / (4.0 * kPi * pow(max(1.0 + g2 - 2.0 * g * cosTheta, 1e-4), 1.5));
+}
+
+// Silver lining forward, a soft backward lobe so the far side of a cloud is not black.
+float cloudPhase(float cosTheta, float anisotropy)
+{
+    return lerp(henyeyGreenstein(cosTheta, -0.3 * anisotropy), henyeyGreenstein(cosTheta, 0.75 * anisotropy), 0.7);
+}
+
+float interleavedGradientNoise(float2 p)
+{
+    return frac(52.9829189 * frac(dot(p, float2(0.06711056, 0.00583715))));
+}
+
+// Rounded bottom, fluffy top for cumulus (type 1); a flat sheet for stratus (type 0).
+float heightGradient(float h, float type)
+{
+    float bottom = saturate(remap(h, 0.0, 0.12, 0.0, 1.0));
+    float cumulus = bottom * saturate(remap(h, 0.55, 1.0, 1.0, 0.0));
+    float stratus = bottom * saturate(remap(h, 0.15, 0.35, 1.0, 0.0));
+    return lerp(stratus, cumulus, type);
+}
+
+// Cloud density (1 / extinction scale) at a world position. `withDetail` adds the erosion noise, which only the
+// view march needs.
+float cloudDensity(float3 p, bool withDetail)
+{
+    float h = (p.y - g_cloud.layer.x) / (g_cloud.layer.y - g_cloud.layer.x);
+    if (h <= 0.0 || h >= 1.0) return 0.0;
+
+    float2 weatherUv = (p.xz + g_cloud.wind.xz) * g_cloud.noise.z;
+    float4 weather = g_weather.SampleLevel(g_wrap, weatherUv, 0);
+    float mask = saturate((weather.r + g_cloud.layer.z - 1.0) * 2.5);
+    if (mask <= 0.0) return 0.0; // nothing here: skip the 3D fetches
+
+    float grad = heightGradient(h, saturate(weather.g * 1.6 - 0.2));
+    if (grad <= 0.0) return 0.0;
+
+    float4 s = g_shape.SampleLevel(g_wrap, (p + g_cloud.wind.xyz) * g_cloud.noise.x, 0);
+    float shapeFbm = s.g * 0.625 + s.b * 0.25 + s.a * 0.125;
+    float baseShape = saturate(remap(s.r, shapeFbm - 1.0, 1.0, 0.0, 1.0));
+    float d = saturate((baseShape * grad - (1.0 - mask)) / max(mask, 1e-3)) * mask;
+    if (d <= 0.0) return 0.0;
+
+    if (withDetail) {
+        float4 t = g_detail.SampleLevel(g_wrap, (p + g_cloud.wind.xyz * 1.7) * g_cloud.noise.y, 0);
+        float detailFbm = t.r * 0.625 + t.g * 0.25 + t.b * 0.125;
+        float erode = lerp(detailFbm, 1.0 - detailFbm, saturate(h * 4.0)) * g_cloud.noise.w;
+        d = saturate(remap(d, erode, 1.0, 0.0, 1.0));
+    }
+    return d * g_cloud.layer.w;
+}
+
+[shader("fragment")]
+float4 psClouds(FullscreenOut i) : SV_Target0
+{
+    const float4 kClear = float4(0.0, 0.0, 0.0, 1.0);
+    int2 px = int2(i.position.xy);
+
+    // Geometry covers the whole block: nothing to draw here.
+    int2 full = px * 2;
+    if (g_depth.Load(int3(full, 0)) > 0.0 && g_depth.Load(int3(full + int2(1, 0), 0)) > 0.0 &&
+        g_depth.Load(int3(full + int2(0, 1), 0)) > 0.0 && g_depth.Load(int3(full + int2(1, 1), 0)) > 0.0) {
+        return kClear;
+    }
+
+    float3 ro = g_view.cameraPos.xyz;
+    float3 dir = normalize(worldPointAt(g_view.invViewProj, i.ndc, 1.0) - ro);
+    float base = g_cloud.layer.x, top = g_cloud.layer.y;
+    float maxDist = g_cloud.misc.z;
+
+    // Ray vs. slab.
+    float t0, t1;
+    if (abs(dir.y) < 1e-4) {
+        if (ro.y < base || ro.y > top) return kClear;
+        t0 = 0.0;
+        t1 = maxDist;
+    } else {
+        float tb = (base - ro.y) / dir.y, tt = (top - ro.y) / dir.y;
+        t0 = max(min(tb, tt), 0.0);
+        t1 = min(max(tb, tt), maxDist);
+    }
+    if (t1 <= t0) return kClear;
+
+    AtmoRt atmo = atmoFromView(g_view);
+    float3 sunDir = -g_view.sunDirection.xyz;
+    float cosTheta = dot(dir, sunDir);
+
+    // Light that arrives at the cloud layer (taken at its middle: it hardly varies across the slab).
+    float3 midKm = atmoPosition(atmo, float3(ro.x, 0.5 * (base + top), ro.z), ro);
+    float rMid = length(midKm);
+    float muSMid = dot(midKm, sunDir) / rMid;
+    float3 sunE = g_view.sunColor.rgb * atmoTransmittanceToSun(atmo, rMid, muSMid);
+    float3 skyE = atmoSkyIrradiance(atmo, rMid, muSMid) * g_view.sunColor.rgb;
+    float3 ambientTop = skyE * (1.0 / kPi);
+    float3 ambientBottom = atmo.groundAlbedo * (sunE * max(muSMid, 0.0) + skyE) * (1.0 / kPi) * 0.5 + ambientTop * 0.25;
+
+    // Phase function values do not change along the ray: one per multiple-scattering octave.
+    float phase[3];
+    [unroll] for (int o = 0; o < 3; ++o) phase[o] = cloudPhase(cosTheta, pow(0.5, o));
+
+    float steps = round(lerp(g_cloud.march.y, g_cloud.march.x, saturate(abs(dir.y) * 1.5)));
+    float dt = (t1 - t0) / steps;
+    float jitter = frac(interleavedGradientNoise(float2(px)) + g_cloud.misc.x * 0.61803398875);
+    float t = t0 + dt * jitter;
+    float extinction = g_cloud.march.z;
+
+    float transmittance = 1.0;
+    float3 radiance = 0.0;
+    float distSum = 0.0, weightSum = 0.0;
+    for (int s = 0; s < (int)steps; ++s, t += dt) {
+        float3 p = ro + dir * t;
+        if (cloudDensity(p, false) <= 0.0) continue;
+        float d = cloudDensity(p, true);
+        if (d <= 0.0) continue;
+
+        float lightDepth = 0.0;
+        [unroll] for (int k = 0; k < 5; ++k) {
+            lightDepth += cloudDensity(p + sunDir * kLightDist[k], false) * kLightStep[k];
+        }
+        lightDepth *= extinction;
+
+        float h = saturate((p.y - base) / (top - base));
+        float3 inscatter = 0.0;
+        [unroll] for (int o = 0; o < 3; ++o) {
+            float octave = pow(0.5, o); // scattering, extinction and anisotropy all drop by half per order
+            inscatter += octave * phase[o] * exp(-lightDepth * octave) * sunE;
+        }
+        inscatter *= kSunScatterBoost;
+        float3 ambient = lerp(ambientBottom, ambientTop, smoothstep(0.0, 0.8, h)) * exp(-lightDepth * 0.15) * g_cloud.misc.w;
+
+        // Energy-conserving integration over the step: sigma_s cancels against the extinction in the integral.
+        float stepTransmittance = exp(-d * extinction * dt);
+        float contribution = transmittance * (1.0 - stepTransmittance);
+        radiance += contribution * (inscatter + ambient);
+        distSum += t * contribution;
+        weightSum += contribution;
+        transmittance *= stepTransmittance;
+        if (transmittance < 0.02) {
+            transmittance = 0.0;
+            break;
+        }
+    }
+    if (weightSum < 1e-4) return kClear;
+
+    // Aerial perspective at the cloud's mean distance. The air between the eye and the cloud was already in the
+    // sky behind it, so the in-scattering only replaces the part of the sky the cloud hides.
+    float meanDist = distSum / weightSum;
+    float3 cameraKm = atmoPosition(atmo, ro, ro);
+    float3 pointKm = atmoPosition(atmo, ro + dir * meanDist, ro);
+    float3 apTransmittance;
+    float3 apInscatter = atmoSkyRadianceToPoint(atmo, cameraKm, pointKm, sunDir, apTransmittance);
+    float coverage = 1.0 - transmittance;
+    radiance = radiance * apTransmittance + apInscatter * g_view.sunColor.rgb * coverage;
+
+    // Fade out toward the max distance instead of cutting the slab off.
+    float fade = 1.0 - smoothstep(0.6, 1.0, meanDist / maxDist);
+    return float4(radiance * fade, lerp(1.0, transmittance, fade));
+}

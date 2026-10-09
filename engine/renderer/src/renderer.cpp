@@ -44,6 +44,7 @@ Renderer::~Renderer() {
     m_impl->viewports.clear();
     m_impl->windowGraph.reset();
     m_impl->atmosphere.shutdown();
+    m_impl->clouds.shutdown();
     m_impl->gpu = {};
     m_impl->pipelines.reset();
     m_impl->shaders.reset();
@@ -54,6 +55,8 @@ std::unique_ptr<Renderer> Renderer::create(const RendererDesc& desc) {
     std::unique_ptr<Renderer> self(new Renderer());
     Impl& s = *self->m_impl;
     s.desc = desc;
+    s.settings.shadowCascadeSize = desc.shadowCascadeSize;
+    s.settings.shadowDistance = desc.shadowDistance;
 
     GraphicsDeviceDesc dd;
     dd.validation = desc.validation;
@@ -188,6 +191,7 @@ std::unique_ptr<Renderer> Renderer::create(const RendererDesc& desc) {
         const std::filesystem::path cacheDir = desc.cacheDirectory.empty() ? GetExecutableDirectory() / "cache" : desc.cacheDirectory;
         s.atmosphere.init(dev, s.shaders.get(), s.pipelines.get(), desc.jobs, cacheDir / "atmosphere.lut");
     }
+    s.clouds.init(dev, s.shaders.get(), s.pipelines.get());
 
     RenderGraphConfig gc;
     gc.jobs = desc.jobs;
@@ -214,11 +218,27 @@ SceneSlot* Renderer::Impl::findScene(SceneId id) {
     return nullptr;
 }
 
+// ---- settings ---------------------------------------------------------------------------------------
+
+void Renderer::setRenderSettings(const RenderSettings& settings) {
+    RenderSettings& s = m_impl->settings;
+    s = settings;
+    s.shadowCascadeSize = std::clamp(s.shadowCascadeSize, 256u, 8192u);
+    s.shadowDistance = std::clamp(s.shadowDistance, 1.0f, 5000.0f);
+    s.exposure = std::clamp(s.exposure, 0.0f, 1000.0f);
+}
+const RenderSettings& Renderer::renderSettings() const { return m_impl->settings; }
+
 // ---- atmosphere ---------------------------------------------------------------------------------
 
 void Renderer::generateAtmosphere(const AtmosphereDesc& desc) { m_impl->atmosphere.request(desc); }
 const AtmosphereDesc& Renderer::atmosphereDesc() const { return m_impl->atmosphere.desc(); }
 AtmosphereStatus Renderer::atmosphereStatus() const { return m_impl->atmosphere.status(); }
+
+// ---- clouds -----------------------------------------------------------------------------------------
+
+void Renderer::setClouds(const CloudDesc& desc) { m_impl->clouds.set(desc); }
+const CloudDesc& Renderer::clouds() const { return m_impl->clouds.desc(); }
 
 // ---- scenes ---------------------------------------------------------------------------------
 
@@ -500,6 +520,7 @@ void Renderer::beginFrame() {
     s.frame = s.device->frameNumber();
     s.shaders->pollReload();
     s.atmosphere.pump();
+    s.clouds.pump();
     s.pipelines->collect(s.frame, 3600); // a minute: rarely used variants (masked, double-sided) must not recompile on every use
     {
         // Background texture uploads under a byte budget; materials then pick up the new slots.

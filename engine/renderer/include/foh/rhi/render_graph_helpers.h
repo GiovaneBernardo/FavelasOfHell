@@ -35,6 +35,7 @@ struct RgShaderServices {
 enum class RgBlend : u8 {
     Opaque, // overwrite
     Alpha,  // src.a * src + (1 - src.a) * dst, destination alpha kept
+    Premultiplied, // src + (1 - src.a) * dst, destination alpha kept
 };
 
 struct RgFullscreenState {
