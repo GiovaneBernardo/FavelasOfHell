@@ -37,15 +37,39 @@ inline PrefabRequest MakePrefabRequest(std::string_view sourcePath) {
     return r;
 }
 
+// A model an entity SHOWS, changeable at any time: set sourcePath (in the inspector, from the content browser's "Use as
+// model", or from game code) and the entity swaps to that model. The previous model's nodes and its Animator /
+// SkinPalette / Locomotion* components are removed first. `applied` is what is currently instantiated (managed by the
+// system; leave it alone). An empty path removes the model. Prefab edits saved next to the source (height, rotation
+// from the prefab editor) are applied, so "fix the scale once" carries over to every use.
+struct PrefabSlot {
+    char sourcePath[128] = {};
+    char applied[128] = {};
+};
+
+inline PrefabSlot MakePrefabSlot(std::string_view sourcePath) {
+    PrefabSlot s;
+    const size_t n = sourcePath.size() < sizeof(s.sourcePath) - 1 ? sourcePath.size() : sizeof(s.sourcePath) - 1;
+    for (size_t i = 0; i < n; ++i) s.sourcePath[i] = sourcePath[i];
+    return s;
+}
+
+// Tag on every entity a PrefabSlot created (nodes, skinned meshes): what a swap removes, and what first person hides.
+struct SlotModelPart {
+    u32 flags = 0;
+};
+
 // Resource: where requests are resolved. Holds a pointer into host-owned memory (like RenderSceneLink).
 struct SceneBridgeLink {
     AssetSceneBridge* bridge = nullptr;
 };
 
-// Registers PrefabRequest, SceneBridgeLink and the resolving system. The host calls it for every world that should
+// Registers PrefabRequest, PrefabSlot, SceneBridgeLink and the resolving systems. The host calls it for every world that should
 // support requests, then sets the link to its bridge.
 FOH_API void RegisterPrefabRequests(App& app);
 
 } // namespace foh
 
 FOH_REFLECT(foh::PrefabRequest, sourcePath, prefab);
+FOH_REFLECT(foh::PrefabSlot, sourcePath, applied);
+FOH_REFLECT(foh::SlotModelPart, flags);

@@ -16,3 +16,7 @@
 - No camera collision (third person can clip into walls), no aim/sprint modes, no ledge grabs or vaulting, no sound.
 - Collision is AABB only (rotated boxes use their bounds).
 - Download Mixamo "Crouch Idle" and "Crouched Walking" (plus the sneaking left/right ones) next to the other clips so the crouch animates; no jump airborne-phase clips either, the single jump clip is played from the takeoff.
+
+## Changing the model (addendum)
+
+The player shows its model through `PrefabSlot { sourcePath }` (engine, `foh/scene/prefab_request.h`) instead of the one-shot `PrefabRequest`: changing the path swaps the model at any time (old parts and animation components are removed first). Ways to change it: edit `sourcePath` in the inspector, right click a model in the content browser > "Use as player model" / "Use as model of selected entity", or set it from game code. Fixes saved with the prefab editor (height, rotation, sit on ground: the `.fvariant` next to the source) are applied. An unrigged model (a static glTF) works too: it glides without animating. To animate a model it must be rigged with the Mixamo skeleton (upload it to Mixamo, download "with skin"), because the clips find joints by name.

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "foh/log.h"
+#include "foh/scene/prefab_request.h"
 
 namespace foh::game {
 
@@ -182,6 +183,8 @@ void PlayerMoveSystem(Res<Time> time, Res<GameInput> input, Res<PlayerLook> look
 // ---- camera --------------------------------------------------------------------------------------
 
 void PlayerCameraSystem(Res<Time> time, Res<PlayerLook> look, ResMut<PlayerView> view, Commands commands,
+                        Query<Entity, With<SlotModelPart>, Without<Hidden>> shownParts,
+                        Query<Entity, With<SlotModelPart>, With<Hidden>> hiddenParts,
                         Query<Transform&, Camera&, const PlayerCamera&> cameras) {
     if (!view->valid) return;
     const f32 dt = std::min(time->delta, kMaxDt);
@@ -195,6 +198,11 @@ void PlayerCameraSystem(Res<Time> time, Res<PlayerLook> look, ResMut<PlayerView>
             else commands.entity(Entity{view->entity}).remove<Hidden>();
         }
     }
+
+    // The parts of the model (static meshes of an unrigged model, skinned meshes) follow the same rule; checked every
+    // frame so a model swapped while in first person comes up hidden too.
+    if (look->firstPerson) shownParts.each([&](Entity e) { commands.entity(e).insert(Hidden{}); });
+    else hiddenParts.each([&](Entity e) { commands.entity(e).remove<Hidden>(); });
 
     cameras.each([&](Transform& t, Camera& camera, const PlayerCamera& settings) {
         const f32 crouch = view->crouch01;

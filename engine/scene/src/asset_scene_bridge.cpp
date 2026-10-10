@@ -5,6 +5,7 @@
 
 #include "foh/animation/components.h"
 #include "foh/log.h"
+#include "foh/utf8_path.h"
 
 namespace foh {
 
@@ -26,20 +27,31 @@ PrefabInstanceResult AssetSceneBridge::instantiate(World& world, AssetId prefabO
 AssetId AssetSceneBridge::findPrefab(const std::string& sourcePath) const {
     const SourceRecord* record = m_db.findSource(sourcePath);
     if (!record) return {};
+    AssetId prefab;
     for (const SubAssetRecord& s : record->subAssets)
-        if (!s.tombstone && s.kind == AssetKind::Prefab) return s.guid;
-    return {};
+        if (!s.tombstone && s.kind == AssetKind::Prefab) prefab = s.guid;
+    if (!prefab.isValid()) return {};
+    // The prefab editor saves its fixes as <source>.fvariant next to the source.
+    std::filesystem::path variantPath = PathFromUtf8(sourcePath);
+    variantPath.replace_extension(".fvariant");
+    if (const AssetId variant = m_db.findAuthored(PathToUtf8(variantPath)); variant.isValid()) {
+        PrefabVariantAsset v;
+        if (m_db.load(variant, v) && v.base == prefab) return variant;
+    }
+    return prefab;
 }
 
-bool AssetSceneBridge::instantiateInto(World& world, Entity root, AssetId prefabOrVariant, std::string* error) {
+bool AssetSceneBridge::instantiateInto(World& world, Entity root, AssetId prefabOrVariant, std::string* error,
+                                       PrefabInstanceResult* result) {
     VariantApplyResult resolved;
     if (!m_db.loadResolvedPrefab(prefabOrVariant, resolved, error)) return false;
     for (const PrefabNode& node : resolved.prefab.nodes) {
         m_loader.request(node.mesh);
         for (const AssetId& material : node.materials) m_loader.request(material);
     }
-    InstantiatePrefabInto(world, root, resolved.prefab);
+    PrefabInstanceResult instance = InstantiatePrefabInto(world, root, resolved.prefab);
     assignLocomotionClips(world, root);
+    if (result) *result = std::move(instance);
     return true;
 }
 

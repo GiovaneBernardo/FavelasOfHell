@@ -952,6 +952,10 @@ void ContentBrowser::entryContextMenu(const Entry& e) {
             refresh();
         }
         if (ImGui::MenuItem("Edit prefab...") && m_actions.editPrefab) m_actions.editPrefab(e.rel);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Use as player model") && m_actions.useAsModel) m_actions.useAsModel(e.rel, true);
+        if (ImGui::MenuItem("Use as model of selected entity") && m_actions.useAsModel) m_actions.useAsModel(e.rel, false);
+        ImGui::Separator();
         if (ImGui::MenuItem(isImported(e) ? "Reimport" : "Import")) {
             if (m_actions.importFile) m_actions.importFile(absolute(e.rel));
             refresh();

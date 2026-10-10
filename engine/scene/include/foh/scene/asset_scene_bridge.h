@@ -27,12 +27,14 @@ public:
     // once; the meshes appear as their data arrives. root == Entity{} and `error` set on failure.
     PrefabInstanceResult instantiate(World& world, AssetId prefabOrVariant, const Transform& at, std::string* error = nullptr);
 
-    // The prefab of an imported source ("imported/Y Bot/Y Bot.fbx"); invalid while it is not imported (yet).
+    // The prefab of an imported source ("imported/Y Bot/Y Bot.fbx"), or the variant saved next to it by the prefab
+    // editor when there is one; invalid while it is not imported (yet).
     AssetId findPrefab(const std::string& sourcePath) const;
 
     // Instantiates a prefab into an existing entity (see InstantiatePrefabInto) and requests what it needs. For a
     // skinned prefab the locomotion clips are assigned too. False with `error` set when the prefab cannot be loaded.
-    bool instantiateInto(World& world, Entity root, AssetId prefabOrVariant, std::string* error = nullptr);
+    bool instantiateInto(World& world, Entity root, AssetId prefabOrVariant, std::string* error = nullptr,
+                         PrefabInstanceResult* result = nullptr);
 
     // Fills LocomotionClips of a character root from the imported clips, matched by the names Mixamo gives its
     // downloads ("walking", "left strafe walking", "crouch idle", ...), and requests them. Missing ones stay empty.

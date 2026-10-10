@@ -105,12 +105,13 @@ void SpawnTestScene(World& world) {
     const Vec3 sunDir = glm::normalize(Vec3(-0.45f, -0.8f, -0.35f));
     world.spawn(Transform{{0, 0, 0}, glm::quatLookAt(sunDir, Vec3(0, 1, 0)), {1, 1, 1}}, DirectionalLight{});
 
-    // The player: outside the block grid, facing the city. The model is requested by source path and appears when it
-    // is imported (the editor's asset workshop / drag and drop): until then the player still moves, invisibly.
+    // The player: outside the block grid, facing the city. The model is a PrefabSlot: change its path in the inspector (or
+    // right click a model in the content browser > "Use as player model") and the player swaps to it. Until the model is
+    // imported the player still moves, invisibly.
     Transform start;
     start.position = Vec3(0.0f, 0.0f, 21.0f);
     start.rotation = glm::angleAxis(math::kPi, Vec3(0.0f, 1.0f, 0.0f)); // the character faces +Z; turn it toward -Z
-    world.spawn(start, Name::Make("Player"), Player{}, LocomotionControl{}, MakePrefabRequest("imported/Y Bot/Y Bot.fbx"));
+    world.spawn(start, Name::Make("Player"), Player{}, LocomotionControl{}, MakePrefabSlot("imported/Y Bot/Y Bot.fbx"));
 
     // The game camera: follows the player (third or first person, V toggles).
     Camera camera;

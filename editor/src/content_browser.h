@@ -33,6 +33,8 @@ struct ContentBrowserActions {
     std::function<void()> openWorkshop;
     // Opens the prefab editor on a model or a prefab variant (path relative to the asset root).
     std::function<void(const std::string& relPath)> editPrefab;
+    // Makes a model the one shown by the selected entity (PrefabSlot), or by the game's player (player = true).
+    std::function<void(const std::string& relPath, bool player)> useAsModel;
 };
 
 // Drag-and-drop payload type: a null-terminated source path relative to the asset root.

@@ -16,6 +16,7 @@
 #include "foh/dev_build_defaults.h"
 #include "foh/file_system.h"
 #include "foh/log.h"
+#include "foh/ecs/inspect.h"
 #include "foh/input.h"
 #include "foh/renderer/components.h"
 #include "foh/scene/prefab_request.h"
@@ -209,6 +210,7 @@ void Editor::initAssets() {
     actions.placeModel = [this](const std::string& rel) { placeAssetByPath(rel, 0, 0, false); };
     actions.openWorkshop = [this] { m_showWorkshop = true; };
     actions.editPrefab = [this](const std::string& rel) { openPrefabEditor(rel); };
+    actions.useAsModel = [this](const std::string& rel, bool player) { useAsModel(rel, player); };
     m_browser.init(*m_assets, m_thumbs, m_prefs, m_assetLog, std::move(actions));
 
     WorkshopHost host;
@@ -384,6 +386,40 @@ void Editor::instantiateAsset(AssetId prefab, size_t sceneIndex, const Transform
         }
     }
     logAsset("Placed " + std::to_string(inst.entities.size()) + " entities into '" + m_scenes[sceneIndex].name + "'.");
+}
+
+// Gives an entity a model to show (PrefabSlot): the selected one, or the game's player (the entity that has a slot and a
+// LocomotionControl). The model is imported first when it is not yet; the slot waits for it.
+void Editor::useAsModel(const std::string& relPath, bool player) {
+    size_t sceneIndex = m_selection.scene;
+    Entity target = kNullEntity;
+    if (player) {
+        sceneIndex = 0;
+        World& world = m_scenes[0].app->world();
+        const ComponentId with[] = {world.component<PrefabSlot>(), world.component<LocomotionControl>()};
+        std::vector<Entity> found;
+        findEntities(world, with, {}, found);
+        if (!found.empty()) target = found.front();
+        else logAsset("The game has no player to give a model to.");
+    } else if (m_selection.valid(m_sceneRefs)) {
+        target = m_selection.entity;
+    } else {
+        logAsset("Select an entity first (Entities panel), or use \"Use as player model\".");
+    }
+    if (target.isNull()) return;
+
+    if (!m_assetBridge->findPrefab(relPath).isValid() && !m_assets->findSource(relPath)) {
+        importFile(m_assets->sourceRoot() / PathFromUtf8(relPath), 0, 0, false, false); // the slot waits for the import
+    }
+    World& world = m_scenes[sceneIndex].app->world();
+    const PrefabSlot slot = [&] {
+        PrefabSlot s = world.has<PrefabSlot>(target) ? *world.get<PrefabSlot>(target) : PrefabSlot{};
+        const PrefabSlot wanted = MakePrefabSlot(relPath);
+        std::memcpy(s.sourcePath, wanted.sourcePath, sizeof(s.sourcePath));
+        return s;
+    }();
+    world.insert(target, slot);
+    logAsset("Model of the " + std::string(player ? "player" : "selected entity") + ": " + relPath);
 }
 
 // A placed character gets the locomotion clips that were imported next to it (the bridge matches Mixamo's names).
@@ -973,6 +1009,7 @@ void Editor::buildUi(float dt) {
         m_dockLayoutBuilt = true;
     }
 
+    if (!m_options.playerModel.empty() && m_frameCount == 10) useAsModel(m_options.playerModel, true);
     if (!m_options.autoplay.empty() && m_frameCount == 5) ImGui::SetWindowFocus("Game"); // QA: show the game view
     if (m_options.waterTest >= 0 && m_frameCount == 2) ImGui::SetWindowFocus("Water Test");
     if (!m_options.prefabEdit.empty() && m_options.walkSpeed > 0.0f && m_frameCount == 40) ImGui::SetWindowFocus(m_viewports[m_previewViewport].title.c_str()); // QA: show the stage

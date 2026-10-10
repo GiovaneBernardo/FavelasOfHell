@@ -50,6 +50,8 @@ int main(int argc, char** argv) {
             options.openWorkshop = true;
         } else if (!std::strcmp(argv[i], "--water-test")) {
             options.waterTest = (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') ? std::atoi(argv[++i]) : 0;
+        } else if (!std::strcmp(argv[i], "--player-model") && i + 1 < argc) {
+            options.playerModel = argv[++i];
         } else if (!std::strcmp(argv[i], "--autoplay") && i + 1 < argc) {
             options.autoplay = argv[++i];
         } else if (!std::strcmp(argv[i], "--walk") && i + 1 < argc) {
