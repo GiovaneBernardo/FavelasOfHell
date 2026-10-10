@@ -5,8 +5,13 @@
 namespace foh {
 
 PrefabInstanceResult InstantiatePrefab(World& world, const PrefabAsset& prefab, const Transform& at) {
+    const Entity root = world.spawn(Name::Make(prefab.name.empty() ? "Prefab" : prefab.name), at);
+    return InstantiatePrefabInto(world, root, prefab);
+}
+
+PrefabInstanceResult InstantiatePrefabInto(World& world, Entity root, const PrefabAsset& prefab) {
     PrefabInstanceResult result;
-    result.root = world.spawn(Name::Make(prefab.name.empty() ? "Prefab" : prefab.name), at);
+    result.root = root;
     result.entities.push_back(result.root);
     if (prefab.skeleton.isValid()) {
         // A skinned character: the root animates every skinned mesh below it (bones are not entities).
@@ -15,7 +20,8 @@ PrefabInstanceResult InstantiatePrefab(World& world, const PrefabAsset& prefab, 
         world.insert(result.root, animator);
         world.insert(result.root, SkinPalette{});
         world.insert(result.root, LocomotionClips{});
-        world.insert(result.root, LocomotionControl{});
+        // Gameplay may have put its own control on the entity before the model arrived: keep it.
+        if (!world.has<LocomotionControl>(result.root)) world.insert(result.root, LocomotionControl{});
         world.insert(result.root, LocomotionState{});
     }
 

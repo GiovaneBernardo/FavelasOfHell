@@ -119,12 +119,13 @@ const TurnEntry* PickTurn(const MoveSet& set, f32 angle) {
 
 // ---- building ------------------------------------------------------------------------------------
 
-bool BuildMoveSet(const AnimationLibrary& library, const LocomotionClips& clips, MoveSet& out) {
+bool BuildMoveSet(const AnimationLibrary& library, const LocomotionClips& clips, bool crouch, MoveSet& out) {
     out = MoveSet{};
     auto clipOf = [&](const AssetId& id) { return id.isValid() ? library.clip(id) : nullptr; };
 
-    if (const ClipAsset* idle = clipOf(clips.idleClip)) {
-        out.idle = clips.idleClip;
+    const AssetId& idleId = crouch ? clips.crouchIdleClip : clips.idleClip;
+    if (const ClipAsset* idle = clipOf(idleId)) {
+        out.idle = idleId;
         out.idleDuration = std::max(idle->duration(), 0.1f);
     }
     if (const ClipAsset* jump = clipOf(clips.jumpClip)) {
@@ -132,8 +133,11 @@ bool BuildMoveSet(const AnimationLibrary& library, const LocomotionClips& clips,
         out.jumpDuration = std::max(jump->duration(), 0.1f);
     }
 
-    for (const AssetId& id : {clips.walkClip, clips.runClip, clips.sprintClip, clips.walkBackClip, clips.runBackClip, clips.walkLeftClip,
-                              clips.walkRightClip, clips.runLeftClip, clips.runRightClip}) {
+    const std::vector<AssetId> moveClips =
+        crouch ? std::vector<AssetId>{clips.crouchWalkClip, clips.crouchWalkBackClip, clips.crouchWalkLeftClip, clips.crouchWalkRightClip}
+               : std::vector<AssetId>{clips.walkClip, clips.runClip, clips.sprintClip, clips.walkBackClip, clips.runBackClip,
+                                      clips.walkLeftClip, clips.walkRightClip, clips.runLeftClip, clips.runRightClip};
+    for (const AssetId& id : moveClips) {
         const ClipAsset* clip = clipOf(id);
         if (!clip || clip->duration() <= 0.0f) continue;
         MoveEntry e;
@@ -164,6 +168,7 @@ bool BuildMoveSet(const AnimationLibrary& library, const LocomotionClips& clips,
         std::sort(ring.entries.begin(), ring.entries.end(), [&](u32 a, u32 b) { return out.entries[a].angle < out.entries[b].angle; });
 
     for (const AssetId& id : {clips.turnLeftClip, clips.turnRightClip, clips.turnLeft90Clip, clips.turnRight90Clip}) {
+        if (crouch) break; // turns are standing clips; a crouched character turns with the spring
         const ClipAsset* clip = clipOf(id);
         if (!clip || clip->duration() <= 0.0f || std::abs(clip->rootYaw()) < 0.3f) continue;
         out.turns.push_back({id, clip->rootYaw(), clip->duration()});

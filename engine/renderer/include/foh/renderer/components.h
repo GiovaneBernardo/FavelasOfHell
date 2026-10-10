@@ -122,6 +122,12 @@ struct SkinnedMesh {
     u32 flags = 0; // reserved
 };
 
+// Not drawn (and, for a character, not skinned): put it on a mesh entity or on the root of a skinned character
+// (first person hides the player's own body this way). Costs nothing for entities without it.
+struct Hidden {
+    u32 flags = 0; // reserved
+};
+
 // Perspective camera looking down the entity's local -Z (Y up).
 struct Camera {
     f32 fovY = 1.0471976f; // 60 degrees
@@ -147,5 +153,6 @@ FOH_REFLECT(foh::MeshRenderer, mesh, color, asset, submesh, material);
 FOH_REFLECT(foh::SkinMatrix, row0, row1, row2);
 FOH_REFLECT(foh::SkinPalette, matrices);
 FOH_REFLECT(foh::SkinnedMesh, flags);
+FOH_REFLECT(foh::Hidden, flags);
 FOH_REFLECT(foh::Camera, fovY, nearZ, farZ, active);
 FOH_REFLECT(foh::DirectionalLight, color, intensity);

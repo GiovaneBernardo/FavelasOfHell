@@ -1,4 +1,5 @@
 #include <chrono>
+#include <filesystem>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -6,7 +7,10 @@
 #include <thread>
 #include <vector>
 
+#include "foh/animation/animation.h"
+#include "foh/asset_db.h"
 #include "foh/dev_build_defaults.h"
+#include "foh/input.h"
 #include "foh/ecs.h"
 #include "foh/file_system.h"
 #include "foh/game_module_host.h"
@@ -17,6 +21,8 @@
 #include "foh/rhi/graphics_device.h"
 #include "foh/rhi/render_graph.h"
 #include "foh/rhi/swapchain.h"
+#include "foh/scene/asset_scene_bridge.h"
+#include "foh/scene/prefab_request.h"
 #include "foh/window.h"
 
 // Standalone player: one window, the game world, one full-window viewport that
@@ -59,11 +65,29 @@ int main(int argc, char** argv) {
     auto swapchain = foh::Swapchain::create(renderer->device(), {window->nativeWindowHandle(), w, h, vsync});
     if (!swapchain) return 1;
 
+    // Assets: imported models, clips and textures stream in from the project's cache (the same database the editor
+    // fills). Declared before the App, so they outlive the worlds that point at them.
+    foh::AnimationLibrary animation;
+    foh::AssetDbDesc assetDesc;
+    assetDesc.sourceRoot = std::filesystem::path(FOH_PROJECT_ROOT) / "assets";
+    assetDesc.cacheRoot = std::filesystem::path(FOH_PROJECT_ROOT) / "cache" / "imported";
+    assetDesc.jobs = &jobs;
+    foh::AssetDb assets(assetDesc);
+    assets.scan();
+    foh::AssetSceneBridge bridge(assets, *renderer, &jobs);
+    bridge.loader().setAnimationLibrary(&animation);
+
     foh::AppConfig appConfig;
     appConfig.jobs = &jobs;
     foh::App app(appConfig);
     foh::RenderExtractPlugin extract;
     app.addPlugin(extract);
+    foh::AnimationPlugin animationPlugin;
+    app.addPlugin(animationPlugin);
+    app.insertResource(foh::AnimationLink{&animation});
+    foh::RegisterPrefabRequests(app);
+    app.world().resource<foh::SceneBridgeLink>()->bridge = &bridge;
+    app.insertResource(foh::GameInput{});
     const foh::SceneId scene = renderer->createScene("World");
     app.world().resource<foh::RenderSceneLink>()->scene = renderer->scene(scene);
 
@@ -94,6 +118,7 @@ int main(int argc, char** argv) {
 
     auto last = Clock::now();
     foh::u32 rendered = 0;
+    window->setRelativeMouse(true); // the game owns the mouse; Escape quits
     while (window->pollEvents() && !window->input().isDown(foh::Key::Escape)) {
         const auto now = Clock::now();
         const float dt = std::min(std::chrono::duration<float>(now - last).count(), 0.1f);
@@ -112,6 +137,11 @@ int main(int argc, char** argv) {
         if (gameBuilder) gameBuilder->poll();
         if (shaderBuilder) shaderBuilder->poll();
         game.pollReload();
+        bridge.pump(); // loaded meshes, textures and clips
+        if (auto* in = app.world().resource<foh::GameInput>()) {
+            in->state = window->input();
+            in->captured = window->hasFocus();
+        }
         app.update(dt);
 
         renderer->beginFrame();

@@ -39,6 +39,10 @@ struct LocomotionClips {
     AssetId walkLeftClip, walkRightClip, runLeftClip, runRightClip;
     AssetId turnLeftClip, turnRightClip, turnLeft90Clip, turnRight90Clip;
     AssetId jumpClip;
+    // Crouched stance (LocomotionControl::crouch): its own idle and move clips, blended like the standing ones. A
+    // character without a crouch idle or crouch moves ignores the request (gameplay should still slow it down).
+    AssetId crouchIdleClip;
+    AssetId crouchWalkClip, crouchWalkBackClip, crouchWalkLeftClip, crouchWalkRightClip;
 };
 
 // What gameplay wants. Written by game code, AI or the editor, read by the locomotion system.
@@ -46,6 +50,7 @@ struct LocomotionControl {
     Vec3 velocity{0.0f}; // desired velocity in world space, meters per second (only X and Z are used)
     Vec3 facing{0.0f};   // direction to face in world space; zero: face the direction of movement
     bool jump = false;   // request the jump clip; cleared by the system when it starts
+    bool crouch = false; // crouched stance; takes effect when the crouch clips exist and no turn/jump is playing
     // The animation system moves the entity itself (Transform += smoothed velocity). Turn off when a character
     // controller / physics moves it: the system then only reads the entity's actual velocity from its movement.
     bool kinematic = true;
@@ -63,6 +68,7 @@ struct LocomotionState {
     f32 phase = 0.0f;       // gait cycle, 0..1 (0: left foot down)
     f32 idleTime = 0.0f;    // seconds on the idle clip's timeline
     u32 mode = 0;           // LocomotionMode
+    u32 stance = 0;         // 0 standing, 1 crouched (the move set in use)
     f32 modeTime = 0.0f;    // seconds since the current mode started
     AssetId oneShot;        // clip of the current Turn/OneShot
     f32 oneShotYaw = 0.0f;  // heading when it started
@@ -74,7 +80,8 @@ struct LocomotionState {
 
 FOH_REFLECT(foh::Animator, skeleton, history, playbackSpeed, transitionHalfLife, inertialElapsed, jointCount, historyValid, enabled);
 FOH_REFLECT(foh::LocomotionClips, idleClip, walkClip, runClip, sprintClip, walkBackClip, runBackClip, walkLeftClip, walkRightClip,
-            runLeftClip, runRightClip, turnLeftClip, turnRightClip, turnLeft90Clip, turnRight90Clip, jumpClip);
-FOH_REFLECT(foh::LocomotionControl, velocity, facing, jump, kinematic, velocityHalfLife, turnHalfLife, turnInPlaceDegrees);
-FOH_REFLECT(foh::LocomotionState, velocity, yawVelocity, phase, idleTime, mode, modeTime, oneShot, oneShotYaw, oneShotDuration,
+            runLeftClip, runRightClip, turnLeftClip, turnRightClip, turnLeft90Clip, turnRight90Clip, jumpClip, crouchIdleClip, crouchWalkClip, crouchWalkBackClip,
+            crouchWalkLeftClip, crouchWalkRightClip);
+FOH_REFLECT(foh::LocomotionControl, velocity, facing, jump, crouch, kinematic, velocityHalfLife, turnHalfLife, turnInPlaceDegrees);
+FOH_REFLECT(foh::LocomotionState, velocity, yawVelocity, phase, idleTime, mode, modeTime, stance, oneShot, oneShotYaw, oneShotDuration,
             initialized);

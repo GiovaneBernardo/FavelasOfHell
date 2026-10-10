@@ -3,6 +3,7 @@
 add_executable(foh_runtime src/main.cpp)
 target_link_libraries(foh_runtime PRIVATE foh::engine nvrhi)
 target_compile_definitions(foh_runtime PRIVATE
+    FOH_PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
     FOH_GAME_MODULE_FILE="modules/$<TARGET_FILE_NAME:foh_game>")
 # Building the runtime always builds the current game module and shaders as well.
 add_dependencies(foh_runtime foh_game)

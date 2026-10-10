@@ -296,7 +296,10 @@ void AssetPicker::drawPopup(AssetId& value, AssetKind kind, bool& changed) {
 
     const float rowH = ImGui::GetFrameHeight() * 1.9f;
     ImGui::Separator();
-    if (ImGui::BeginChild("##items", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()))) {
+    // Fixed size: popups auto-resize to their content, so a child sized relative to the remaining
+    // window space (0 / negative) shrinks a little every frame until the list is gone.
+    const float fs = ImGui::GetFontSize();
+    if (ImGui::BeginChild("##items", ImVec2(fs * 27.0f, fs * 24.0f))) {
         if (ImGui::Selectable("None", !value.isValid(), 0, ImVec2(0, ImGui::GetFrameHeight()))) {
             assign(value, AssetId{}, changed);
             ImGui::CloseCurrentPopup();

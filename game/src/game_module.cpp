@@ -5,9 +5,11 @@
 #include "foh/game_module.h"
 #include "foh/log.h"
 #include "foh/renderer/components.h"
+#include "foh/scene/prefab_request.h"
+#include "player.h"
 
 // Placeholder game content that exercises the engine end to end: a small test
-// "block" scene, a camera orbiting it (shown in the editor's Game viewport) and a
+// "block" scene with a playable character (player.h: WASD, Space, C, V) and a
 // few spinning objects. Edit a number below while the editor/runtime is running,
 // save, and the change appears within seconds (game module hot reload).
 
@@ -87,14 +89,15 @@ void SpawnTestScene(World& world) {
             const f32 b = static_cast<f32>((h >> 16) & 255) / 255.0f;
             const f32 height = 0.6f + static_cast<f32>((h >> 24) & 7) * 0.7f;
             world.spawn(Transform{{x * 2.2f, height * 0.5f, z * 2.2f}, Quat(1, 0, 0, 0), {1.6f, height, 1.6f}},
-                        MeshRenderer{static_cast<u32>(BuiltinMesh::Cube), {0.35f + 0.5f * r, 0.3f + 0.5f * g, 0.3f + 0.5f * b, 1}});
+                        MeshRenderer{static_cast<u32>(BuiltinMesh::Cube), {0.35f + 0.5f * r, 0.3f + 0.5f * g, 0.3f + 0.5f * b, 1}},
+                        StaticBox{});
         }
     }
 
     // Centerpiece: a sphere on a spinning cube.
     world.spawn(Transform{{0, 1.0f, 0}, Quat(1, 0, 0, 0), {2, 2, 2}},
                 MeshRenderer{static_cast<u32>(BuiltinMesh::Cube), {0.9f, 0.25f, 0.2f, 1}},
-                Spin{{0, 1, 0}, 0.8f});
+                Spin{{0, 1, 0}, 0.8f}, StaticBox{});
     world.spawn(Transform{{0, 2.9f, 0}, Quat(1, 0, 0, 0), {1.6f, 1.6f, 1.6f}},
                 MeshRenderer{static_cast<u32>(BuiltinMesh::Sphere), {0.95f, 0.8f, 0.2f, 1}});
 
@@ -102,8 +105,17 @@ void SpawnTestScene(World& world) {
     const Vec3 sunDir = glm::normalize(Vec3(-0.45f, -0.8f, -0.35f));
     world.spawn(Transform{{0, 0, 0}, glm::quatLookAt(sunDir, Vec3(0, 1, 0)), {1, 1, 1}}, DirectionalLight{});
 
-    // The game camera.
-    world.spawn(Transform{}, Camera{}, OrbitCamera{});
+    // The player: outside the block grid, facing the city. The model is requested by source path and appears when it
+    // is imported (the editor's asset workshop / drag and drop): until then the player still moves, invisibly.
+    Transform start;
+    start.position = Vec3(0.0f, 0.0f, 21.0f);
+    start.rotation = glm::angleAxis(math::kPi, Vec3(0.0f, 1.0f, 0.0f)); // the character faces +Z; turn it toward -Z
+    world.spawn(start, Name::Make("Player"), Player{}, LocomotionControl{}, MakePrefabRequest("imported/Y Bot/Y Bot.fbx"));
+
+    // The game camera: follows the player (third or first person, V toggles).
+    Camera camera;
+    camera.nearZ = 0.05f;
+    world.spawn(Transform{}, camera, PlayerCamera{}, Name::Make("Player Camera"));
 }
 
 class GamePlugin final : public Plugin {
@@ -115,7 +127,7 @@ public:
         app.addSystem(Stage::Startup, &SpawnTestScene).name("SpawnTestScene");
         app.addSystem(Stage::Update, &HelloSystem).name("HelloSystem");
         app.addSystem(Stage::Update, &SpinSystem).name("SpinSystem");
-        app.addSystem(Stage::Update, &OrbitCameraSystem).name("OrbitCameraSystem");
+        RegisterPlayer(app);
     }
 };
 

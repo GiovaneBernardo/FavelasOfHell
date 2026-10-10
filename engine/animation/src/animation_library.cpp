@@ -4,10 +4,10 @@
 
 namespace foh {
 
-u64 HashLocomotionClips(const LocomotionClips& clips) {
+u64 HashLocomotionClips(const LocomotionClips& clips, bool crouch) {
     // LocomotionClips is only AssetIds (no padding), so its bytes are its value.
-    static_assert(sizeof(LocomotionClips) == 15 * sizeof(AssetId));
-    return HashBytes(&clips, sizeof(clips));
+    static_assert(sizeof(LocomotionClips) == 20 * sizeof(AssetId));
+    return HashBytes(&clips, sizeof(clips), crouch ? 1 : 0);
 }
 
 void AnimationLibrary::rebind(const AssetId& skeleton, const AssetId& clip) {
@@ -59,17 +59,17 @@ const ClipBinding* AnimationLibrary::binding(const AssetId& skeleton, const Asse
     return it == m_bindings.end() ? nullptr : &it->second;
 }
 
-const MoveSet* AnimationLibrary::prepareMoveSet(const LocomotionClips& clips) {
-    const u64 key = HashLocomotionClips(clips);
+const MoveSet* AnimationLibrary::prepareMoveSet(const LocomotionClips& clips, bool crouch) {
+    const u64 key = HashLocomotionClips(clips, crouch);
     if (const auto it = m_moveSets.find(key); it != m_moveSets.end()) return it->second.usable() ? &it->second : nullptr;
     MoveSet set;
-    BuildMoveSet(*this, clips, set);
+    BuildMoveSet(*this, clips, crouch, set);
     const auto [it, inserted] = m_moveSets.emplace(key, std::move(set));
     return it->second.usable() ? &it->second : nullptr;
 }
 
-const MoveSet* AnimationLibrary::moveSet(const LocomotionClips& clips) const {
-    const auto it = m_moveSets.find(HashLocomotionClips(clips));
+const MoveSet* AnimationLibrary::moveSet(const LocomotionClips& clips, bool crouch) const {
+    const auto it = m_moveSets.find(HashLocomotionClips(clips, crouch));
     return it != m_moveSets.end() && it->second.usable() ? &it->second : nullptr;
 }
 

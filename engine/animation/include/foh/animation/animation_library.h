@@ -35,9 +35,10 @@ public:
 
     // Builds (once per distinct set of clips) and returns the blend space; null when nothing in `clips` is usable yet.
     // Rebuilt after any clip changes. Main thread only.
-    const MoveSet* prepareMoveSet(const LocomotionClips& clips);
+    // `crouch` selects the crouched stance's clips (crouchIdleClip, crouchWalk*Clip) instead of the standing ones.
+    const MoveSet* prepareMoveSet(const LocomotionClips& clips, bool crouch = false);
     // Lookup only (from systems). Null when not prepared.
-    const MoveSet* moveSet(const LocomotionClips& clips) const;
+    const MoveSet* moveSet(const LocomotionClips& clips, bool crouch = false) const;
 
     // Changes whenever anything above does; characters re-validate their cached state against it.
     u32 generation() const { return m_generation; }
@@ -61,7 +62,7 @@ private:
 };
 
 // Builds the blend space from the clips in `library` (exposed for tests). False when nothing is usable.
-FOH_API bool BuildMoveSet(const AnimationLibrary& library, const LocomotionClips& clips, MoveSet& out);
-FOH_API u64 HashLocomotionClips(const LocomotionClips& clips);
+FOH_API bool BuildMoveSet(const AnimationLibrary& library, const LocomotionClips& clips, bool crouch, MoveSet& out);
+FOH_API u64 HashLocomotionClips(const LocomotionClips& clips, bool crouch);
 
 } // namespace foh

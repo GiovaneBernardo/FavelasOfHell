@@ -12,6 +12,7 @@
 #include "foh/dev_builder.h"
 #include "foh/ecs.h"
 #include "foh/game_module_host.h"
+#include "foh/input.h"
 #include "foh/jobs.h"
 #include "foh/renderer/renderer.h"
 #include "foh/rhi/swapchain.h"
@@ -57,6 +58,7 @@ struct EditorOptions {
     std::string prefabEdit;    // --prefab-edit <model>: opens the prefab editor on an imported model (QA)
     bool prefabQa = false;     // --prefab-qa: with --prefab-edit, fits/rotates/saves/places the model like a user would (QA)
     std::string inspect;       // --inspect <path>: shows a file in the asset inspector (QA)
+    std::string autoplay;      // --autoplay "W:30-150,SPACE:90,MOUSEX:40-60=12": scripted game input by frame (QA)
     float walkSpeed = 0.0f;    // --walk <m/s>: placed characters walk straight ahead at this speed (QA)
     int waterTest = -1;        // --water-test [view]: opens and focuses the Water Test panel on camera preset `view` (QA)
 };
@@ -131,6 +133,7 @@ private:
     void updateAssets(float dt);
     void logAsset(std::string message);
     void assignLocomotionClips(World& world, Entity root);
+    void applyAutoplay(GameInput& input) const;
     void instantiateAsset(AssetId prefab, size_t sceneIndex, const Transform& at);
     // Where a dropped model goes: the ground point under the cursor in the viewport it was dropped on.
     Transform dropPlacement(float x, float y, bool hasPosition, size_t& sceneIndex) const;

@@ -8,8 +8,8 @@ namespace {
 // PostUpdate so it sees the frame's final transforms. ResMut on the link makes
 // the scheduler serialize it against anything else touching the link.
 void extractRenderScene(ResMut<RenderSceneLink> link, Res<Time> time, Buffers<SkinMatrix> skinBuffers,
-                        Query<Entity, const GlobalTransform&, const MeshRenderer&, Without<SkinnedMesh>> meshes,
-                        Query<Entity, const SkinPalette&> palettes,
+                        Query<Entity, const GlobalTransform&, const MeshRenderer&, Without<SkinnedMesh>, Without<Hidden>> meshes,
+                        Query<Entity, const SkinPalette&, Without<Hidden>> palettes,
                         Query<Entity, const GlobalTransform&, const MeshRenderer&, const SkinnedMesh&, Parent> skinnedMeshes,
                         Query<Entity, const GlobalTransform&, const Camera&> cameras,
                         Query<const GlobalTransform&, const DirectionalLight&> suns) {
@@ -90,6 +90,7 @@ void RegisterRenderExtract(App& app) {
     app.registerComponent<MeshRenderer>();
     app.registerComponent<SkinPalette>();
     app.registerComponent<SkinnedMesh>();
+    app.registerComponent<Hidden>();
     app.registerComponent<Camera>();
     app.registerComponent<DirectionalLight>();
     app.insertResource(RenderSceneLink{});

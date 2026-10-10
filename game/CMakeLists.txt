@@ -1,7 +1,8 @@
 # The game: a MODULE library (DLL) that the editor/runtime load and hot reload.
 # It links the shared engine DLL, so it never carries its own copy of engine state.
 add_library(foh_game MODULE
-    src/game_module.cpp)
+    src/game_module.cpp
+    src/player.cpp)
 
 target_link_libraries(foh_game PRIVATE foh::engine)
 # The module (and its PDB) is built into bin/modules/, NOT next to the executables.

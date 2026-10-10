@@ -110,7 +110,8 @@ void prepareLocomotionSets(ResMut<AnimationLink> link, Query<const LocomotionCli
     clips.each([&](const LocomotionClips& c) {
         // Most characters share one set; skip the hash lookup when the previous entity had the same clips.
         if (haveLast && std::memcmp(&last, &c, sizeof(c)) == 0) return;
-        library->prepareMoveSet(c);
+        library->prepareMoveSet(c, false);
+        library->prepareMoveSet(c, true);
         last = c;
         haveLast = true;
     });
@@ -148,8 +149,11 @@ void updateLocomotion(Res<AnimationLink> link, Res<Time> time, Local<std::vector
         const std::span<SkinMatrix> out = palettes.get(palette.matrices);
         if (history.size() != joints || out.size() != joints) return;
 
-        const MoveSet* moves = library->moveSet(clips);
-        const Character character{*library, *skeleton, animator.skeleton, moves, state};
+        // Stance: crouching needs a crouch idle; a turn or one-shot in progress finishes first.
+        const MoveSet* crouchSet = control.crouch ? library->moveSet(clips, true) : nullptr;
+        const u32 wantedStance = crouchSet && crouchSet->idle.isValid() ? 1u : 0u;
+        const MoveSet* moves = library->moveSet(clips, state.stance != 0);
+        Character character{*library, *skeleton, animator.skeleton, moves, state};
         const f32 step = dt * animator.playbackSpeed;
 
         // ---- inputs ----
@@ -213,6 +217,12 @@ void updateLocomotion(Res<AnimationLink> link, Res<Time> time, Local<std::vector
         }
         mode = static_cast<LocomotionMode>(state.mode);
         if (control.jump && mode != LocomotionMode::Move) control.jump = false; // one at a time
+        if (mode == LocomotionMode::Move && state.stance != wantedStance) {
+            state.stance = wantedStance; // inertialized like any other change of animation
+            moves = library->moveSet(clips, state.stance != 0);
+            character.moves = moves;
+            transitioned = true;
+        }
 
         // ---- heading and position ----
         const ClipAsset* oneShotClip = mode == LocomotionMode::Turn ? library->clip(state.oneShot) : nullptr;

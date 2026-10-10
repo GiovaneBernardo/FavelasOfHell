@@ -14,6 +14,7 @@
 //   --inspect p      show a file in the asset inspector (path relative to assets/)
 //   --window WxH     window size for smoke runs (default 1600x900)
 //   --water-test [n] open the Water Test panel (coast scene) on camera preset n (0 hill, 1 beach, 2 aerial, 3 islet)
+//   --autoplay s     scripted game input, e.g. "W:30-150,SPACE:90,C:150-210,V:240,MOUSEX:40-60=12" (frame ranges; QA)
 //   --walk m/s       placed characters walk straight ahead at this speed (animation QA)
 //   --stress         scripted resizes / scene switches / panel toggles (QA)
 int main(int argc, char** argv) {
@@ -49,6 +50,8 @@ int main(int argc, char** argv) {
             options.openWorkshop = true;
         } else if (!std::strcmp(argv[i], "--water-test")) {
             options.waterTest = (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') ? std::atoi(argv[++i]) : 0;
+        } else if (!std::strcmp(argv[i], "--autoplay") && i + 1 < argc) {
+            options.autoplay = argv[++i];
         } else if (!std::strcmp(argv[i], "--walk") && i + 1 < argc) {
             options.walkSpeed = static_cast<float>(std::atof(argv[++i]));
         } else if (!std::strcmp(argv[i], "--stress")) {

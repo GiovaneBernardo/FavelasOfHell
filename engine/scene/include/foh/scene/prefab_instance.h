@@ -33,4 +33,9 @@ struct PrefabInstanceResult {
 // material). Components must be registered in the world (RegisterRenderExtract does it).
 FOH_API PrefabInstanceResult InstantiatePrefab(World& world, const PrefabAsset& prefab, const Transform& at);
 
+// Same, but the prefab's content goes into an entity that already exists (a game entity that asked for a model through
+// PrefabRequest): it keeps its own components and Transform and gets the prefab's nodes as children, plus the
+// Animator and locomotion components for a skinned prefab.
+FOH_API PrefabInstanceResult InstantiatePrefabInto(World& world, Entity root, const PrefabAsset& prefab);
+
 } // namespace foh

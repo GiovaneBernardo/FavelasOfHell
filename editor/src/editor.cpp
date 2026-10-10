@@ -16,7 +16,9 @@
 #include "foh/dev_build_defaults.h"
 #include "foh/file_system.h"
 #include "foh/log.h"
+#include "foh/input.h"
 #include "foh/renderer/components.h"
+#include "foh/scene/prefab_request.h"
 #include "foh/rhi/pipeline_cache.h"
 #include "foh/rhi/render_graph.h"
 #include "foh/png.h"
@@ -116,6 +118,8 @@ bool Editor::init() {
         AnimationPlugin animation;
         main.app->addPlugin(animation);
         main.app->insertResource(AnimationLink{&m_animation});
+        RegisterPrefabRequests(*main.app); // game entities ask for models by source path (see prefab_request.h)
+        main.app->insertResource(GameInput{});
         main.renderScene = m_renderer->createScene("World");
         main.app->world().resource<RenderSceneLink>()->scene = m_renderer->scene(main.renderScene);
         m_scenes.push_back(std::move(main));
@@ -195,6 +199,7 @@ void Editor::initAssets() {
     m_assets->scan();
     m_assetBridge = std::make_unique<AssetSceneBridge>(*m_assets, *m_renderer, m_jobs.get());
     m_assetBridge->loader().setAnimationLibrary(&m_animation);
+    m_scenes[0].app->world().resource<SceneBridgeLink>()->bridge = m_assetBridge.get();
     FOH_INFO("asset database: {} source(s) in {}", m_assets->sources().size(), PathToUtf8(desc.sourceRoot));
     logAsset("Drop a .gltf / .glb / .fbx model or a texture onto the window to import it.");
 
@@ -381,45 +386,54 @@ void Editor::instantiateAsset(AssetId prefab, size_t sceneIndex, const Transform
     logAsset("Placed " + std::to_string(inst.entities.size()) + " entities into '" + m_scenes[sceneIndex].name + "'.");
 }
 
-// A placed character gets the locomotion clips that were imported next to it, matched by the names Mixamo gives its
-// downloads ("walking", "left strafe walking", ...). Anything missing stays empty and can be set in the inspector.
+// A placed character gets the locomotion clips that were imported next to it (the bridge matches Mixamo's names).
 void Editor::assignLocomotionClips(World& world, Entity root) {
-    LocomotionClips* clips = world.get<LocomotionClips>(root);
-    if (!clips) return;
-    std::map<std::string, AssetId> byName;
-    for (const AssetId& id : m_assets->assetsOfKind(AssetKind::AnimationClip)) {
-        if (const AssetInfo* info = m_assets->find(id)) {
-            std::string name = info->name;
-            for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            byName.emplace(std::move(name), id);
-        }
-    }
-    auto pick = [&](AssetId& slot, std::initializer_list<const char*> names) {
-        for (const char* n : names) {
-            const auto it = byName.find(n);
-            if (it == byName.end()) continue;
-            slot = it->second;
-            m_assetBridge->loader().request(it->second);
-            return;
-        }
-    };
-    pick(clips->idleClip, {"idle", "idle (1)"});
-    pick(clips->walkClip, {"walking", "walk"});
-    pick(clips->runClip, {"running", "run"});
-    pick(clips->sprintClip, {"sprint", "sprinting", "fast run"});
-    pick(clips->walkBackClip, {"walking backwards", "walking backward", "walk backward"});
-    pick(clips->runBackClip, {"running backward", "running backwards", "run backward"});
-    pick(clips->walkLeftClip, {"left strafe walking", "strafe walk left"});
-    pick(clips->walkRightClip, {"right strafe walking", "strafe walk right"});
-    pick(clips->runLeftClip, {"left strafe", "strafe left"});
-    pick(clips->runRightClip, {"right strafe", "strafe right"});
-    pick(clips->turnLeftClip, {"left turn"});
-    pick(clips->turnRightClip, {"right turn"});
-    pick(clips->turnLeft90Clip, {"left turn 90"});
-    pick(clips->turnRight90Clip, {"right turn 90"});
-    pick(clips->jumpClip, {"jump"});
+    m_assetBridge->assignLocomotionClips(world, root);
     if (m_options.walkSpeed > 0.0f)
         if (LocomotionControl* control = world.get<LocomotionControl>(root)) control->velocity = Vec3(0.0f, 0.0f, m_options.walkSpeed);
+}
+
+// QA: replaces the real input with a script, so the controls can be exercised without a person at the keyboard.
+// Format: comma separated "KEY:frame" (a press on that frame) or "KEY:from-to" (held), KEY = W A S D C V SPACE SHIFT, or
+// "MOUSEX:from-to=pixelsPerFrame" / "MOUSEY:...". Frames count editor frames.
+void Editor::applyAutoplay(GameInput& input) const {
+    input.captured = true;
+    input.state = InputState{};
+    const std::string& s = m_options.autoplay;
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t end = s.find(',', pos);
+        if (end == std::string::npos) end = s.size();
+        const std::string item = s.substr(pos, end - pos);
+        pos = end + 1;
+        const size_t colon = item.find(':');
+        if (colon == std::string::npos) continue;
+        const std::string name = item.substr(0, colon);
+        std::string range = item.substr(colon + 1);
+        float amount = 0.0f;
+        if (const size_t eq = range.find('='); eq != std::string::npos) {
+            amount = static_cast<float>(std::atof(range.c_str() + eq + 1));
+            range = range.substr(0, eq);
+        }
+        u64 from = 0, to = 0;
+        if (const size_t dash = range.find('-'); dash != std::string::npos) {
+            from = std::strtoull(range.c_str(), nullptr, 10);
+            to = std::strtoull(range.c_str() + dash + 1, nullptr, 10);
+        } else {
+            from = to = std::strtoull(range.c_str(), nullptr, 10);
+        }
+        const u64 frame = m_frameCount;
+        if (frame < from || frame > to) continue;
+        if (name == "MOUSEX") input.state.mouseDeltaX = amount;
+        else if (name == "MOUSEY") input.state.mouseDeltaY = amount;
+        else {
+            const Key key = name == "W" ? Key::W : name == "A" ? Key::A : name == "S" ? Key::S : name == "D" ? Key::D : name == "C" ? Key::C
+                            : name == "V" ? Key::V : name == "SPACE" ? Key::Space : name == "SHIFT" ? Key::LShift : Key::Unknown;
+            if (key == Key::Unknown) continue;
+            input.state.keys[static_cast<size_t>(key)] = true;
+            if (frame == from) input.state.keysPressed[static_cast<size_t>(key)] = true;
+        }
+    }
 }
 
 ImportTicket Editor::importFile(const fs::path& file, float dropX, float dropY, bool hasDropPosition, bool place) {
@@ -832,6 +846,17 @@ bool Editor::frame(float dt) {
     lap("hot reload polls");
     updateAssets(dt);
     lap("asset import/load pump");
+    // The game gets the input only while a Game viewport owns it (clicked, not released with Escape).
+    {
+        bool playing = false;
+        for (const ViewportPanel& p : m_viewports) playing = playing || (p.open && !p.useEditorCamera && p.sceneIndex == 0 && p.capturing);
+        if (GameInput* in = m_scenes[0].app->world().resource<GameInput>()) {
+            in->captured = playing;
+            if (playing) in->state = m_window->input();
+            else in->state = InputState{};
+            if (!m_options.autoplay.empty()) applyAutoplay(*in);
+        }
+    }
     for (SceneEntry& s : m_scenes) s.app->update(dt);
     lap("world update");
 
@@ -948,6 +973,7 @@ void Editor::buildUi(float dt) {
         m_dockLayoutBuilt = true;
     }
 
+    if (!m_options.autoplay.empty() && m_frameCount == 5) ImGui::SetWindowFocus("Game"); // QA: show the game view
     if (m_options.waterTest >= 0 && m_frameCount == 2) ImGui::SetWindowFocus("Water Test");
     if (!m_options.prefabEdit.empty() && m_options.walkSpeed > 0.0f && m_frameCount == 40) ImGui::SetWindowFocus(m_viewports[m_previewViewport].title.c_str()); // QA: show the stage
     for (ViewportPanel& p : m_viewports) drawViewport(p, dt);
@@ -1063,6 +1089,21 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
                 p.id, MakeViewParams(p.camera.world(), p.camera.fovY, aspect, p.camera.nearZ, p.camera.farZ));
         } else {
             m_renderer->clearViewportCamera(p.id);
+            // Playing: a click in the Game viewport gives the game the mouse and keyboard, Escape gives them back.
+            if (p.sceneIndex == 0) {
+                if (hovered && !p.capturing && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    p.capturing = true;
+                    m_window->setRelativeMouse(true);
+                }
+                if (p.capturing && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+                    p.capturing = false;
+                    m_window->setRelativeMouse(false);
+                }
+                if (p.capturing) ImGui::SetNextFrameWantCaptureKeyboard(true);
+                ImGui::SetCursorScreenPos(ImVec2(origin.x + 8, origin.y + avail.y - 24.0f * m_theme.scale()));
+                ImGui::TextColored(ImVec4(1, 1, 1, 0.75f), p.capturing ? "Playing: WASD move, Space jump, C crouch, V camera, Esc release"
+                                                                       : "Click to play");
+            }
         }
 
         const int panelIndex = static_cast<int>(&p - m_viewports.data());
