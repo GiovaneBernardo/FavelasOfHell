@@ -73,11 +73,21 @@ struct GpuMaterial {
     f32 alphaCutoff;
     f32 metallic, roughness, normalScale, occlusionStrength;
     u32 baseColorTex, normalTex, metalRoughTex, occlusionTex;
-    u32 emissiveTex, flags, pad0, pad1;
+    u32 emissiveTex, flags;
+    f32 translucency; // foliage: how much light wraps round and through the surface (0 = none)
+    u32 pad1;
+    // Terrain materials (kMaterialFlagTerrain) keep their eight layer textures in the slots: albedo of layers 0..3 in
+    // baseColorTex, metalRoughTex, occlusionTex, emissiveTex; normals of layers 0..3 in normalTex, extra0..extra2.
+    u32 extra0, extra1, extra2;
+    f32 terrainTile;
 };
-static_assert(sizeof(GpuMaterial) == 80, "material stride is baked into material.slangh");
+static_assert(sizeof(GpuMaterial) == 96, "material stride is baked into material.slangh");
 inline constexpr u32 kMaterialFlagAlphaMask = 1u << 0;
 inline constexpr u32 kMaterialFlagDoubleSided = 1u << 1;
 inline constexpr u32 kMaterialFlagNormalMap = 1u << 2;
+inline constexpr u32 kMaterialFlagTerrain = 1u << 3;
+inline constexpr u32 kMaterialFlagLayerNormal0 = 1u << 4;  // bits 4..7: layer i has a resident normal map
+inline constexpr u32 kMaterialFlagFoliage = 1u << 12;
+inline constexpr u32 kMaterialFlagLayerAlbedo0 = 1u << 8;  // bits 8..11: layer i has a resident albedo texture
 
 } // namespace foh

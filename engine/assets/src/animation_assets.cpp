@@ -15,7 +15,7 @@ constexpr u32 kTagTrak = FourCC('T', 'R', 'A', 'K');
 constexpr u32 kTagDeps = FourCC('D', 'E', 'P', 'S');
 
 constexpr u32 kSkeletonVersion = 1;
-constexpr u32 kClipVersion = 1;
+constexpr u32 kClipVersion = 2; // 2: airborne interval
 constexpr u32 kMaxClipFrames = 1u << 16; // frame indices are 16 bit
 
 bool setError(std::string* error, const char* message) {
@@ -222,6 +222,9 @@ std::vector<u8> SerializeClip(const ClipAsset& clip, AssetId id) {
     w.put<u32>(static_cast<u32>(clip.rootCurve.size()));
     for (const Vec3& v : clip.rootCurve) w.putVec3(v);
     w.put<u32>(static_cast<u32>(clip.tracks.size()));
+    w.put<u8>(clip.hasAir ? 1 : 0);
+    w.put<f32>(clip.airStart);
+    w.put<f32>(clip.airEnd);
 
     ByteWriter t;
     for (const ClipTrack& track : clip.tracks) {
@@ -266,6 +269,11 @@ bool DeserializeClip(const ContainerReader& reader, ClipAsset& out, std::string*
     c.rootCurve.reserve(curveCount);
     for (u32 i = 0; i < curveCount; ++i) c.rootCurve.push_back(r.getVec3());
     const u32 trackCount = r.get<u32>();
+    if (reader.typeVersion() >= 2) {
+        c.hasAir = r.get<u8>() != 0;
+        c.airStart = r.get<f32>();
+        c.airEnd = r.get<f32>();
+    }
     if (!r.ok()) return setError(error, "truncated clip metadata");
     if (mode > static_cast<u8>(RootMotionMode::Full)) return setError(error, "unknown root motion mode");
     c.rootMode = static_cast<RootMotionMode>(mode);

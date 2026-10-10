@@ -18,12 +18,18 @@ public:
     // Call after ImGui::NewFrame()/the UI was built: applies cursor and text-input requests.
     void endFrame();
 
+    // While the game owns the mouse (relative mode, cursor hidden) the UI must not see it: no hover, clicks, wheel or
+    // drags reach the panels behind the invisible cursor. The pointer is parked far outside the window until released.
+    void setMouseCaptured(bool captured) { m_mouseCaptured = captured; }
+
     // True while ImGui wants the keyboard/mouse (so the game must not also react).
     bool wantsKeyboard() const;
     bool wantsMouse() const;
 
 private:
     Window* m_window = nullptr;
+    bool m_mouseCaptured = false;
+    bool m_mouseWasCaptured = false;
     std::string m_clipboard;
     friend struct ImGuiPlatformCallbacks;
     std::string& clipboard() { return m_clipboard; }

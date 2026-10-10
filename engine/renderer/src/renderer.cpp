@@ -343,7 +343,7 @@ bool Renderer::uploadMeshAsset(const AssetId& asset, const MeshGeometry& geometr
     std::vector<u32> ids;
     ids.reserve(submeshes.size());
     for (const MeshIndexRange& r : submeshes)
-        ids.push_back(s.gpu.meshes.addRange({block.firstIndex + r.firstIndex, r.indexCount, block.baseVertex, static_cast<u32>(vertexCount), skinned}));
+        ids.push_back(s.gpu.meshes.addRange({block.firstIndex + r.firstIndex, r.indexCount, block.baseVertex, static_cast<u32>(vertexCount), skinned, block.id}));
     s.meshLookup.set(asset, std::move(ids));
     for (const u32 id : previous) s.retiredMeshes.push_back({s.frame, id});
     return true;
@@ -568,6 +568,37 @@ void Renderer::Impl::prepareScene(SceneSlot& slot) {
     packed.instances.resize(meshes.size());
     for (const ExtractedMesh& m : meshes) packed.instances[packed.cursor[keyOf(m)]++] = packInstance(m);
 
+    // Static instance sets (trees, grass): packed after the entities' instances, one culled batch per set.
+    struct StaticBatch {
+        u32 cls;
+        SceneGpu::Batch batch;
+    };
+    std::vector<StaticBatch> staticBatches;
+    for (const auto& [setId, set] : slot.scene->staticSets()) {
+        if (!set.enabled || set.instances.empty()) continue;
+        const u32 mesh = meshLookup.find(set.mesh, set.submesh);
+        if (mesh == MeshLookup::kInvalid || mesh >= meshCount) continue;
+        const u32 material = set.material.isValid() ? gpu.materials.lookup().find(set.material) : 0u;
+        const u32 count = std::clamp(static_cast<u32>(std::ceil(static_cast<f32>(set.instances.size()) * std::clamp(set.fraction, 0.0f, 1.0f))), 1u,
+                                     static_cast<u32>(set.instances.size()));
+        const u32 first = static_cast<u32>(packed.instances.size());
+        for (u32 k = 0; k < count; ++k) {
+            const StaticInstance& in = set.instances[k];
+            const f32 c = in.c, sn = in.s;
+            GpuInstance g;
+            g.row0 = Vec4(c, 0.0f, sn, in.position.x);
+            g.row1 = Vec4(0.0f, in.scale, 0.0f, in.position.y);
+            g.row2 = Vec4(-sn, 0.0f, c, in.position.z);
+            g.color = Vec4(static_cast<f32>(in.color & 0xFFu), static_cast<f32>((in.color >> 8) & 0xFFu), static_cast<f32>((in.color >> 16) & 0xFFu),
+                           static_cast<f32>(in.color >> 24)) * (1.0f / 255.0f);
+            g.entityLo = g.entityHi = 0;
+            g.material = material;
+            g.pad = 0;
+            packed.instances.push_back(g);
+        }
+        staticBatches.push_back({static_cast<u32>(gpu.materials.classOf(material)), {mesh, first, count, -1, Vec4(set.center, set.radius)}});
+    }
+
     // Skinned characters: one instance and one single-instance batch each (every character has its own deformed
     // vertices), slotted after the static batches of its draw class. The deformation work is shared between the
     // submeshes of one mesh and one pose.
@@ -576,7 +607,7 @@ void Renderer::Impl::prepareScene(SceneSlot& slot) {
     packed.skinnedVertexCount = 0;
     packed.skinGroups = 0;
     const ExtractedScene& extracted = slot.scene->read();
-    if (extracted.skinned.empty()) {
+    if (extracted.skinned.empty() && staticBatches.empty()) {
         packed.palettes.clear();
         return;
     }
@@ -605,7 +636,7 @@ void Renderer::Impl::prepareScene(SceneSlot& slot) {
         skinBatches.push_back({static_cast<u32>(gpu.materials.classOf(sk.mesh.material)), {sk.mesh.mesh, instance, 1, static_cast<i32>(it->second)}});
     }
     for (SceneGpu::SkinJob& job : packed.skinJobs) job.jobCount = static_cast<u32>(packed.skinJobs.size());
-    if (skinBatches.empty()) return;
+    if (skinBatches.empty() && staticBatches.empty()) return;
 
     std::vector<SceneGpu::Batch>& merged = packed.classScratch;
     merged.clear();
@@ -613,6 +644,8 @@ void Renderer::Impl::prepareScene(SceneSlot& slot) {
     for (u32 cls = 0; cls < kDrawClassCount; ++cls) {
         begin[cls] = static_cast<u32>(merged.size());
         merged.insert(merged.end(), packed.batches.begin() + packed.classBegin[cls], packed.batches.begin() + packed.classBegin[cls + 1]);
+        for (const StaticBatch& sb : staticBatches)
+            if (sb.cls == cls) merged.push_back(sb.batch);
         for (const SkinBatch& sb : skinBatches)
             if (sb.cls == cls) merged.push_back(sb.batch);
     }

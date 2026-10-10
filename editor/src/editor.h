@@ -21,6 +21,8 @@
 #include "atmosphere_panel.h"
 #include "asset_inspector.h"
 #include "asset_picker.h"
+#include "road_tool.h"
+#include "terrain_panel.h"
 #include "content_browser.h"
 #include "editor_prefs.h"
 #include "fly_camera.h"
@@ -54,13 +56,22 @@ struct EditorOptions {
     u32 windowWidth = 1600, windowHeight = 900; // --window WxH (QA: render a 4K-sized layout)
     bool workshopTest = false; // --workshop-test: download + import the first result with the smallest variant (QA)
     bool openWorkshop = false; // --workshop: open the assets workshop at startup (QA)
+    std::string importSettings; // --import-settings "animationOnly=1|clipSegments=a=1-2:loop;b=3-4": settings of the --import (QA)
     std::string importFile;    // --import <file>: imports it at startup and places it like a drop (QA)
     std::string prefabEdit;    // --prefab-edit <model>: opens the prefab editor on an imported model (QA)
     bool prefabQa = false;     // --prefab-qa: with --prefab-edit, fits/rotates/saves/places the model like a user would (QA)
     std::string inspect;       // --inspect <path>: shows a file in the asset inspector (QA)
     std::string playerModel;   // --player-model <path>: gives the game's player this model at startup (QA)
+    std::string preview;       // --preview "clip name@0,0.5,1": the player shows that clip at those times, one screenshot each (QA)
+    std::string shots;         // --shots "90,100,110": saves <screenshot stem>_<frame>.png at those frames (QA)
+    bool fullGame = false;     // --fullgame: the Game panel takes the whole window (QA)
     std::string autoplay;      // --autoplay "W:30-150,SPACE:90,MOUSEX:40-60=12": scripted game input by frame (QA)
     float walkSpeed = 0.0f;    // --walk <m/s>: placed characters walk straight ahead at this speed (QA)
+    bool profile = false;
+    bool terrainSculpt = false;
+    bool roadsTest = false;
+    int terrainView = 0;
+    bool terrain = false;      // --terrain: creates the terrain, opens its panel and flies the Scene camera over it (QA)
     int waterTest = -1;        // --water-test [view]: opens and focuses the Water Test panel on camera preset `view` (QA)
 };
 
@@ -120,7 +131,8 @@ private:
     void saveScreenshot();
     void initAssets();
     // Starts an import (returns its ticket, 0 when the file is not importable).
-    ImportTicket importFile(const std::filesystem::path& file, float dropX, float dropY, bool hasDropPosition, bool place = true);
+    ImportTicket importFile(const std::filesystem::path& file, float dropX, float dropY, bool hasDropPosition, bool place = true,
+                            const ImportSettings* initial = nullptr);
     // Materials authored from imported texture sets: created when the last of their textures is in the database.
     void queueMaterial(const MaterialRecipe& recipe, const std::vector<ImportTicket>& tickets);
     void createMaterialAsset(const MaterialRecipe& recipe);
@@ -135,6 +147,7 @@ private:
     void logAsset(std::string message);
     void assignLocomotionClips(World& world, Entity root);
     void applyAutoplay(GameInput& input) const;
+    void previewStep();
     void useAsModel(const std::string& relPath, bool player);
     void instantiateAsset(AssetId prefab, size_t sceneIndex, const Transform& at);
     // Where a dropped model goes: the ground point under the cursor in the viewport it was dropped on.
@@ -225,6 +238,15 @@ private:
     bool m_showStats = true;
     bool m_showAtmosphere = false;
     AtmospherePanel m_atmospherePanel;
+    bool m_showTerrain = false;
+    std::vector<std::pair<const char*, double>> m_profile; // --profile: summed ms per phase
+    u32 m_profileFrames = 0;
+    double m_profileWorstMs = 0.0; // --profile: the longest frame of the window (a freeze shows here)
+    void profileLap(const char* name, double ms);
+    TerrainPanel m_terrainPanel;
+    bool m_showRoads = false;
+    RoadTool m_roadTool;
+    void ensureTerrain();
     bool m_showEntities = true;
     bool m_showInspector = true;
     EntityInspector m_inspector;

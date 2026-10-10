@@ -37,6 +37,7 @@ struct SceneGpu {
         u32 first; // first instance in `instances`
         u32 count;
         i32 skinBase = -1; // >= 0: a skinned character, drawn from the skinned vertex buffer starting at this vertex
+        Vec4 sphere{0.0f}; // xyz centre, w radius: a static instance set, culled per viewport and cascade (w <= 0: always drawn)
     };
     // One mesh block to deform (mirrored by SkinJob in shaders/skin.slang). Every job repeats the job count, which the
     // shader needs for its search and which saves a constant buffer.

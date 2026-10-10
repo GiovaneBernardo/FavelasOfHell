@@ -13,6 +13,10 @@
 //   --prefab-edit m  open the prefab editor on an imported model (path relative to assets/)
 //   --inspect p      show a file in the asset inspector (path relative to assets/)
 //   --window WxH     window size for smoke runs (default 1600x900)
+//   --terrain-sculpt  with --terrain: scripted brush strokes where the camera looks, from frame 60 (QA)
+//   --roads-test      with --terrain: lays and carves a few roads along Leblon beach (QA)
+//   --profile       log the average CPU time of each frame phase every 120 frames (QA)
+//   --terrain [n]   create the terrain, open its panel and look at it: 0 from the sea, 1 Vidigal slope, 2 hill over the sea, 3 Leblon beach (QA)
 //   --water-test [n] open the Water Test panel (coast scene) on camera preset n (0 hill, 1 beach, 2 aerial, 3 islet)
 //   --autoplay s     scripted game input, e.g. "W:30-150,SPACE:90,C:150-210,V:240,MOUSEX:40-60=12" (frame ranges; QA)
 //   --walk m/s       placed characters walk straight ahead at this speed (animation QA)
@@ -48,10 +52,27 @@ int main(int argc, char** argv) {
             options.openWorkshop = options.workshopTest = true;
         } else if (!std::strcmp(argv[i], "--workshop")) {
             options.openWorkshop = true;
+        } else if (!std::strcmp(argv[i], "--roads-test")) {
+            options.roadsTest = true;
+        } else if (!std::strcmp(argv[i], "--terrain-sculpt")) {
+            options.terrainSculpt = true;
+        } else if (!std::strcmp(argv[i], "--profile")) {
+            options.profile = true;
+        } else if (!std::strcmp(argv[i], "--terrain")) {
+            options.terrain = true;
+            if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') options.terrainView = std::atoi(argv[++i]);
         } else if (!std::strcmp(argv[i], "--water-test")) {
             options.waterTest = (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') ? std::atoi(argv[++i]) : 0;
         } else if (!std::strcmp(argv[i], "--player-model") && i + 1 < argc) {
             options.playerModel = argv[++i];
+        } else if (!std::strcmp(argv[i], "--import-settings") && i + 1 < argc) {
+            options.importSettings = argv[++i];
+        } else if (!std::strcmp(argv[i], "--preview") && i + 1 < argc) {
+            options.preview = argv[++i];
+        } else if (!std::strcmp(argv[i], "--shots") && i + 1 < argc) {
+            options.shots = argv[++i];
+        } else if (!std::strcmp(argv[i], "--fullgame")) {
+            options.fullGame = true;
         } else if (!std::strcmp(argv[i], "--autoplay") && i + 1 < argc) {
             options.autoplay = argv[++i];
         } else if (!std::strcmp(argv[i], "--walk") && i + 1 < argc) {

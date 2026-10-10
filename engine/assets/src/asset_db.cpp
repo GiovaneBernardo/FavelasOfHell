@@ -92,6 +92,8 @@ void AssetDb::saveMeta(const SourceRecord& r) const {
     out << "setting clipRootJoint " << r.settings.clipRootJoint << '\n';
     out << "setting clipRotationToleranceDeg " << r.settings.clipRotationToleranceDeg << '\n';
     out << "setting clipTranslationTolerance " << r.settings.clipTranslationTolerance << '\n';
+    out << "setting animationOnly " << (r.settings.animationOnly ? 1 : 0) << '\n';
+    out << "setting clipSegments " << singleLine(r.settings.clipSegments) << '\n';
     for (const std::string& f : r.files) out << "file " << f << '\n';
     // sub <kind> <guid> <live|dead> <deps comma separated or -> <key> <name>, tab separated
     for (const SubAssetRecord& s : r.subAssets) {
@@ -156,6 +158,8 @@ bool AssetDb::loadMeta(const fs::path& metaFile, SourceRecord& out) const {
             else if (name == "clipRootJoint") r.settings.clipRootJoint = v;
             else if (name == "clipRotationToleranceDeg") r.settings.clipRotationToleranceDeg = std::strtof(v.c_str(), nullptr);
             else if (name == "clipTranslationTolerance") r.settings.clipTranslationTolerance = std::strtof(v.c_str(), nullptr);
+            else if (name == "animationOnly") r.settings.animationOnly = v != "0";
+            else if (name == "clipSegments") r.settings.clipSegments = v;
         }
     }
     if (!r.guid.isValid()) return false;
@@ -500,6 +504,7 @@ struct AssetDb::Async {
     struct Task {
         ImportTicket ticket = 0;
         enum class Stage { Copy, Import } stage = Stage::Import;
+        std::optional<ImportSettings> initial; // settings of a source that is new
         fs::path external;   // Copy: the dropped file
         std::string relPath; // Import: source-root relative
         bool force = false;
@@ -527,8 +532,10 @@ AssetDb::~AssetDb() {
     if (m_async && m_async->running && m_desc.jobs) m_desc.jobs->wait(m_async->running->counter);
 }
 
-ImportTicket AssetDb::enqueue(const fs::path& external, const std::string& relPath, bool force, std::string display) {
+ImportTicket AssetDb::enqueue(const fs::path& external, const std::string& relPath, bool force, std::string display,
+                              const ImportSettings* initial) {
     Async::Task t;
+    if (initial) t.initial = *initial;
     t.ticket = m_async->nextTicket++;
     t.stage = external.empty() ? Async::Task::Stage::Import : Async::Task::Stage::Copy;
     t.external = external;
@@ -554,6 +561,7 @@ void AssetDb::dispatch() {
         const auto it = m_sources.find(r.task.relPath);
         r.known = it != m_sources.end();
         if (r.known) r.snapshot = it->second;
+        else if (r.task.initial) r.snapshot.settings = *r.task.initial;
     }
     auto body = [](void* p) {
         auto* run = static_cast<Async::Running*>(p);
@@ -610,6 +618,7 @@ std::vector<ImportResult> AssetDb::pollImports() {
                 next.relPath = r->copy.destRel;
                 next.force = r->task.force;
                 next.display = r->task.display;
+                next.initial = r->task.initial;
                 a.queue.push_front(std::move(next));
             } else {
                 ImportResult res;
@@ -673,18 +682,20 @@ std::vector<ImportResult> AssetDb::waitForImports() {
     return all;
 }
 
-ImportTicket AssetDb::beginImport(const fs::path& file, bool force) {
+ImportTicket AssetDb::beginImport(const fs::path& file, bool force, const ImportSettings* initial) {
     const std::string display = PathToUtf8(file.filename());
-    if (file.is_relative()) return enqueue({}, PathToUtf8(file), force, display);
+    if (file.is_relative()) return enqueue({}, PathToUtf8(file), force, display, initial);
     std::error_code ec;
     const fs::path root = fs::weakly_canonical(m_desc.sourceRoot, ec);
     const fs::path abs = fs::weakly_canonical(file, ec);
     const fs::path rel = abs.lexically_relative(root);
-    if (!rel.empty() && *rel.begin() != "..") return enqueue({}, PathToUtf8(rel), force, display);
-    return enqueue(abs, {}, force, display);
+    if (!rel.empty() && *rel.begin() != "..") return enqueue({}, PathToUtf8(rel), force, display, initial);
+    return enqueue(abs, {}, force, display, initial);
 }
 
-ImportResult AssetDb::importFile(const fs::path& file, bool force) { return waitFor(beginImport(file, force)); }
+ImportResult AssetDb::importFile(const fs::path& file, bool force, const ImportSettings* initial) {
+    return waitFor(beginImport(file, force, initial));
+}
 
 ImportResult AssetDb::importSourceBlocking(const std::string& relPath, bool force) {
     return waitFor(enqueue({}, relPath, force, relPath));

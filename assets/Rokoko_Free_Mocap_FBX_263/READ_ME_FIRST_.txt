@@ -1,0 +1,1 @@
+Hello! Please head to www.youtube.com/rokokomotion and check out our video that covers how to use this asset pack specifically - we highly recommend watching the video before using the mocap - thank you!

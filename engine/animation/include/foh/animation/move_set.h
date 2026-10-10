@@ -49,6 +49,11 @@ struct MoveSet {
     std::vector<MoveEntry> entries;
     std::vector<MoveRing> rings; // ascending speed
     std::vector<TurnEntry> turns;
+    struct Break {
+        AssetId clip;
+        f32 duration = 1.0f;
+    };
+    std::vector<Break> breaks; // idle breaks (standing set only)
     bool usable() const { return idle.isValid() || jump.isValid() || !entries.empty() || !turns.empty(); }
 };
 

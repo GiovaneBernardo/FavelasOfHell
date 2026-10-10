@@ -1,6 +1,7 @@
 #include "foh/ecs/app.h"
 
 #include <algorithm>
+#include <chrono>
 #include <atomic>
 #include <string>
 
@@ -30,6 +31,7 @@ struct SystemEntry {
     std::vector<u64> afterSets;  // sets whose members must run before this one
     std::vector<u64> beforeSets; // sets whose members must run after this one
     bool runnable = true;               // per segment run: false if a dependency is missing
+    double lastMs = 0.0;                // wall time of the last run (App::systemTimings)
     bool missingReported = false;
 };
 
@@ -335,7 +337,9 @@ void runNode(void* p) {
     if (sys.runnable) {
         // Own stage per thread: the backend keeps iterator scratch memory there.
         const RunContext ctx{impl.world, WorldAccess::stage(*impl.world, JobSystem::currentThreadSlot()), impl.jobs};
+        const auto t0 = std::chrono::steady_clock::now();
         sys.vtable.run(sys.state, ctx);
+        sys.lastMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     }
     // Releasing successors BEFORE this job's own completion is counted keeps the
     // segment counter above zero until the whole graph has run.
@@ -353,8 +357,10 @@ void runExclusive(App::Impl& impl, Segment& seg, Stage stage) {
     // Outside the parallel phase: the system may change the world freely. A null
     // stage makes queries iterate on the world itself.
     const RunContext ctx{impl.world, nullptr, impl.jobs};
+    const auto t0 = std::chrono::steady_clock::now();
     sys.vtable.run(sys.state, ctx);
     sys.vtable.finish(sys.state, *impl.world);
+    sys.lastMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
 void runParallel(App::Impl& impl, Segment& seg, Stage stage) {
@@ -368,7 +374,9 @@ void runParallel(App::Impl& impl, Segment& seg, Stage stage) {
         SystemEntry& sys = list[seg.systems[0]];
         if (sys.runnable) {
             const RunContext ctx{impl.world, WorldAccess::stage(*impl.world, 0), impl.jobs};
+            const auto t0 = std::chrono::steady_clock::now();
             sys.vtable.run(sys.state, ctx);
+            sys.lastMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         }
     } else {
         for (size_t i = 0; i < n; ++i) seg.remaining[i].store(seg.depCount[i], std::memory_order_relaxed);
@@ -546,6 +554,13 @@ void App::addSetLink(u64 id, u64 setKey, int kind) {
             return;
         }
     }
+}
+
+std::vector<App::SystemTiming> App::systemTimings() const {
+    std::vector<SystemTiming> out;
+    for (size_t s = 0; s < kStageCount; ++s)
+        for (const SystemEntry& e : m_impl->systems[s]) out.push_back({e.name, e.lastMs});
+    return out;
 }
 
 size_t App::systemCount() const {

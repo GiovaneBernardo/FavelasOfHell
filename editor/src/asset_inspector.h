@@ -29,6 +29,8 @@ struct AssetInspectorHost {
     std::function<void(const std::string& relPath)> editPrefab;
     // Starts a forced reimport of a source (path relative to the asset root).
     std::function<void(const std::string& relPath)> reimport;
+    // Applies new import settings to a source and reimports it (blocking).
+    std::function<void(const std::string& relPath, const ImportSettings& settings)> applyImportSettings;
     std::function<void()> refreshBrowser;
 };
 
@@ -64,6 +66,11 @@ private:
     std::string m_path;
     AssetId m_asset;
     std::vector<AssetId> m_users; // assets that reference m_asset (computed once per selection)
+
+    // Import settings of the selected source (animation: clip segments, clips only), edited here and applied on request.
+    std::string m_settingsFor;
+    ImportSettings m_settings;
+    char m_segments[4096] = {};
 
     // The material being edited (a working copy of the file).
     MaterialAsset m_mat;

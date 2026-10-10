@@ -102,6 +102,10 @@ struct ClipAsset {
     // Foot plant landmarks as a fraction of the loop (0..1), for phase synchronised blending. Valid when hasSync.
     bool hasSync = false;
     f32 leftFootPhase = 0.0f, rightFootPhase = 0.0f;
+    // A jump: the interval (seconds) in which neither foot touches the ground. Gameplay drives the clip through
+    // take-off (0..airStart), the air phase (airStart..airEnd, stretched to the real air time) and landing (airEnd..end).
+    bool hasAir = false;
+    f32 airStart = 0.0f, airEnd = 0.0f;
     std::vector<ClipTrack> tracks;
 
     // Time of the last sample. A looping clip wraps at this time (the last sample equals the first).

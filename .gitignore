@@ -17,3 +17,6 @@ compile_commands.json
 /assets/imported/
 # Packages downloaded by the editor's assets workshop (licensed third-party content, large)
 /assets/workshop/
+
+# Downloaded source data for the world tools (tools/fetch_rio_dem.py); the derived world/rio_dem.fohdem is committed
+/data/

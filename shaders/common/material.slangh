@@ -1,6 +1,6 @@
 // Materials and bindless textures, shared by every pass that shades or alpha-tests meshes.
 //
-// GpuMaterial MIRRORS foh::GpuMaterial in engine/renderer/src/gpu_structs.h (80 bytes, static_assert there).
+// GpuMaterial MIRRORS foh::GpuMaterial in engine/renderer/src/gpu_structs.h (96 bytes, static_assert there).
 // Resources, in the binding layouts the renderer builds (see renderer.cpp):
 //   t0 (space 0)  StructuredBuffer<GpuMaterial>   one entry per material, index 0 = default material
 //   s0 (space 0)  trilinear anisotropic wrap sampler
@@ -22,13 +22,23 @@ struct GpuMaterial {
     uint occlusionTex;
     uint emissiveTex;
     uint flags;
-    uint pad0;
+    float translucency;
     uint pad1;
+    // Terrain materials: albedo of layers 0..3 in baseColorTex, metalRoughTex, occlusionTex, emissiveTex; normals in
+    // normalTex, extra0..extra2 (see kMaterialTerrain).
+    uint extra0;
+    uint extra1;
+    uint extra2;
+    float terrainTile;
 };
 
 static const uint kMaterialAlphaMask = 1u << 0;
 static const uint kMaterialDoubleSided = 1u << 1;
 static const uint kMaterialNormalMap = 1u << 2;
+static const uint kMaterialTerrain = 1u << 3;
+static const uint kMaterialFoliage = 1u << 12;
+static const uint kMaterialLayerNormal0 = 1u << 4;  // bits 4..7: layer i has a resident normal map
+static const uint kMaterialLayerAlbedo0 = 1u << 8;  // bits 8..11: layer i has a resident albedo texture
 
 StructuredBuffer<GpuMaterial> g_materials : register(t0);
 SamplerState g_sampler : register(s0);

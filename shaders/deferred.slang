@@ -82,7 +82,9 @@ float4 psDeferred(FullscreenOut i) : SV_Target0
 
     float3 albedo = g_albedo.Load(px).rgb;
     float3 n = octDecode(g_normal.Load(px));
-    float3 material = g_material.Load(px).rgb;
+    float4 materialTex = g_material.Load(px);
+    float3 material = materialTex.rgb;
+    float translucency = materialTex.a; // foliage: light wraps round the leaf and glows through it when backlit
     float roughness = max(material.r, 0.045);
     float metallic = material.g;
     float ao = material.b;
@@ -90,7 +92,9 @@ float4 psDeferred(FullscreenOut i) : SV_Target0
     float3 worldPos = worldPointAt(g_view.invViewProj, i.ndc, depth);
     float3 v = normalize(g_view.cameraPos.xyz - worldPos);
     float3 toSun = -g_view.sunDirection.xyz;
-    float nl = saturate(dot(n, toSun)) * g_view.sunDirection.w;
+    float nlRaw = dot(n, toSun);
+    float nl = saturate(nlRaw) * g_view.sunDirection.w;
+    float nlDiffuse = saturate((nlRaw + translucency) / (1.0 + translucency)) * g_view.sunDirection.w;
 
     float3 f0 = lerp(float3(0.04), albedo, metallic);
     float3 diffuseColor = albedo * (1.0 - metallic);
@@ -112,6 +116,15 @@ float4 psDeferred(FullscreenOut i) : SV_Target0
     }
 
     float3 color = 0.0;
+    if (nlDiffuse > 0.0) {
+        // Diffuse wraps for translucent surfaces; the shadow is read once with the wrapped term.
+        float shadow = sunShadow(worldPos, n, toSun, nlDiffuse);
+        float3 fresnel0 = f0 + (1.0 - f0) * 0.0;
+        color += diffuseColor * (1.0 - fresnel0) / kPi * sunRadiance * nlDiffuse * shadow;
+        // Backlit leaves glow: light that crosses them, strongest looking toward the sun.
+        float glow = pow(saturate(dot(-v, toSun)), 3.0) * translucency;
+        color += albedo * sunRadiance * glow * 0.35 * shadow;
+    }
     if (nl > 0.0) {
         float3 h = normalize(v + toSun);
         float nv = max(dot(n, v), 1e-4);
@@ -120,8 +133,7 @@ float4 psDeferred(FullscreenOut i) : SV_Target0
         float a = roughness * roughness;
         float3 fresnel = f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);
         float3 specular = distributionGGX(nh, a) * visibilitySmith(nl, nv, a) * fresnel;
-        float3 diffuse = diffuseColor * (1.0 - fresnel) / kPi;
-        color += (diffuse + specular) * sunRadiance * nl * sunShadow(worldPos, n, toSun, nl);
+        color += specular * sunRadiance * nl * sunShadow(worldPos, n, toSun, nl);
     }
 
     if (atmosphereOn) {

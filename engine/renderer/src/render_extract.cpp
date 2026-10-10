@@ -4,6 +4,38 @@ namespace foh {
 
 namespace {
 
+// Entities share a handful of meshes and materials, so each extraction thread keeps a tiny direct-mapped cache of the
+// lookups it did (valid while the lookup tables are unchanged). It saves the hash map traffic per entity and, in debug
+// builds (where every map iterator takes a global lock), keeps 30 threads from queueing on it.
+struct LookupCache {
+    struct MeshEntry {
+        u64 version = 0;
+        AssetId asset;
+        u32 submesh = 0, mesh = 0;
+    };
+    struct MaterialEntry {
+        u64 version = 0;
+        AssetId asset;
+        u32 index = 0;
+    };
+    MeshEntry meshes[16];
+    MaterialEntry materials[16];
+};
+
+u32 FindMesh(LookupCache& cache, const MeshLookup& lookup, const AssetId& asset, u32 submesh) {
+    LookupCache::MeshEntry& e = cache.meshes[AssetIdHash{}(asset) % 16u];
+    if (e.version == lookup.version() && e.asset == asset && e.submesh == submesh) return e.mesh;
+    e = {lookup.version(), asset, submesh, lookup.find(asset, submesh)};
+    return e.mesh;
+}
+
+u32 FindMaterial(LookupCache& cache, const MaterialLookup& lookup, const AssetId& asset) {
+    LookupCache::MaterialEntry& e = cache.materials[AssetIdHash{}(asset) % 16u];
+    if (e.version == lookup.version() && e.asset == asset) return e.index;
+    e = {lookup.version(), asset, lookup.find(asset)};
+    return e.index;
+}
+
 // Copies render data out of the world into the renderer's snapshot. Runs in
 // PostUpdate so it sees the frame's final transforms. ResMut on the link makes
 // the scheduler serialize it against anything else touching the link.
@@ -26,13 +58,14 @@ void extractRenderScene(ResMut<RenderSceneLink> link, Res<Time> time, Buffers<Sk
     // is fine: the renderer sorts instances by mesh and nothing depends on order.
     for (u32 i = 0; i < kMaxJobThreads; ++i) scene->staging(i).clear();
     meshes.parEach([scene](Entity e, const GlobalTransform& t, const MeshRenderer& m) {
+        static thread_local LookupCache cache;
         u32 mesh = m.mesh;
         if (m.asset.isValid()) {
             // Not uploaded (yet): skip it instead of drawing the wrong thing.
-            mesh = scene->meshLookup ? scene->meshLookup->find(m.asset, m.submesh) : MeshLookup::kInvalid;
+            mesh = scene->meshLookup ? FindMesh(cache, *scene->meshLookup, m.asset, m.submesh) : MeshLookup::kInvalid;
             if (mesh == MeshLookup::kInvalid) return;
         }
-        const u32 material = m.material.isValid() && scene->materialLookup ? scene->materialLookup->find(m.material) : 0u;
+        const u32 material = m.material.isValid() && scene->materialLookup ? FindMaterial(cache, *scene->materialLookup, m.material) : 0u;
         scene->staging(JobSystem::currentThreadSlot()).push_back({t.matrix(), m.color, mesh, material, e.id});
     });
     size_t total = 0;

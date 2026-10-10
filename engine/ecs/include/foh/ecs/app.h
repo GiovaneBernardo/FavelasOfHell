@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+#include <string>
 #include <cstdint>
 #include <memory>
 
@@ -147,6 +149,12 @@ public:
 
     void update(f32 deltaSeconds);
     size_t systemCount() const;
+    // Wall time of every system's last run, in registration order per stage (a diagnostic: the editor's --profile).
+    struct SystemTiming {
+        std::string name;
+        double ms;
+    };
+    std::vector<SystemTiming> systemTimings() const;
 
     struct Impl; // opaque: the scheduler's state (src/app.cpp)
 

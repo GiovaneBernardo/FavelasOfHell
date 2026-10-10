@@ -10,6 +10,8 @@
 
 namespace foh {
 
+inline constexpr u32 kNoMeshBlock = ~0u;
+
 struct MeshRange {
     u32 firstIndex = 0;
     u32 indexCount = 0;
@@ -18,6 +20,7 @@ struct MeshRange {
     // deforms as a whole, so a range knows how many there are and where the block starts (baseVertex).
     u32 vertexCount = 0;
     bool skinned = false;
+    u32 block = kNoMeshBlock; // the vertex/index block the range lives in; freed when its last range is released
 };
 
 // Joint indices (4 x u8) and weights (4 x unorm8, summing to 255) of one vertex. Parallel to MeshVertex.
@@ -33,8 +36,9 @@ static_assert(sizeof(SkinInfluence) == 8);
 // about them. A "mesh id" names one draw range (an imported mesh has one per submesh).
 //
 // Growing replaces the buffers (the old ones stay alive until the GPU is done with
-// them: NVRHI holds them through the command lists that use them). Space of released
-// meshes is not reused yet; the ranges are, so ids stay small.
+// them: NVRHI holds them through the command lists that use them). Vertex/index space is
+// handed out by a first-fit allocator and returns to it when the last range of a block is
+// released (streamed terrain tiles and hot-reloaded meshes depend on this); range ids are reused too.
 //
 // Thread-safety: append/addRange/releaseRange on the main thread between frames only;
 // the const accessors are safe from render jobs while no mutation happens.
@@ -56,6 +60,7 @@ public:
     struct Block {
         u32 firstIndex = 0;
         i32 baseVertex = 0;
+        u32 id = kNoMeshBlock; // pass it in the MeshRange of every range cut from this block
     };
     // `influences` is empty (static mesh) or one entry per vertex.
     Block append(nvrhi::IDevice* device, std::span<const MeshVertex> vertices, std::span<const u32> indices,
@@ -68,6 +73,16 @@ private:
     void upload(nvrhi::IDevice* device, size_t firstVertex, size_t vertexCount, size_t firstIndex, size_t indexCount);
     void grow(nvrhi::IDevice* device, size_t vertexCapacity, size_t indexCapacity);
 
+    struct Span {
+        u32 start, size;
+    };
+    struct BlockInfo {
+        u32 vertexStart = 0, vertexCount = 0, indexStart = 0, indexCount = 0, refs = 0;
+        bool live = false;
+    };
+    static u32 allocateSpan(std::vector<Span>& freeList, u32& top, u32 count);
+    static void freeSpan(std::vector<Span>& freeList, u32& top, u32 start, u32 count);
+
     nvrhi::BufferHandle m_vertices;
     nvrhi::BufferHandle m_indices;
     nvrhi::BufferHandle m_influences;
@@ -78,6 +93,10 @@ private:
     size_t m_indexCapacity = 0;
     std::vector<MeshRange> m_ranges;
     std::vector<u32> m_freeRanges;
+    std::vector<Span> m_freeVertexSpans, m_freeIndexSpans; // sorted by start, coalesced
+    u32 m_vertexTop = 0, m_indexTop = 0;                    // high-water marks of the two buffers
+    std::vector<BlockInfo> m_blocks;
+    std::vector<u32> m_freeBlockIds;
 };
 
 } // namespace foh

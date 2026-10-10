@@ -1,0 +1,23 @@
+foh-meta 1
+guid f5197a338e91615f7284475289558a10
+format fbx
+importer 3
+content b8619d9470f20736
+stamp ca27160e5fcd921b
+setting generatePrefab 1
+setting generateMips 1
+setting compressTextures 1
+setting maxTextureSize 0
+setting textureRole auto
+setting clipLoop auto
+setting clipRootMotion auto
+setting clipRootJoint auto
+setting clipRotationToleranceDeg 0.05
+setting clipTranslationTolerance 0.0005
+setting animationOnly 1
+setting clipSegments idle (mocap)=8.0-19.5:loop;idle break 1=24.5-31.5;idle break 2=33.5-37.5;idle break 3=44.5-48.0;idle break 4=50.5-54.8
+sub	clip	1696264572dfdba505b4e68eb1536dbd	live	-	segment:idle (mocap)	idle (mocap)
+sub	clip	57225cfe693675c5d626ceae4335b0f2	live	-	segment:idle break 1	idle break 1
+sub	clip	cebfafccc5d3731f40f909865f60cf7f	live	-	segment:idle break 2	idle break 2
+sub	clip	b4709847e888e5bdb7f66e54eb519944	live	-	segment:idle break 3	idle break 3
+sub	clip	84a6e1dac52d38b4dee04591cb451ded	live	-	segment:idle break 4	idle break 4

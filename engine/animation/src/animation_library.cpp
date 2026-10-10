@@ -6,7 +6,7 @@ namespace foh {
 
 u64 HashLocomotionClips(const LocomotionClips& clips, bool crouch) {
     // LocomotionClips is only AssetIds (no padding), so its bytes are its value.
-    static_assert(sizeof(LocomotionClips) == 20 * sizeof(AssetId));
+    static_assert(sizeof(LocomotionClips) == 24 * sizeof(AssetId));
     return HashBytes(&clips, sizeof(clips), crouch ? 1 : 0);
 }
 
@@ -18,6 +18,7 @@ void AnimationLibrary::rebind(const AssetId& skeleton, const AssetId& clip) {
 }
 
 void AnimationLibrary::setSkeleton(const AssetId& id, SkeletonAsset skeleton) {
+    m_rigs[id] = FindRig(skeleton);
     m_skeletons[id] = std::make_shared<const SkeletonAsset>(std::move(skeleton));
     for (const auto& [clipId, clip] : m_clips) rebind(id, clipId);
     m_moveSets.clear();
@@ -26,6 +27,7 @@ void AnimationLibrary::setSkeleton(const AssetId& id, SkeletonAsset skeleton) {
 
 void AnimationLibrary::removeSkeleton(const AssetId& id) {
     m_skeletons.erase(id);
+    m_rigs.erase(id);
     for (auto it = m_bindings.begin(); it != m_bindings.end();) it = it->first.first == id ? m_bindings.erase(it) : std::next(it);
     ++m_generation;
 }
@@ -52,6 +54,11 @@ const SkeletonAsset* AnimationLibrary::skeleton(const AssetId& id) const {
 const ClipAsset* AnimationLibrary::clip(const AssetId& id) const {
     const auto it = m_clips.find(id);
     return it == m_clips.end() ? nullptr : it->second.get();
+}
+
+const RigInfo* AnimationLibrary::rig(const AssetId& id) const {
+    const auto it = m_rigs.find(id);
+    return it == m_rigs.end() ? nullptr : &it->second;
 }
 
 const ClipBinding* AnimationLibrary::binding(const AssetId& skeleton, const AssetId& clip) const {

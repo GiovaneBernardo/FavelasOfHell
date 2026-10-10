@@ -20,3 +20,7 @@
 ## Changing the model (addendum)
 
 The player shows its model through `PrefabSlot { sourcePath }` (engine, `foh/scene/prefab_request.h`) instead of the one-shot `PrefabRequest`: changing the path swaps the model at any time (old parts and animation components are removed first). Ways to change it: edit `sourcePath` in the inspector, right click a model in the content browser > "Use as player model" / "Use as model of selected entity", or set it from game code. Fixes saved with the prefab editor (height, rotation, sit on ground: the `.fvariant` next to the source) are applied. An unrigged model (a static glTF) works too: it glides without animating. To animate a model it must be rigged with the Mixamo skeleton (upload it to Mixamo, download "with skin"), because the clips find joints by name.
+
+## Update (2026-10-10)
+
+Walking is the default and Left Shift runs. Jumping follows the animation (see the ADR 0009 addendum): Space starts the wind-up, the body leaves the ground when the animation springs, the direction is locked in the air and landing keeps 80% of the speed for 0.4 s before the controls blend back in. C crouches procedurally when there are no crouch clips. While the game owns the mouse the editor UI no longer sees it (no hover, clicks or wheel reach the panels behind the invisible cursor).

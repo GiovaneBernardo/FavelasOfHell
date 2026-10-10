@@ -181,6 +181,24 @@ std::vector<CookedAsset> CookScene(const ImportedScene& scene, const ImportSetti
         return out;
     }
 
+    // A file that only carries animation: clips (cut into segments when asked), nothing else.
+    if (settings.animationOnly) {
+        std::vector<std::string> sliceWarnings;
+        for (const ImportedClip& clip : SliceClips(scene.clips, settings, &sliceWarnings)) {
+            if (clip.skeleton < 0 || static_cast<size_t>(clip.skeleton) >= scene.skeletons.size() || clip.frameCount == 0) continue;
+            CookedAsset c;
+            c.key = clip.key;
+            c.name = clip.name;
+            c.kind = AssetKind::AnimationClip;
+            c.guid = idFor(AssetKind::AnimationClip, c.key);
+            c.bytes = SerializeClip(CookClip(clip, scene.skeletons[static_cast<size_t>(clip.skeleton)], settings, warnings), c.guid);
+            out.push_back(std::move(c));
+        }
+        if (warnings)
+            for (std::string& w : sliceWarnings) warnings->push_back(std::move(w));
+        return out;
+    }
+
     // ---- materials ----
     std::vector<AssetId> materialIds(scene.materials.size());
     for (size_t i = 0; i < scene.materials.size(); ++i) {
@@ -236,7 +254,7 @@ std::vector<CookedAsset> CookScene(const ImportedScene& scene, const ImportSetti
         skeletonIds[i] = c.guid;
         out.push_back(std::move(c));
     }
-    for (const ImportedClip& clip : scene.clips) {
+    for (const ImportedClip& clip : SliceClips(scene.clips, settings, warnings)) {
         if (clip.skeleton < 0 || static_cast<size_t>(clip.skeleton) >= scene.skeletons.size() || clip.frameCount == 0) continue;
         CookedAsset c;
         c.key = clip.key;

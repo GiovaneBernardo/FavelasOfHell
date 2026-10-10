@@ -197,6 +197,9 @@ void AssetInspector::drawSource() {
         }
     }
     ImGui::Text("%u mesh(es), %u material(s), %u texture(s)", counts[0], counts[1], counts[2]);
+    u32 clipCount = 0;
+    for (const SubAssetRecord& s : rec->subAssets) clipCount += (!s.tombstone && s.kind == AssetKind::AnimationClip) ? 1 : 0;
+    if (clipCount) ImGui::Text("%u animation clip(s)", clipCount);
 
     if (prefab.isValid() && m_host.editPrefab) {
         if (ImGui::Button("Edit prefab...")) m_host.editPrefab(rec->path);
@@ -204,6 +207,29 @@ void AssetInspector::drawSource() {
         ImGui::SameLine();
     }
     if (m_host.reimport && ImGui::Button("Reimport")) m_host.reimport(rec->path);
+
+    if (rec->format != "image" && m_host.applyImportSettings) {
+        if (m_settingsFor != rec->path) {
+            m_settingsFor = rec->path;
+            m_settings = rec->settings;
+            std::snprintf(m_segments, sizeof(m_segments), "%s", m_settings.clipSegments.c_str());
+        }
+        ImGui::SeparatorText("Animation import");
+        ImGui::Checkbox("Animation only (clips, no mesh or skeleton)", &m_settings.animationOnly);
+        ImGui::TextDisabled("Clip segments (cut a long take into clips):");
+        ImGui::InputTextMultiline("##segments", m_segments, sizeof(m_segments), ImVec2(-1.0f, ImGui::GetTextLineHeight() * 5.0f));
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("name=start-end[:loop]; one per line or separated by ';'. Seconds on the take.\n"
+                              "Example:  idle=14.0-22.5:loop; fidget=40-46.2\n"
+                              ":loop moves the end to where the pose matches the start.");
+        m_settings.clipSegments = m_segments;
+        if (ImGui::Button("Apply and reimport")) m_host.applyImportSettings(rec->path, m_settings);
+        ImGui::SameLine();
+        if (ImGui::Button("Reset")) {
+            m_settings = rec->settings;
+            std::snprintf(m_segments, sizeof(m_segments), "%s", m_settings.clipSegments.c_str());
+        }
+    }
 
     if (rec->format == "image") {
         for (const SubAssetRecord& s : rec->subAssets) {
@@ -221,7 +247,8 @@ void AssetInspector::drawSource() {
     static const struct {
         AssetKind kind;
         const char* title;
-    } kGroups[] = {{AssetKind::Prefab, "Prefab"}, {AssetKind::Material, "Materials"}, {AssetKind::Texture, "Textures"}, {AssetKind::Mesh, "Meshes"}};
+    } kGroups[] = {{AssetKind::Prefab, "Prefab"}, {AssetKind::Material, "Materials"}, {AssetKind::Texture, "Textures"}, {AssetKind::Mesh, "Meshes"},
+                 {AssetKind::AnimationClip, "Animation clips"}};
     for (const auto& g : kGroups) {
         u32 n = 0;
         for (const SubAssetRecord& s : rec->subAssets) n += (!s.tombstone && s.kind == g.kind) ? 1 : 0;

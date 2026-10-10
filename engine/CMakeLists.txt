@@ -11,6 +11,7 @@
 #   core -> assets, physics
 #   core, jobs, ecs, assets, renderer -> animation   (pose evaluation; produces SkinPalette for the renderer)
 #   assets, ecs, renderer, animation -> scene           (prefab instantiation, mesh upload, reimport sync)
+#   core, jobs, ecs, renderer -> world                  (terrain, later roads and building generation; ADR 0012)
 add_subdirectory(core)
 add_subdirectory(jobs)
 add_subdirectory(platform)
@@ -20,6 +21,7 @@ add_subdirectory(assets)
 add_subdirectory(renderer)
 add_subdirectory(animation)
 add_subdirectory(scene)
+add_subdirectory(world)
 add_subdirectory(physics)
 
 get_property(_foh_modules GLOBAL PROPERTY FOH_ENGINE_MODULES)

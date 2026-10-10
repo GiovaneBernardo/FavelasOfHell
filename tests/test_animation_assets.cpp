@@ -512,7 +512,27 @@ TEST_CASE("Mixamo FBX: report on every clip" * doctest::skip(std::getenv("FOH_TE
             MESSAGE(clip.name << ": " << clip.frameCount << " frames " << clip.duration() << "s loops=" << clip.loops << " root="
                               << static_cast<int>(clip.rootMode) << " speed=" << clip.rootSpeed() << " yaw=" << clip.rootYaw() * 57.2958f
                               << "deg sync=" << clip.hasSync << " L=" << clip.leftFootPhase << " R=" << clip.rightFootPhase
-                              << " tracks=" << clip.tracks.size() << " keys=" << keys << " warnings=" << r.warnings.size());
+                              << " tracks=" << clip.tracks.size() << " keys=" << keys << " air=" << clip.hasAir << ":" << clip.airStart << "-" << clip.airEnd << " warnings=" << r.warnings.size());
         }
+    }
+}
+
+// Prints the clips a take yields for given segments (run with -s): FOH_TEST_TAKE = the fbx, FOH_TEST_SEGMENTS = the
+// clipSegments setting. A way to check a cut before using it.
+TEST_CASE("Take segments: report" * doctest::skip(std::getenv("FOH_TEST_TAKE") == nullptr)) {
+    TempDir t;
+    AssetDb db(dbFor(t));
+    ImportSettings settings;
+    settings.animationOnly = true;
+    if (const char* seg = std::getenv("FOH_TEST_SEGMENTS")) settings.clipSegments = seg;
+    const ImportResult r = db.importFile(fs::path(std::getenv("FOH_TEST_TAKE")), false, &settings);
+    INFO(r.error);
+    REQUIRE(r.ok);
+    for (const std::string& w : r.warnings) MESSAGE("warning: " << w);
+    for (const AssetId& id : r.assets) {
+        ClipAsset clip;
+        if (!db.load(id, clip)) continue;
+        MESSAGE(clip.name << ": " << clip.duration() << "s loops=" << clip.loops << " root=" << static_cast<int>(clip.rootMode)
+                          << " speed=" << clip.rootSpeed() << " yaw=" << clip.rootYaw() * 57.2958f << "deg tracks=" << clip.tracks.size());
     }
 }

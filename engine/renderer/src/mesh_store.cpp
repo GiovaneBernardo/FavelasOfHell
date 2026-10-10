@@ -1,5 +1,6 @@
 #include "mesh_store.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "foh/log.h"
@@ -85,7 +86,7 @@ MeshStore MeshStore::create(nvrhi::IDevice* device) {
     store.grow(device, 1u << 16, 1u << 18);
     for (const MeshData& m : meshes) {
         const Block b = store.append(device, m.vertices, m.indices);
-        store.addRange({b.firstIndex, static_cast<u32>(m.indices.size()), b.baseVertex});
+        store.addRange({b.firstIndex, static_cast<u32>(m.indices.size()), b.baseVertex, 0, false, b.id});
     }
     return store;
 }
@@ -119,8 +120,11 @@ void MeshStore::grow(nvrhi::IDevice* device, size_t vertexCapacity, size_t index
     sb.debugName = "MeshSkinInfluences";
     m_influences = device->createBuffer(sb);
 
+    m_cpuVertices.resize(vertexCapacity);
+    m_cpuInfluences.resize(vertexCapacity);
+    m_cpuIndices.resize(indexCapacity);
     // The new buffers start empty: re-upload what the old ones held.
-    if (!m_cpuVertices.empty() || !m_cpuIndices.empty()) upload(device, 0, m_cpuVertices.size(), 0, m_cpuIndices.size());
+    if (m_vertexTop || m_indexTop) upload(device, 0, m_vertexTop, 0, m_indexTop);
 }
 
 void MeshStore::upload(nvrhi::IDevice* device, size_t firstVertex, size_t vertexCount, size_t firstIndex, size_t indexCount) {
@@ -140,26 +144,73 @@ void MeshStore::upload(nvrhi::IDevice* device, size_t firstVertex, size_t vertex
     device->executeCommandLists(&cmd, 1);
 }
 
+u32 MeshStore::allocateSpan(std::vector<Span>& freeList, u32& top, u32 count) {
+    for (size_t i = 0; i < freeList.size(); ++i) {
+        if (freeList[i].size < count) continue;
+        const u32 start = freeList[i].start;
+        freeList[i].start += count;
+        freeList[i].size -= count;
+        if (freeList[i].size == 0) freeList.erase(freeList.begin() + static_cast<std::ptrdiff_t>(i));
+        return start;
+    }
+    const u32 start = top;
+    top += count;
+    return start;
+}
+
+void MeshStore::freeSpan(std::vector<Span>& freeList, u32& top, u32 start, u32 count) {
+    if (count == 0) return;
+    size_t at = 0;
+    while (at < freeList.size() && freeList[at].start < start) ++at;
+    freeList.insert(freeList.begin() + static_cast<std::ptrdiff_t>(at), Span{start, count});
+    // Coalesce with the next and the previous span.
+    if (at + 1 < freeList.size() && freeList[at].start + freeList[at].size == freeList[at + 1].start) {
+        freeList[at].size += freeList[at + 1].size;
+        freeList.erase(freeList.begin() + static_cast<std::ptrdiff_t>(at) + 1);
+    }
+    if (at > 0 && freeList[at - 1].start + freeList[at - 1].size == freeList[at].start) {
+        freeList[at - 1].size += freeList[at].size;
+        freeList.erase(freeList.begin() + static_cast<std::ptrdiff_t>(at));
+        --at;
+    }
+    // A free span touching the high-water mark just lowers it.
+    if (freeList[at].start + freeList[at].size == top) {
+        top = freeList[at].start;
+        freeList.erase(freeList.begin() + static_cast<std::ptrdiff_t>(at));
+    }
+}
+
 MeshStore::Block MeshStore::append(nvrhi::IDevice* device, std::span<const MeshVertex> vertices, std::span<const u32> indices,
                                    std::span<const SkinInfluence> influences) {
-    const Block block{static_cast<u32>(m_cpuIndices.size()), static_cast<i32>(m_cpuVertices.size())};
-    m_cpuVertices.insert(m_cpuVertices.end(), vertices.begin(), vertices.end());
-    if (influences.size() == vertices.size()) m_cpuInfluences.insert(m_cpuInfluences.end(), influences.begin(), influences.end());
-    else m_cpuInfluences.resize(m_cpuVertices.size());
-    m_cpuIndices.insert(m_cpuIndices.end(), indices.begin(), indices.end());
+    const u32 vertexStart = allocateSpan(m_freeVertexSpans, m_vertexTop, static_cast<u32>(vertices.size()));
+    const u32 indexStart = allocateSpan(m_freeIndexSpans, m_indexTop, static_cast<u32>(indices.size()));
 
-    if (m_cpuVertices.size() > m_vertexCapacity || m_cpuIndices.size() > m_indexCapacity) {
-        size_t vc = m_vertexCapacity, ic = m_indexCapacity;
-        while (vc < m_cpuVertices.size()) vc *= 2;
-        while (ic < m_cpuIndices.size()) ic *= 2;
-        grow(device, vc, ic); // uploads everything, including the new block
+    u32 blockId;
+    if (!m_freeBlockIds.empty()) {
+        blockId = m_freeBlockIds.back();
+        m_freeBlockIds.pop_back();
     } else {
-        upload(device, static_cast<size_t>(block.baseVertex), vertices.size(), block.firstIndex, indices.size());
+        blockId = static_cast<u32>(m_blocks.size());
+        m_blocks.emplace_back();
     }
-    return block;
+    m_blocks[blockId] = {vertexStart, static_cast<u32>(vertices.size()), indexStart, static_cast<u32>(indices.size()), 0, true};
+
+    if (m_vertexTop > m_vertexCapacity || m_indexTop > m_indexCapacity) {
+        size_t vc = m_vertexCapacity, ic = m_indexCapacity;
+        while (vc < m_vertexTop) vc *= 2;
+        while (ic < m_indexTop) ic *= 2;
+        grow(device, vc, ic); // reallocates the CPU mirrors and re-uploads everything below the high-water marks
+    }
+    std::copy(vertices.begin(), vertices.end(), m_cpuVertices.begin() + vertexStart);
+    if (influences.size() == vertices.size()) std::copy(influences.begin(), influences.end(), m_cpuInfluences.begin() + vertexStart);
+    else std::fill_n(m_cpuInfluences.begin() + vertexStart, vertices.size(), SkinInfluence{});
+    std::copy(indices.begin(), indices.end(), m_cpuIndices.begin() + indexStart);
+    upload(device, vertexStart, vertices.size(), indexStart, indices.size());
+    return Block{indexStart, static_cast<i32>(vertexStart), blockId};
 }
 
 u32 MeshStore::addRange(const MeshRange& range) {
+    if (range.block < m_blocks.size()) ++m_blocks[range.block].refs;
     if (!m_freeRanges.empty()) {
         const u32 id = m_freeRanges.back();
         m_freeRanges.pop_back();
@@ -172,8 +223,16 @@ u32 MeshStore::addRange(const MeshRange& range) {
 
 void MeshStore::releaseRange(u32 id) {
     if (id < static_cast<u32>(BuiltinMesh::Count) || id >= m_ranges.size()) return; // builtins are permanent
+    const u32 block = m_ranges[id].block;
     m_ranges[id] = {}; // indexCount 0: draws nothing
     m_freeRanges.push_back(id);
+    if (block < m_blocks.size() && m_blocks[block].live && --m_blocks[block].refs == 0) {
+        BlockInfo& b = m_blocks[block];
+        freeSpan(m_freeVertexSpans, m_vertexTop, b.vertexStart, b.vertexCount);
+        freeSpan(m_freeIndexSpans, m_indexTop, b.indexStart, b.indexCount);
+        b.live = false;
+        m_freeBlockIds.push_back(block);
+    }
 }
 
 } // namespace foh

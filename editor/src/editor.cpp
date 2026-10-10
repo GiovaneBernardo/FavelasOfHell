@@ -1,4 +1,5 @@
 #include "editor.h"
+#include "foh/world/surface.h"
 #include "water_test_scene.h"
 
 #include <algorithm>
@@ -181,6 +182,32 @@ bool Editor::init() {
         wp.camera.pitch = v.pitch;
     }
 
+    if (m_options.terrain) {
+        m_showTerrain = true;
+        ensureTerrain();
+        if (!m_options.autoplay.empty()) m_showTerrain = false; // QA: playing, so the Game view is what the screenshot should show
+        FlyCamera& cam = m_viewports[0].camera;
+        struct View { f32 x, z, eye, yaw, pitch; }; // eye: metres above the ground (negative: absolute height)
+        const View views[] = {{0.0f, 2200.0f, -1100.0f, 0.0f, -0.42f},  // from the sea, looking north at Vidigal, Dois Irmaos behind
+                              {-30.0f, -60.0f, 1.8f, 0.0f, -0.05f},     // on the Vidigal slope, looking uphill
+                              {-80.0f, -260.0f, 1.8f, 3.1416f, -0.10f}, // up the hill, looking down over the sea
+                              {1500.0f, 0.0f, 1.8f, 1.9f, -0.02f}};     // Leblon beach, looking along the shore
+        const View& v = views[std::clamp(m_options.terrainView, 0, 3)];
+        f32 vz = v.z;
+        if (m_options.terrainView == 3) // the shoreline: the first dry spot walking inland from the sea
+            for (vz = 1200.0f; vz > -2500.0f && m_terrainPanel.terrain()->height(v.x, vz) < 2.5f; vz -= 0.5f) {}
+        cam.position = Vec3(v.x, v.eye < 0.0f ? -v.eye : m_terrainPanel.terrain()->height(v.x, vz) + v.eye, vz);
+        cam.yaw = v.yaw;
+        cam.pitch = v.pitch;
+        if (m_options.roadsTest) {
+            // Roads QA: hover above the beach looking north at the avenue.
+            cam.yaw = 0.0f;
+            cam.pitch = -0.27f;
+            cam.position.z += 95.0f;
+            cam.position.y = 38.0f;
+        }
+    }
+
     m_thumbs.init(*m_renderer, *m_jobs);
     m_showWorkshop = m_options.openWorkshop;
     if (m_options.workshopTest) m_workshop.enableSelfTest();
@@ -206,6 +233,12 @@ void Editor::initAssets() {
 
     ContentBrowserActions actions;
     actions.importFile = [this](const fs::path& file) { importFile(file, 0, 0, false, false); };
+    actions.importAsAnimation = [this](const fs::path& file) {
+        // Clips only: no meshes, materials, skeleton or prefab (animation packs carry a character in every file).
+        ImportSettings s;
+        s.animationOnly = true;
+        importFile(file, 0, 0, false, false, &s);
+    };
     actions.applyMaterial = [this](const std::string& rel) { applyMaterialToSelection(rel); };
     actions.placeModel = [this](const std::string& rel) { placeAssetByPath(rel, 0, 0, false); };
     actions.openWorkshop = [this] { m_showWorkshop = true; };
@@ -239,6 +272,7 @@ void Editor::initAssets() {
         m_assetBridge->assetsChanged(ids); // reloads the material where it is in use
     };
     inspectorHost.editPrefab = [this](const std::string& rel) { openPrefabEditor(rel); };
+    inspectorHost.applyImportSettings = [this](const std::string& rel, const ImportSettings& s) { handleImportResult(m_assets->setImportSettings(rel, s)); };
     inspectorHost.reimport = [this](const std::string& rel) { m_assets->beginImport(m_assets->sourceRoot() / PathFromUtf8(rel), true); };
     inspectorHost.refreshBrowser = [this] { m_browser.refresh(); };
     m_assetInspector.init(*m_assets, m_picker, std::move(inspectorHost));
@@ -429,6 +463,56 @@ void Editor::assignLocomotionClips(World& world, Entity root) {
         if (LocomotionControl* control = world.get<LocomotionControl>(root)) control->velocity = Vec3(0.0f, 0.0f, m_options.walkSpeed);
 }
 
+// QA (--preview "name@t1,t2,..."): the player plays the clip whose name contains `name`, frozen at each time in turn, with a
+// screenshot per time (<screenshot stem>_<k>.png). Frame 30 picks the clip; then 4 frames per time (set, settle, shoot, rest).
+void Editor::previewStep() {
+    const std::string& spec = m_options.preview;
+    const size_t at = spec.find('@');
+    const std::string name = spec.substr(0, at);
+    std::vector<f32> times;
+    if (at != std::string::npos) {
+        size_t pos = at + 1;
+        while (pos < spec.size()) {
+            size_t end = spec.find(',', pos);
+            if (end == std::string::npos) end = spec.size();
+            times.push_back(std::strtof(spec.c_str() + pos, nullptr));
+            pos = end + 1;
+        }
+    }
+    if (m_frameCount == 0 && m_options.shots.empty()) {
+        for (size_t k = 0; k < times.size(); ++k) m_options.shots += (k ? "," : "") + std::to_string(40 + 4 * k + 3);
+    }
+    World& world = m_scenes[0].app->world();
+    const ComponentId with[] = {world.component<LocomotionControl>(), world.component<PrefabSlot>()};
+    std::vector<Entity> found;
+    findEntities(world, with, {}, found);
+    if (found.empty()) return;
+    LocomotionControl* control = world.get<LocomotionControl>(found.front());
+    if (!control) return;
+    if (m_frameCount == 30) {
+        std::string lowerName = name;
+        for (char& c : lowerName) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for (const AssetId& id : m_assets->assetsOfKind(AssetKind::AnimationClip)) {
+            const AssetInfo* info = m_assets->find(id);
+            std::string n = info ? info->name : std::string();
+            for (char& c : n) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (n.find(lowerName) == std::string::npos) continue;
+            control->previewClip = id;
+            control->previewPlay = false;
+            m_assetBridge->loader().request(id);
+            logAsset("Preview: " + (info ? info->name : std::string("?")));
+            break;
+        }
+        if (!control->previewClip.isValid()) logAsset("Preview: no clip named '" + name + "'");
+    }
+    if (m_frameCount >= 40 && !times.empty()) {
+        const u32 k = (m_frameCount - 40) / 4, phase = (m_frameCount - 40) % 4;
+        if (k < times.size()) {
+            if (phase == 0) control->previewTime = times[k];
+        }
+    }
+}
+
 // QA: replaces the real input with a script, so the controls can be exercised without a person at the keyboard.
 // Format: comma separated "KEY:frame" (a press on that frame) or "KEY:from-to" (held), KEY = W A S D C V SPACE SHIFT, or
 // "MOUSEX:from-to=pixelsPerFrame" / "MOUSEY:...". Frames count editor frames.
@@ -472,7 +556,7 @@ void Editor::applyAutoplay(GameInput& input) const {
     }
 }
 
-ImportTicket Editor::importFile(const fs::path& file, float dropX, float dropY, bool hasDropPosition, bool place) {
+ImportTicket Editor::importFile(const fs::path& file, float dropX, float dropY, bool hasDropPosition, bool place, const ImportSettings* initial) {
     const std::string name = PathToUtf8(file.filename());
     if (DetectSourceFormat(file) == SourceFormat::Unknown) {
         logAsset("Cannot import '" + name + "': supported are .gltf, .glb, .fbx, .png, .jpg, .tga, .bmp.");
@@ -480,7 +564,7 @@ ImportTicket Editor::importFile(const fs::path& file, float dropX, float dropY, 
     }
     // Returns at once: parsing, texture decoding, mips and BC compression run on the worker threads.
     Placement p;
-    p.ticket = m_assets->beginImport(file);
+    p.ticket = m_assets->beginImport(file, false, initial);
     p.x = dropX;
     p.y = dropY;
     p.hasPosition = hasDropPosition;
@@ -632,6 +716,8 @@ void Editor::updateAssets(float dt) {
     }
     for (const ImportResult& r : m_assets->pollImports()) handleImportResult(r);
     m_assetBridge->pump(); // loaded meshes/materials/textures -> renderer, a few ms per frame at most
+    if (m_terrainPanel.created()) m_terrainPanel.updateMaterial(*m_assets, m_assetBridge->loader());
+    if (m_roadTool.created()) m_roadTool.updateMaterial(*m_assets, m_assetBridge->loader());
 
     // Frame-time bookkeeping while anything is still streaming: the point of all this is that it stays smooth.
     const TextureStats ts = m_renderer->textureStats();
@@ -767,8 +853,52 @@ void Editor::createWaterScene() {
     m_scenes.push_back(std::move(scene));
 }
 
+// Creates the terrain in the main world the first time it is needed (menu View > Terrain, or --terrain). The sea is
+// switched on for the viewports of that world, so the coast reads right.
+void Editor::ensureTerrain() {
+    if (m_terrainPanel.created()) return;
+    m_terrainPanel.ensureCreated(*m_renderer, *m_jobs, m_scenes[0].app->world(), fs::path(FOH_PROJECT_ROOT) / "world" / "terrain.fohterrain");
+    // Game code walks on it: the player stands on the terrain and bumps into trunks (see foh/world/surface.h).
+    if (!m_scenes[0].app->world().resource<WorldSurface>()) m_scenes[0].app->insertResource(WorldSurface{});
+    if (WorldSurface* ws = m_scenes[0].app->world().resource<WorldSurface>()) {
+        ws->terrain = m_terrainPanel.terrain();
+        ws->vegetation = m_terrainPanel.vegetation();
+    }
+    m_roadTool.init(*m_renderer, m_scenes[0].app->world(), *m_terrainPanel.terrain(), m_terrainPanel.vegetation(),
+                    fs::path(FOH_PROJECT_ROOT) / "world" / "roads.fohroads");
+    if (m_options.roadsTest) {
+        // QA: an avenue along Leblon beach a little inland of the shore, and a street climbing away from it, both carved.
+        Terrain& t = *m_terrainPanel.terrain();
+        auto shore = [&](f32 x) {
+            f32 z = 1200.0f;
+            while (z > -2500.0f && t.height(x, z) < 2.5f) z -= 1.0f;
+            return z;
+        };
+        Road avenue;
+        avenue.name = "Beach avenue";
+        for (f32 x = 1200.0f; x <= 2400.0f; x += 300.0f) avenue.points.push_back({x, shore(x) - 35.0f});
+        m_roadTool.addRoad(std::move(avenue), true);
+        Road street;
+        street.name = "Side street";
+        street.width = 6.0f;
+        const f32 z0 = shore(1500.0f) - 35.0f;
+        for (int i = 0; i < 5; ++i) street.points.push_back({1500.0f + 12.0f * std::sin(f32(i)), z0 - 70.0f * f32(i)});
+        m_roadTool.addRoad(std::move(street), true);
+    }
+    for (ViewportPanel& p : m_viewports) {
+        if (p.sceneIndex != 0) continue;
+        p.water = true;
+        p.grid = false; // the editor grid lies at sea level, right through the water
+        p.camera.farZ = std::max(p.camera.farZ, 14000.0f);
+        m_renderer->setViewportFlags(p.id, FlagsOf(p));
+    }
+}
+
 void Editor::shutdown() {
     if (m_renderer) m_renderer->device().waitIdle();
+    m_roadTool.shutdown(); // saves the roads; before the terrain they stand on goes
+    if (WorldSurface* ws = m_scenes.empty() ? nullptr : m_scenes[0].app->world().resource<WorldSurface>()) *ws = WorldSurface{};
+    m_terrainPanel.shutdown(); // saves the sculpting, then releases the tile meshes while the renderer and world still exist
     m_prefs.save();
     m_workshop.shutdown();
     m_assetInspector.flush();
@@ -809,12 +939,33 @@ int Editor::run() {
         if (!startupImportDone && rendered >= 3) {
             startupImportDone = true;
             const ViewportPanel& p = m_viewports.front();
-            importFile(PathFromUtf8(m_options.importFile), p.imageX + p.imageW * 0.5f, p.imageY + p.imageH * 0.62f, true);
+            ImportSettings initial;
+            bool haveInitial = false;
+            size_t pos = 0;
+            while (pos < m_options.importSettings.size()) {
+                size_t end = m_options.importSettings.find('|', pos);
+                if (end == std::string::npos) end = m_options.importSettings.size();
+                const std::string item = m_options.importSettings.substr(pos, end - pos);
+                pos = end + 1;
+                const size_t eq = item.find('=');
+                if (eq == std::string::npos) continue;
+                const std::string key = item.substr(0, eq), value = item.substr(eq + 1);
+                haveInitial = true;
+                if (key == "animationOnly") initial.animationOnly = value != "0";
+                else if (key == "clipSegments") initial.clipSegments = value;
+                else if (key == "clipLoop") initial.clipLoop = value;
+                else if (key == "clipRootMotion") initial.clipRootMotion = value;
+                else haveInitial = haveInitial && true;
+            }
+            importFile(PathFromUtf8(m_options.importFile), p.imageX + p.imageW * 0.5f, p.imageY + p.imageH * 0.62f, true, true,
+                       haveInitial ? &initial : nullptr);
         }
         if (rendered == 5 && !m_options.prefabEdit.empty()) openPrefabEditor(m_options.prefabEdit);
         if (rendered >= 30 && rendered < 200 && m_options.prefabQa && m_prefabEditor.isOpen() && m_prefabEditor.runSelfTest(1.8f)) m_options.prefabQa = false;
         if (rendered == 5 && !m_options.inspect.empty()) m_assetInspector.inspectPath(m_options.inspect);
+        if (rendered == 8 && !m_options.inspect.empty()) ImGui::SetWindowFocus("Asset Inspector"); // QA: show it
         const auto now = Clock::now();
+        if (m_options.profile) m_profileWorstMs = std::max(m_profileWorstMs, std::chrono::duration<double, std::milli>(now - last).count()); // unclamped: a freeze shows
         const float dt = std::min(std::chrono::duration<float>(now - last).count(), 0.1f);
         last = now;
 
@@ -833,6 +984,16 @@ int Editor::run() {
     return errors ? 2 : 0;
 }
 
+void Editor::profileLap(const char* name, double ms) {
+    if (!m_options.profile) return;
+    for (auto& [n, sum] : m_profile)
+        if (n == name || !std::strcmp(n, name)) {
+            sum += ms;
+            return;
+        }
+    m_profile.emplace_back(name, ms);
+}
+
 bool Editor::frame(float dt) {
     // Window resize -> swapchain.
     u32 w = 0, h = 0;
@@ -847,6 +1008,11 @@ bool Editor::frame(float dt) {
     if (m_options.stress) runStress();
 
     // 1. UI (also decides viewport sizes, activity and cameras).
+    {
+        bool gameOwnsMouse = false;
+        for (const ViewportPanel& p : m_viewports) gameOwnsMouse = gameOwnsMouse || (p.open && !p.useEditorCamera && p.sceneIndex == 0 && p.capturing);
+        m_platform.setMouseCaptured(gameOwnsMouse);
+    }
     m_theme.update(*m_window);
     m_workshop.update();
     m_prefabEditor.update();
@@ -857,11 +1023,47 @@ bool Editor::frame(float dt) {
     m_sceneRefs.clear();
     for (SceneEntry& sc : m_scenes) m_sceneRefs.push_back({sc.name.c_str(), &sc.app->world()});
     if (!m_selection.valid(m_sceneRefs)) m_selection.entity = kNullEntity;
+    const auto uiStart = std::chrono::steady_clock::now();
     buildUi(dt);
+    profileLap("build ui", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - uiStart).count());
     ImGui::Render();
     m_platform.endFrame();
     m_thumbs.endFrame(); // finished thumbnails reach the GPU before the UI is drawn
     m_prefs.saveIfDirty(ImGui::GetTime());
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        if (m_options.terrainSculpt && m_terrainPanel.created() && m_frameCount >= 60 && m_frameCount < 150) {
+        // QA: a stroke where the camera looks, through the same Terrain calls the brush tool makes (raise, then flatten).
+        FlyCamera& cam = m_viewports[0].camera;
+        const Vec3 dir = cam.rotation() * Vec3(0, 0, -1);
+        Vec3 hit;
+        if (m_terrainPanel.terrain()->raycast(cam.position, dir, 4000.0f, hit)) {
+            if (m_frameCount == 60) m_terrainPanel.terrain()->beginStroke();
+            BrushStamp s;
+            s.mode = m_frameCount < 110 ? BrushMode::Raise : BrushMode::Flatten;
+            s.center = Vec2(hit.x + std::sin(static_cast<float>(m_frameCount) * 0.1f) * 6.0f, hit.z);
+            s.radius = 14.0f;
+            s.dt = 1.0f / 60.0f;
+            s.strength = 2.0f;
+            s.flattenHeight = hit.y + 3.0f;
+            m_terrainPanel.terrain()->applyBrush(s);
+            if (m_frameCount == 149) m_terrainPanel.terrain()->endStroke();
+        }
+    }
+    if (m_options.terrainSculpt && m_terrainPanel.created() && m_frameCount >= 150 && m_frameCount < 450) {
+        // QA: fly 600 m along the coast and back, so nodes and vegetation tiles stream in and out (and mesh space is reused).
+        static Vec3 start;
+        if (m_frameCount == 150) start = m_viewports[0].camera.position;
+        const float t = static_cast<float>(m_frameCount - 150) / 300.0f; // 0..1
+        const float along = (t < 0.5f ? t * 2.0f : (1.0f - t) * 2.0f) * 600.0f;
+        Vec3 p = start + Vec3(along, 0.0f, 0.0f);
+        const f32 ground = m_terrainPanel.terrain()->height(p.x, p.z);
+        p.y = std::max(p.y, ground + 1.8f);
+        m_viewports[0].camera.position = p;
+    }
+    m_terrainPanel.update(m_viewports[0].camera.position); // before the worlds update: it spawns and re-meshes node entities
+        profileLap("terrain+vegetation update", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    }
 
     // 2. Simulation: game hot reload, then every world. Extraction systems fill the
     //    renderer's scene snapshots at the end of each update.
@@ -871,6 +1073,7 @@ bool Editor::frame(float dt) {
         const auto now = std::chrono::steady_clock::now();
         const double ms = std::chrono::duration<double, std::milli>(now - lapStart).count();
         lapStart = now;
+        profileLap(name, ms);
         if (m_streaming.active && ms > m_streaming.worstPhaseMs) {
             m_streaming.worstPhaseMs = ms;
             m_streaming.worstPhase = name;
@@ -907,9 +1110,41 @@ bool Editor::frame(float dt) {
 
     ++m_frameCount;
     if (m_options.frames && !m_options.screenshot.empty() && m_frameCount == m_options.frames) saveScreenshot();
+    if (!m_options.shots.empty() && !m_options.screenshot.empty()) {
+        // QA: numbered screenshots at the listed frames (a contact sheet of a motion).
+        size_t pos = 0;
+        while (pos < m_options.shots.size()) {
+            size_t end = m_options.shots.find(',', pos);
+            if (end == std::string::npos) end = m_options.shots.size();
+            if (std::strtoul(m_options.shots.c_str() + pos, nullptr, 10) == m_frameCount) {
+                const std::string saved = m_options.screenshot;
+                const fs::path stem = PathFromUtf8(saved).replace_extension("");
+                m_options.screenshot = PathToUtf8(stem) + "_" + std::to_string(m_frameCount) + ".png";
+                saveScreenshot();
+                m_options.screenshot = saved;
+            }
+            pos = end + 1;
+        }
+    }
 
     m_swapchain->present();
     m_renderer->endFrame();
+    if (m_options.profile && ++m_profileFrames == 120) {
+        std::string line = "profile (avg ms over 120 frames):";
+        for (auto& [n, sum] : m_profile) {
+            line += std::format(" | {} {:.2f}", n, sum / 120.0);
+            sum = 0.0;
+        }
+        line += std::format(" | WORST FRAME {:.0f} ms", m_profileWorstMs);
+        m_profileWorstMs = 0.0;
+        FOH_INFO("{}", line);
+        std::string systems = std::format("World scene: {} entities; slowest systems (ms):", m_scenes[0].app->world().entityCount());
+        std::vector<App::SystemTiming> t = m_scenes[0].app->systemTimings();
+        std::sort(t.begin(), t.end(), [](const auto& a, const auto& b) { return a.ms > b.ms; });
+        for (size_t i = 0; i < t.size() && i < 6; ++i) systems += std::format(" | {} {:.2f}", t[i].name, t[i].ms);
+        FOH_INFO("{}", systems);
+        m_profileFrames = 0;
+    }
     return !m_quit;
 }
 
@@ -956,6 +1191,8 @@ void Editor::drawMenuBar() {
         ImGui::MenuItem("Asset Inspector", nullptr, &m_showAssetInspector);
         ImGui::MenuItem("Prefab Editor", nullptr, &m_showPrefabEditor);
         ImGui::MenuItem("Assets Workshop", nullptr, &m_showWorkshop);
+        ImGui::MenuItem("Terrain", nullptr, &m_showTerrain);
+        ImGui::MenuItem("Roads", nullptr, &m_showRoads);
         ImGui::MenuItem("Atmosphere", nullptr, &m_showAtmosphere);
         ImGui::MenuItem("Render Graph", nullptr, &m_showRenderGraph);
         ImGui::MenuItem("Stats", nullptr, &m_showStats);
@@ -1010,6 +1247,7 @@ void Editor::buildUi(float dt) {
     }
 
     if (!m_options.playerModel.empty() && m_frameCount == 10) useAsModel(m_options.playerModel, true);
+    if (!m_options.preview.empty()) previewStep();
     if (!m_options.autoplay.empty() && m_frameCount == 5) ImGui::SetWindowFocus("Game"); // QA: show the game view
     if (m_options.waterTest >= 0 && m_frameCount == 2) ImGui::SetWindowFocus("Water Test");
     if (!m_options.prefabEdit.empty() && m_options.walkSpeed > 0.0f && m_frameCount == 40) ImGui::SetWindowFocus(m_viewports[m_previewViewport].title.c_str()); // QA: show the stage
@@ -1030,6 +1268,14 @@ void Editor::buildUi(float dt) {
         m_prefabEditorWasShown = m_showPrefabEditor;
     }
     if (m_showWorkshop) m_workshop.draw(&m_showWorkshop, m_theme.scale());
+    if (m_showTerrain) {
+        ensureTerrain();
+        m_terrainPanel.draw(&m_showTerrain);
+    }
+    if (m_showRoads) {
+        ensureTerrain(); // roads stand on the terrain
+        m_roadTool.draw(&m_showRoads);
+    }
     if (m_showAtmosphere) m_atmospherePanel.draw(*m_renderer, &m_showAtmosphere);
     if (m_showRenderGraph) drawRenderGraphPanel();
     if (m_showStats) drawStatsPanel(dt);
@@ -1048,6 +1294,19 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
     if (p.initialW > 0.0f) ImGui::SetNextWindowSize(ImVec2(p.initialW * m_theme.scale(), p.initialH * m_theme.scale()), ImGuiCond_FirstUseEver);
     if (m_options.waterTest >= 0 && &p == &m_viewports[m_waterViewport] && m_frameCount < 8) {
         // QA (--water-test): the water panel takes the whole window so screenshots show it big.
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowDockID(0, ImGuiCond_Always);
+        ImGui::SetNextWindowPos(vp->WorkPos, ImGuiCond_Always);
+        ImGui::SetNextWindowSize(vp->WorkSize, ImGuiCond_Always);
+    }
+    if (m_options.fullGame && &p == &m_viewports[1] && m_frameCount < 8) {
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowDockID(0, ImGuiCond_Always);
+        ImGui::SetNextWindowPos(vp->WorkPos, ImGuiCond_Always);
+        ImGui::SetNextWindowSize(vp->WorkSize, ImGuiCond_Always);
+    }
+    if (m_options.terrain && m_options.autoplay.empty() && &p == &m_viewports[0] && m_frameCount < 8) {
+        // QA (--terrain): the Scene panel takes the whole window so screenshots show the terrain big.
         const ImGuiViewport* vp = ImGui::GetMainViewport();
         ImGui::SetNextWindowDockID(0, ImGuiCond_Always);
         ImGui::SetNextWindowPos(vp->WorkPos, ImGuiCond_Always);
@@ -1138,14 +1397,23 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
                 }
                 if (p.capturing) ImGui::SetNextFrameWantCaptureKeyboard(true);
                 ImGui::SetCursorScreenPos(ImVec2(origin.x + 8, origin.y + avail.y - 24.0f * m_theme.scale()));
-                ImGui::TextColored(ImVec4(1, 1, 1, 0.75f), p.capturing ? "Playing: WASD move, Space jump, C crouch, V camera, Esc release"
+                ImGui::TextColored(ImVec4(1, 1, 1, 0.75f), p.capturing ? "Playing: WASD move, Shift run, Space jump, C crouch, V camera, Esc release"
                                                                        : "Click to play");
             }
         }
 
         const int panelIndex = static_cast<int>(&p - m_viewports.data());
         if (p.useEditorCamera) drawGizmo(p, origin, avail, panelIndex);
-        handlePicking(p, origin, avail, hovered);
+        // The terrain brush owns the left mouse while it is active over the main world; otherwise a click selects.
+        bool terrainTool = false;
+        if (p.useEditorCamera && p.sceneIndex == 0 && m_showRoads && m_roadTool.editing() && m_roadTool.created()) {
+            terrainTool = m_roadTool.handleViewport(p.camera.world(), p.camera.fovY, origin, avail, hovered, p.capturing,
+                                                    ImGuizmo::IsOver() || ImGuizmo::IsUsing(), dt);
+        } else if (p.useEditorCamera && p.sceneIndex == 0 && m_showTerrain && m_terrainPanel.created()) {
+            terrainTool = m_terrainPanel.handleViewport(p.camera.world(), p.camera.fovY, origin, avail, hovered, p.capturing,
+                                                        ImGuizmo::IsOver() || ImGuizmo::IsUsing(), dt);
+        }
+        if (!terrainTool) handlePicking(p, origin, avail, hovered);
 
         // Overlay controls (top-left of the image), on a translucent backdrop so they stay readable on a bright sky.
         ImGui::SetCursorScreenPos(ImVec2(origin.x + 8, origin.y + 8));

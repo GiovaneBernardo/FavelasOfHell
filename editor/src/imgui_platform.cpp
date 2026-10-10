@@ -1,5 +1,7 @@
 #include "imgui_platform.h"
 
+#include <cfloat>
+
 #include <imgui.h>
 
 namespace foh {
@@ -114,7 +116,19 @@ void ImGuiPlatform::newFrame(float deltaSeconds) {
     io.DisplayFramebufferScale = lw && lh ? ImVec2(static_cast<float>(pw) / lw, static_cast<float>(ph) / lh) : ImVec2(1, 1);
     io.DeltaTime = deltaSeconds > 0.0f ? deltaSeconds : 1.0f / 60.0f;
 
+    if (m_mouseCaptured != m_mouseWasCaptured) {
+        m_mouseWasCaptured = m_mouseCaptured;
+        if (m_mouseCaptured) {
+            for (int b = 0; b < ImGuiMouseButton_COUNT; ++b) io.AddMouseButtonEvent(b, false);
+            io.AddMousePosEvent(-FLT_MAX, -FLT_MAX); // "no mouse": nothing is hovered
+        }
+    }
+
     for (const WindowEvent& e : m_window->events()) {
+        if (m_mouseCaptured &&
+            (e.type == WindowEvent::Type::MouseMove || e.type == WindowEvent::Type::MouseDown || e.type == WindowEvent::Type::MouseUp ||
+             e.type == WindowEvent::Type::Wheel))
+            continue;
         switch (e.type) {
             case WindowEvent::Type::KeyDown:
             case WindowEvent::Type::KeyUp: {

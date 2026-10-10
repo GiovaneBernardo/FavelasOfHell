@@ -105,7 +105,8 @@ public:
     // project stays self contained). Re-dropping the same file reimports it and keeps every GUID.
     // Imports run one at a time, in request order, each internally parallel; a source is never
     // imported twice concurrently. Results arrive through pollImports().
-    ImportTicket beginImport(const std::filesystem::path& file, bool force = false);
+    // `initial`: import settings for a source that is new (ignored when it is already known), e.g. animationOnly.
+    ImportTicket beginImport(const std::filesystem::path& file, bool force = false, const ImportSettings* initial = nullptr);
     // Main thread, once per frame: commits finished imports (database, .meta, index) and returns
     // their results. Cheap when nothing finished.
     std::vector<ImportResult> pollImports();
@@ -114,7 +115,7 @@ public:
 
     // Blocking convenience: beginImport + wait for that import. Other finished imports stay queued
     // for the next pollImports().
-    ImportResult importFile(const std::filesystem::path& file, bool force = false);
+    ImportResult importFile(const std::filesystem::path& file, bool force = false, const ImportSettings* initial = nullptr);
     // Blocks until nothing is pending and returns every result that was not polled yet.
     std::vector<ImportResult> waitForImports();
 
@@ -170,7 +171,8 @@ public:
 
 private:
     struct Async;
-    ImportTicket enqueue(const std::filesystem::path& external, const std::string& relPath, bool force, std::string display);
+    ImportTicket enqueue(const std::filesystem::path& external, const std::string& relPath, bool force, std::string display,
+                         const ImportSettings* initial = nullptr);
     ImportResult importSourceBlocking(const std::string& relPath, bool force);
     void dispatch();
     ImportResult waitFor(ImportTicket ticket);

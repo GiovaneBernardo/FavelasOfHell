@@ -236,12 +236,36 @@ constexpr DrawClass kAllClasses[kDrawClassCount] = {DrawClass::Opaque, DrawClass
 
 nvrhi::RasterCullMode cullOf(DrawClass cls) { return IsDoubleSided(cls) ? nvrhi::RasterCullMode::None : nvrhi::RasterCullMode::Back; }
 
+// Six clip planes from a view-projection matrix (Gribb-Hartmann; valid for the reverse-Z projection too, where near maps
+// to 1 and far to 0: the inside test 0 <= z <= w is the same).
+struct Frustum {
+    Vec4 planes[6];
+    explicit Frustum(const Mat4& m) {
+        auto row = [&](int i) { return Vec4(m[0][i], m[1][i], m[2][i], m[3][i]); };
+        const Vec4 r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
+        planes[0] = r3 + r0;
+        planes[1] = r3 - r0;
+        planes[2] = r3 + r1;
+        planes[3] = r3 - r1;
+        planes[4] = r2;
+        planes[5] = r3 - r2;
+        for (Vec4& p : planes) p /= std::max(glm::length(Vec3(p)), 1e-6f);
+    }
+    bool sees(const Vec4& sphere) const {
+        for (const Vec4& p : planes)
+            if (glm::dot(Vec3(p), Vec3(sphere)) + p.w < -sphere.w) return false;
+        return true;
+    }
+};
+
 // One instanced draw per mesh batch in [begin, end). Shared by the pre-pass, shadows, G-buffer and picking.
+// `viewProj` (null = none) culls the static instance sets that carry a bounding sphere.
 // `table` is the bindless texture table for passes that sample materials (null otherwise).
 void drawBatches(Impl& s, const nvrhi::ViewportState& viewport, nvrhi::IFramebuffer* fb, nvrhi::IGraphicsPipeline* pso,
                  nvrhi::IBindingSet* set, nvrhi::IBindingSet* table, nvrhi::ICommandList* cmd, nvrhi::IBuffer* instances,
-                 nvrhi::IBuffer* skinned, const SceneGpu& scene, u32 begin, u32 end) {
+                 nvrhi::IBuffer* skinned, const SceneGpu& scene, u32 begin, u32 end, const Mat4* viewProj = nullptr) {
     if (begin >= end) return;
+    const Frustum frustum(viewProj ? *viewProj : Mat4(1.0f));
     nvrhi::GraphicsState gs;
     gs.setPipeline(pso).setFramebuffer(fb).setViewport(viewport).addBindingSet(set);
     if (table) gs.addBindingSet(table);
@@ -253,6 +277,7 @@ void drawBatches(Impl& s, const nvrhi::ViewportState& viewport, nvrhi::IFramebuf
     for (u32 i = begin; i < end; ++i) {
         const SceneGpu::Batch& b = scene.batches[i];
         const MeshRange& r = s.gpu.meshes.range(b.mesh);
+        if (viewProj && b.sphere.w > 0.0f && !frustum.sees(b.sphere)) continue;
         const bool skin = b.skinBase >= 0 && skinned;
         if (b.skinBase >= 0 && !skinned) continue; // the pre-skinning pass did not run: nothing to draw
         if (skin != onSkinned) {
@@ -373,7 +398,7 @@ void recordDepthPrepass(Impl& s, const ViewFrame& vf, const DepthPrepassData& d,
         if (!pso) continue;
         if (IsMasked(cls) && !materialSet) materialSet = materialBindings(ctx, s, vf.viewCb);
         drawBatches(s, fullViewport(vf), fb, pso, IsMasked(cls) ? materialSet : viewSet, IsMasked(cls) ? s.gpu.textures.table() : nullptr, cmd,
-                    instances, skinned, scene, scene.classBegin[c], scene.classBegin[c + 1]);
+                    instances, skinned, scene, scene.classBegin[c], scene.classBegin[c + 1], &vf.constants.viewProj);
     }
 }
 
@@ -411,7 +436,7 @@ void recordShadows(Impl& s, const ViewFrame& vf, const ShadowData& d, RgPassCont
             const u32 c = static_cast<u32>(cls);
             if (!pso[c]) continue;
             drawBatches(s, viewport, fb, pso[c], IsMasked(cls) ? materialSet : viewSet, IsMasked(cls) ? s.gpu.textures.table() : nullptr, cmd,
-                        instances, skinned, scene, scene.classBegin[c], scene.classBegin[c + 1]);
+                        instances, skinned, scene, scene.classBegin[c], scene.classBegin[c + 1], &vf.cascades.viewProj[cascade]);
         }
     }
 }
@@ -432,7 +457,8 @@ void recordOpaque(Impl& s, const ViewFrame& vf, const OpaqueData& d, RgPassConte
         if (scene.classBegin[c] >= scene.classBegin[c + 1]) continue;
         nvrhi::IGraphicsPipeline* pso = classPipeline(s, MeshPass::GBuffer, cls, fb);
         if (!pso) continue;
-        drawBatches(s, fullViewport(vf), fb, pso, set, s.gpu.textures.table(), cmd, instances, skinned, scene, scene.classBegin[c], scene.classBegin[c + 1]);
+        drawBatches(s, fullViewport(vf), fb, pso, set, s.gpu.textures.table(), cmd, instances, skinned, scene, scene.classBegin[c], scene.classBegin[c + 1],
+                    &vf.constants.viewProj);
     }
 }
 
@@ -629,7 +655,8 @@ void recordPick(Impl& s, const ViewFrame& vf, const PickData& d, RgPassContext& 
         if (scene.classBegin[c] >= scene.classBegin[c + 1]) continue;
         nvrhi::IGraphicsPipeline* pso = classPipeline(s, MeshPass::Pick, cls, fb);
         if (!pso) continue;
-        drawBatches(s, fullViewport(vf), fb, pso, set, s.gpu.textures.table(), cmd, instances, skinned, scene, scene.classBegin[c], scene.classBegin[c + 1]);
+        drawBatches(s, fullViewport(vf), fb, pso, set, s.gpu.textures.table(), cmd, instances, skinned, scene, scene.classBegin[c], scene.classBegin[c + 1],
+                    &vf.constants.viewProj);
     }
 }
 

@@ -941,6 +941,15 @@ void ContentBrowser::entryContextMenu(const Entry& e) {
     const bool multi = m_selected.size() > 1;
     if (e.isDir) {
         if (ImGui::MenuItem("Open")) open(e);
+        if (ImGui::MenuItem("Import the animations in this folder") && m_actions.importAsAnimation) {
+            std::error_code ec;
+            for (const auto& entry : std::filesystem::directory_iterator(absolute(e.rel), ec)) {
+                std::string ext = entry.path().extension().string();
+                for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                if (entry.is_regular_file(ec) && ext == ".fbx") m_actions.importAsAnimation(entry.path());
+            }
+            refresh();
+        }
     } else if (e.type.category == FileCategory::Material) {
         if (ImGui::MenuItem("Apply to selected object") && m_actions.applyMaterial) m_actions.applyMaterial(e.rel);
     } else if (e.type.category == FileCategory::Prefab) {
@@ -958,6 +967,10 @@ void ContentBrowser::entryContextMenu(const Entry& e) {
         ImGui::Separator();
         if (ImGui::MenuItem(isImported(e) ? "Reimport" : "Import")) {
             if (m_actions.importFile) m_actions.importFile(absolute(e.rel));
+            refresh();
+        }
+        if (!isImported(e) && ImGui::MenuItem("Import as animation (clips only)") && m_actions.importAsAnimation) {
+            m_actions.importAsAnimation(absolute(e.rel));
             refresh();
         }
     } else if (e.type.importable) {

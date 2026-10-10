@@ -71,6 +71,16 @@ struct MaterialParams {
     bool alphaMask = false; // alpha-tested (also used for blended materials: there is no transparent pass yet)
     bool doubleSided = false;
     AssetId baseColorTexture, normalTexture, metalRoughTexture, occlusionTexture, emissiveTexture;
+    // Foliage: double-sided leaves lit from both sides with the same (smooth, crown-shaped) normal instead of a flipped
+    // one, with `translucency` letting light wrap round them and glow through when backlit.
+    bool foliage = false;
+    f32 translucency = 0.5f;
+    // Terrain material (ADR 0012): when set, the single-material textures above are ignored and the surface blends four
+    // ground layers in world space by slope, height and noise. Layer order: grass, soil, rock (triplanar), sand/shore.
+    // A layer whose textures are not resident yet shows a plain colour.
+    bool terrain = false;
+    f32 terrainTileSize = 6.0f; // metres covered by one repeat of the layer textures
+    AssetId terrainAlbedo[4], terrainNormal[4];
 };
 
 // CPU geometry of an imported mesh. All spans index the same vertices; normals and uvs

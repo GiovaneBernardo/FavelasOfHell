@@ -167,6 +167,12 @@ bool BuildMoveSet(const AnimationLibrary& library, const LocomotionClips& clips,
     for (MoveRing& ring : out.rings)
         std::sort(ring.entries.begin(), ring.entries.end(), [&](u32 a, u32 b) { return out.entries[a].angle < out.entries[b].angle; });
 
+    if (!crouch) {
+        for (const AssetId& id : {clips.idleBreak0Clip, clips.idleBreak1Clip, clips.idleBreak2Clip, clips.idleBreak3Clip}) {
+            const ClipAsset* clip = clipOf(id);
+            if (clip && clip->duration() > 0.5f) out.breaks.push_back({id, clip->duration()});
+        }
+    }
     for (const AssetId& id : {clips.turnLeftClip, clips.turnRightClip, clips.turnLeft90Clip, clips.turnRight90Clip}) {
         if (crouch) break; // turns are standing clips; a crouched character turns with the spring
         const ClipAsset* clip = clipOf(id);

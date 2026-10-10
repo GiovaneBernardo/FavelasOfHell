@@ -21,7 +21,9 @@ add_executable(foh_editor
     src/inspector.cpp
     src/main.cpp
     src/prefab_editor.cpp
+    src/road_tool.cpp
     src/stb_impl.cpp
+    src/terrain_panel.cpp
     src/theme.cpp
     src/thumb_loaders.cpp
     src/thumbnails.cpp

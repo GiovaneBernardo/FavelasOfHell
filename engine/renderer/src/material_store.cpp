@@ -60,6 +60,27 @@ void MaterialStore::resolve(u32 index, const TextureStore& textures) {
     g.flags = (p.alphaMask ? kMaterialFlagAlphaMask : 0u) | (p.doubleSided ? kMaterialFlagDoubleSided : 0u) |
               (hasNormalMap ? kMaterialFlagNormalMap : 0u);
 
+    if (p.terrain) {
+        g.flags = kMaterialFlagTerrain;
+        u32* albedo[4] = {&g.baseColorTex, &g.metalRoughTex, &g.occlusionTex, &g.emissiveTex};
+        u32* normal[4] = {&g.normalTex, &g.extra0, &g.extra1, &g.extra2};
+        for (u32 l = 0; l < 4; ++l) {
+            *albedo[l] = textures.slotOf(p.terrainAlbedo[l], TextureStore::kWhiteSlot);
+            *normal[l] = textures.slotOf(p.terrainNormal[l], TextureStore::kFlatNormalSlot);
+            if (p.terrainAlbedo[l].isValid() && textures.resident(p.terrainAlbedo[l])) g.flags |= kMaterialFlagLayerAlbedo0 << l;
+            if (p.terrainNormal[l].isValid() && textures.resident(p.terrainNormal[l])) g.flags |= kMaterialFlagLayerNormal0 << l;
+        }
+        g.terrainTile = p.terrainTileSize;
+        g.occlusionStrength = 0.0f;
+        m_classes[index] = DrawClass::Opaque;
+        m_dirty = true;
+        return;
+    }
+
+    if (p.foliage) {
+        g.flags |= kMaterialFlagFoliage;
+        g.translucency = p.translucency;
+    }
     const bool masked = p.alphaMask;
     m_classes[index] = masked ? (p.doubleSided ? DrawClass::MaskedDoubleSided : DrawClass::Masked)
                               : (p.doubleSided ? DrawClass::OpaqueDoubleSided : DrawClass::Opaque);
@@ -105,7 +126,10 @@ void MaterialStore::texturesChanged(const std::vector<AssetId>& ids, const Textu
         if (!m_entries[i].used) continue;
         const MaterialParams& p = m_entries[i].params;
         for (const AssetId& t : ids) {
-            if (t == p.baseColorTexture || t == p.normalTexture || t == p.metalRoughTexture || t == p.occlusionTexture ||
+            bool layer = false;
+            if (p.terrain)
+                for (u32 l = 0; l < 4; ++l) layer = layer || t == p.terrainAlbedo[l] || t == p.terrainNormal[l];
+            if (layer || t == p.baseColorTexture || t == p.normalTexture || t == p.metalRoughTexture || t == p.occlusionTexture ||
                 t == p.emissiveTexture) {
                 resolve(i, textures);
                 break;

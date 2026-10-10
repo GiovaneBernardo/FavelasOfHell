@@ -26,6 +26,8 @@ namespace foh {
 struct ContentBrowserActions {
     // Imports `file` (anywhere on disk; copied into the project when outside it) without placing it.
     std::function<void(const std::filesystem::path& file)> importFile;
+    // Imports an FBX/glTF as animation only (clips; no meshes, skeleton or prefab).
+    std::function<void(const std::filesystem::path& file)> importAsAnimation;
     // Imports the source (a path relative to the asset root) when needed and places it into the active scene.
     std::function<void(const std::string& relPath)> placeModel;
     // Puts a material (path relative to the asset root) on the selected scene object.

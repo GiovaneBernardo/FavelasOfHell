@@ -75,7 +75,12 @@ void AssetSceneBridge::assignLocomotionClips(World& world, Entity root) {
             return;
         }
     };
-    pick(clips->idleClip, {"idle", "idle (1)"});
+    // Motion capture first when it was imported ("idle (mocap)"), the keyframed Mixamo clip otherwise.
+    pick(clips->idleClip, {"idle (mocap)", "idle", "idle (1)"});
+    pick(clips->idleBreak0Clip, {"idle break 1"});
+    pick(clips->idleBreak1Clip, {"idle break 2"});
+    pick(clips->idleBreak2Clip, {"idle break 3"});
+    pick(clips->idleBreak3Clip, {"idle break 4"});
     pick(clips->walkClip, {"walking", "walk"});
     pick(clips->runClip, {"running", "run"});
     pick(clips->sprintClip, {"sprint", "sprinting", "fast run"});

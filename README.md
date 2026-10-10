@@ -63,7 +63,7 @@ Non-goals (for now): console builds, multiplayer, dual-contouring/voxel terrain.
   /renderer      render graph, D3D12 device/swapchain via NVRHI, scenes + viewports,
                  shader library, ECS render extraction (ADR 0003)                 [exists]
   /physics       Jolt integration (placeholder)                                  [exists]
-  /world         terrain, streaming, procedural generation, roads                [planned]
+  /world         infinite terrain (heightmap + sculpt), LOD streaming, vegetation, manual roads [exists]; parcels, building generation [planned]
 /runtime         standalone player executable (hosts the game module)            [exists]
 /editor          ImGui editor: dock layout, 3 render viewports, render graph panel [exists]
 /game            gameplay code, built as a hot-reloadable DLL                    [exists]
@@ -286,6 +286,7 @@ flecs (MIT; ECS storage and queries, private to `engine/ecs`), glm, Jolt Physics
 | Post-processing: Call of Duty AW bloom (13-tap down chain + additive tent upsample), luminance-histogram auto exposure per viewport, selectable tonemap operators ([ADR 0010](docs/adr/0010-post-processing.md)) (2026-10-09) | Decided, implemented |
 | Skeletal animation: skinned meshes + skeleton/clip sub-assets (glTF + FBX/Mixamo), CPU pose evaluation on the job system (phase-synchronised locomotion blend space, inertialized transitions, root motion), GPU compute pre-skinning ([ADR 0009](docs/adr/0009-skeletal-animation.md)) (2026-10-09) | Proposed, phases 1-3 implemented |
 | Player, camera and input: `GameInput` resource fed by the host, models requested by source path (`PrefabRequest`), GTA-style third person + first person camera, WASD/Space/C/V ([ADR 0011](docs/adr/0011-player-camera-input.md)) (2026-10-09) | Proposed, implemented |
+| World authoring: layers of intent (terrain, vegetation, spline roads that carve + drape, parcels, building recipes, decals, wires, scatter), heightmap + placed rocks, stable seeds; infinite terrain flat at -200 m, real Rio heightmap (Copernicus GLO-30, 15 m cells, placeholder) + procedural detail + separate hand-sculpt layer, 0.5 m cells with quadtree LOD streaming, world-space ground material, GPU-instanced non-entity vegetation with culling, terrain/trunk collision, manual spline roads ([ADR 0012](docs/adr/0012-world-authoring.md)) (2026-10-10) | Proposed, terrain + vegetation + roads implemented |
 | Hybrid real-data + procedural world | Decided |
 | Hardware: min RTX 2060 / RX 6600, dev RTX 5070 Ti; RT optional | Decided |
 | Hot reload goal: save code, see it live in ~1-3 s with state preserved (DLL reload baseline, Live++ optional) | Decided |

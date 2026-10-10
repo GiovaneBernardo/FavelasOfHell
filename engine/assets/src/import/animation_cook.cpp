@@ -9,8 +9,11 @@
 //   4. foot plant landmarks (looping locomotion), used to phase-align blends
 //   5. key reduction under per-channel error bounds
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <set>
+#include <vector>
 
 #include "foh/asset_import.h"
 
@@ -213,6 +216,127 @@ void ReduceVecChannel(std::vector<Vec3>& samples, f32 tolerance, VecChannel& out
         [](const Vec3& a, const Vec3& b, f32 t) { return a + (b - a) * t; }, out.frames, out.values);
 }
 
+// ---- segments (mocap takes) -----------------------------------------------------------------
+
+std::vector<ClipSegment> ParseClipSegments(const std::string& text, std::vector<std::string>* errors) {
+    std::vector<ClipSegment> out;
+    size_t pos = 0;
+    auto fail = [&](const std::string& item, const char* why) {
+        if (errors) errors->push_back("clip segment '" + item + "': " + why);
+    };
+    while (pos < text.size()) {
+        size_t end = text.find_first_of(";\n", pos);
+        if (end == std::string::npos) end = text.size();
+        std::string item = text.substr(pos, end - pos);
+        pos = end + 1;
+        // trim
+        while (!item.empty() && std::isspace(static_cast<unsigned char>(item.front()))) item.erase(item.begin());
+        while (!item.empty() && std::isspace(static_cast<unsigned char>(item.back()))) item.pop_back();
+        if (item.empty()) continue;
+        const size_t eq = item.find('=');
+        const size_t dash = item.find('-', eq == std::string::npos ? 0 : eq);
+        if (eq == std::string::npos || dash == std::string::npos || dash < eq) {
+            fail(item, "expected name=start-end");
+            continue;
+        }
+        ClipSegment seg;
+        seg.name = item.substr(0, eq);
+        while (!seg.name.empty() && std::isspace(static_cast<unsigned char>(seg.name.back()))) seg.name.pop_back();
+        std::string tail = item.substr(dash + 1);
+        if (const size_t colon = tail.find(':'); colon != std::string::npos) {
+            seg.loop = tail.substr(colon + 1).find("loop") != std::string::npos;
+            tail = tail.substr(0, colon);
+        }
+        seg.start = std::strtof(item.c_str() + eq + 1, nullptr);
+        seg.end = std::strtof(tail.c_str(), nullptr);
+        if (seg.name.empty() || !(seg.end > seg.start) || seg.start < 0.0f) {
+            fail(item, "needs a name and 0 <= start < end");
+            continue;
+        }
+        out.push_back(std::move(seg));
+    }
+    return out;
+}
+
+namespace {
+
+// How badly the pose at `end` fails to continue into the pose at `start`: rotation differences of every joint, the
+// height of the hips, and the difference of their velocities (a loop must not change speed at the seam).
+double loopCost(const ImportedClip& clip, u32 start, u32 end) {
+    double cost = 0.0;
+    for (const ImportedClipTrack& t : clip.tracks) {
+        if (t.rotation.size() <= end || end < 1 || start + 1 >= t.rotation.size()) continue;
+        cost += angleBetween(t.rotation[start], t.rotation[end]);
+        cost += 0.5 * angleBetween(t.rotation[start + 1] * glm::inverse(t.rotation[start]), t.rotation[end] * glm::inverse(t.rotation[end - 1]));
+    }
+    if (!clip.tracks.empty() && clip.tracks[0].translation.size() > end) {
+        // joint 0 is the first root of the skeleton: its vertical position is the hips height in practice
+        cost += 4.0 * std::abs(static_cast<double>(clip.tracks[0].translation[start].y - clip.tracks[0].translation[end].y));
+    }
+    return cost;
+}
+
+} // namespace
+
+std::vector<ImportedClip> SliceClips(const std::vector<ImportedClip>& clips, const ImportSettings& settings, std::vector<std::string>* warnings) {
+    std::vector<std::string> errors;
+    const std::vector<ClipSegment> segments = ParseClipSegments(settings.clipSegments, &errors);
+    if (warnings)
+        for (const std::string& e : errors) warnings->push_back(e);
+    if (segments.empty() || clips.empty()) return clips;
+
+    // The take is the longest clip of the file.
+    const ImportedClip* take = &clips[0];
+    for (const ImportedClip& c : clips)
+        if (c.frameCount > take->frameCount) take = &c;
+
+    std::vector<ImportedClip> out;
+    for (const ClipSegment& seg : segments) {
+        const f32 rate = take->frameRate;
+        const i64 last = static_cast<i64>(take->frameCount) - 1;
+        i64 f0 = std::clamp<i64>(std::llround(seg.start * rate), 0, last);
+        i64 f1 = std::clamp<i64>(std::llround(seg.end * rate), 0, last);
+        if (f1 - f0 < 2) {
+            if (warnings) warnings->push_back("clip segment '" + seg.name + "' is outside the take (" + std::to_string(take->frameCount / rate) + " s long)");
+            continue;
+        }
+        if (seg.loop) {
+            // Close the loop: the end frame within +-0.4 s whose pose continues best into the first frame.
+            const i64 reach = static_cast<i64>(0.4f * rate);
+            double best = 1e30;
+            i64 bestEnd = f1;
+            for (i64 e = std::max(f1 - reach, f0 + 8); e <= std::min(f1 + reach, last); ++e) {
+                const double c = loopCost(*take, static_cast<u32>(f0), static_cast<u32>(e)) + 0.002 * std::abs(static_cast<double>(e - f1));
+                if (c < best) {
+                    best = c;
+                    bestEnd = e;
+                }
+            }
+            f1 = bestEnd;
+        }
+        ImportedClip clip;
+        clip.name = seg.name;
+        clip.key = "segment:" + seg.name;
+        clip.skeleton = take->skeleton;
+        clip.frameRate = take->frameRate;
+        clip.frameCount = static_cast<u32>(f1 - f0 + 1);
+        clip.loop = seg.loop;
+        clip.tracks.resize(take->tracks.size());
+        for (size_t j = 0; j < take->tracks.size(); ++j) {
+            const ImportedClipTrack& in = take->tracks[j];
+            ImportedClipTrack& o = clip.tracks[j];
+            auto cut = [&](const auto& src, auto& dst) {
+                if (src.size() > static_cast<size_t>(f1)) dst.assign(src.begin() + f0, src.begin() + f1 + 1);
+            };
+            cut(in.translation, o.translation);
+            cut(in.rotation, o.rotation);
+            cut(in.scale, o.scale);
+        }
+        out.push_back(std::move(clip));
+    }
+    return out;
+}
+
 // ---- clip ------------------------------------------------------------------------------------
 
 ClipAsset CookClip(const ImportedClip& src, const ImportedSkeleton& sk, const ImportSettings& settings,
@@ -277,7 +401,7 @@ ClipAsset CookClip(const ImportedClip& src, const ImportedSkeleton& sk, const Im
         if (seamless && root >= 0 && std::abs(work.translation(static_cast<u32>(root), 0).y - work.translation(static_cast<u32>(root), last).y) > 0.02f)
             seamless = false;
     }
-    out.loops = settings.clipLoop == "loop" ? true : settings.clipLoop == "once" ? false : seamless;
+    out.loops = src.loop || settings.clipLoop == "loop" ? true : settings.clipLoop == "once" ? false : seamless;
     if (settings.clipLoop == "loop" && !seamless) warn("forced to loop but the first and last pose differ");
 
     // ---- root motion ----
@@ -357,13 +481,50 @@ ClipAsset CookClip(const ImportedClip& src, const ImportedSkeleton& sk, const Im
     if (mode == RootMotionMode::None) out.rootCurve.clear();
 
     // ---- foot plant landmarks ----
-    if (out.loops && last >= 4 && out.rootSpeed() > 0.3f) {
-        i32 foot[2] = {-1, -1}; // left, right
-        for (u32 j = 0; j < jointCount; ++j) {
-            if (lower[j].find("foot") == std::string::npos || lower[j].find("toe") != std::string::npos) continue;
-            const int side = sideOf(lower[j]);
-            if (side != 0 && foot[(side + 1) / 2] < 0) foot[(side + 1) / 2] = static_cast<i32>(j);
+    i32 foot[2] = {-1, -1}; // left, right
+    for (u32 j = 0; j < jointCount; ++j) {
+        if (lower[j].find("foot") == std::string::npos || lower[j].find("toe") != std::string::npos) continue;
+        const int side = sideOf(lower[j]);
+        if (side != 0 && foot[(side + 1) / 2] < 0) foot[(side + 1) / 2] = static_cast<i32>(j);
+    }
+
+    // ---- airborne interval (jumps) ----
+    // The longest run of frames in which both feet are clearly above the lowest height they reach in the clip.
+    if (!out.loops || out.rootSpeed() < 0.3f) {
+        if (foot[0] >= 0 && foot[1] >= 0 && last >= 6) {
+            std::vector<f32> low(out.frameCount);
+            f32 ground = 1e30f, top = -1e30f;
+            for (u32 f = 0; f <= last; ++f) {
+                const f32 a = work.model(static_cast<u32>(foot[0]), f)[3].y, b = work.model(static_cast<u32>(foot[1]), f)[3].y;
+                low[f] = std::min(a, b);
+                ground = std::min(ground, low[f]);
+                top = std::max(top, low[f]);
+            }
+            if (top - ground > 0.12f) { // a real jump lifts the feet by decimeters; steps and idles do not
+                const f32 threshold = ground + std::max(0.05f, 0.25f * (top - ground));
+                u32 bestStart = 0, bestLength = 0;
+                for (u32 f = 0; f <= last;) {
+                    if (low[f] <= threshold) {
+                        ++f;
+                        continue;
+                    }
+                    const u32 start = f;
+                    while (f <= last && low[f] > threshold) ++f;
+                    if (f - start > bestLength) {
+                        bestLength = f - start;
+                        bestStart = start;
+                    }
+                }
+                if (bestLength >= 3 && bestStart > 0 && bestStart + bestLength <= last) {
+                    out.hasAir = true;
+                    out.airStart = static_cast<f32>(bestStart) / out.frameRate;
+                    out.airEnd = static_cast<f32>(bestStart + bestLength) / out.frameRate;
+                }
+            }
         }
+    }
+
+    if (out.loops && last >= 4 && out.rootSpeed() > 0.3f) {
         if (foot[0] >= 0 && foot[1] >= 0) {
             const u32 n = last; // the closing sample duplicates frame 0
             f32 phases[2] = {0.0f, 0.0f};

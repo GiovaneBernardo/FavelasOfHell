@@ -16,10 +16,13 @@ add_executable(foh_tests
     test_assets.cpp
     test_animation_assets.cpp
     test_animation_runtime.cpp
+    test_animation_gameplay.cpp
     test_asset_import.cpp
     test_prefab_instance.cpp
     test_texture_cook.cpp
     test_async_import.cpp
+    test_roads.cpp
+    test_terrain.cpp
     test_transform_propagation.cpp)
 # nvrhi: the render graph tests include the RHI tier (NVRHI types) directly.
 target_link_libraries(foh_tests PRIVATE foh::engine doctest::doctest nvrhi third_party::bc7decomp)

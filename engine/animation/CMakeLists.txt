@@ -5,6 +5,7 @@ foh_add_engine_module(animation
     SOURCES
         src/animation_library.cpp
         src/animation_plugin.cpp
+        src/ik.cpp
         src/inertialization.cpp
         src/locomotion.cpp
         src/move_set.cpp

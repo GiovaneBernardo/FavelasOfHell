@@ -1,0 +1,19 @@
+foh-roads 1
+road Road 1
+  width 7 sidewalk 2.5 curb 0.14 grade 0.18
+  p 2382.41 -815.787
+  p 2287.06 -811.857
+  p 2014.35 -828.412
+  p 1763.73 -832.876
+road Road 2
+  width 7 sidewalk 2.5 curb 0.14 grade 0.18
+  p 2318.46 -811.383
+  p 2357.56 -957.153
+  p 2295.03 -1174.95
+  p 1893.91 -1848.98
+road Road 3
+  width 7 sidewalk 2.5 curb 0.14 grade 0.18
+  p 2697.52 -793.747
+  p 2747.37 -1454.82
+  p 1841.5 -4672.3
+  p -2951.91 536.033

@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "foh/animation/components.h"
+#include "foh/animation/ik.h"
 #include "foh/animation/move_set.h"
 #include "foh/animation/pose.h"
 #include "foh/animation_assets.h"
@@ -30,6 +31,8 @@ public:
 
     const SkeletonAsset* skeleton(const AssetId& id) const;
     const ClipAsset* clip(const AssetId& id) const;
+    // Where the limbs of a skeleton are (for IK layers); null when the skeleton is not loaded.
+    const RigInfo* rig(const AssetId& skeleton) const;
     // The clip resolved against the skeleton; null when either is missing.
     const ClipBinding* binding(const AssetId& skeleton, const AssetId& clip) const;
 
@@ -56,6 +59,7 @@ private:
 
     std::unordered_map<AssetId, std::shared_ptr<const SkeletonAsset>, AssetIdHash> m_skeletons;
     std::unordered_map<AssetId, std::shared_ptr<const ClipAsset>, AssetIdHash> m_clips;
+    std::unordered_map<AssetId, RigInfo, AssetIdHash> m_rigs;
     std::unordered_map<std::pair<AssetId, AssetId>, ClipBinding, PairHash> m_bindings;
     std::unordered_map<u64, MoveSet> m_moveSets;
     u32 m_generation = 1;
