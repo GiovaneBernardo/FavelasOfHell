@@ -27,12 +27,14 @@ struct ViewConstants {
     Vec4 shadowParams;
     Vec4 atmosphere0, atmosphere1, atmosphere2, atmosphere3;
     Vec4 render;
+    Vec4 ssao, canopy, ibl, probeA, probeB, bed;
 };
 static_assert(kShadowCascades == 4, "view.slangh declares four cascades");
-static_assert(sizeof(ViewConstants) == 4 * 64 + 5 * 16 + 4 * 64 + 3 * 16 + 4 * 16 + 16, "ViewConstants must match view.slangh");
+static_assert(sizeof(ViewConstants) == 4 * 64 + 5 * 16 + 4 * 64 + 3 * 16 + 4 * 16 + 16 + 6 * 16, "ViewConstants must match view.slangh");
 static_assert(offsetof(ViewConstants, cascadeViewProj) == 336, "ViewConstants layout drifted from view.slangh");
 static_assert(offsetof(ViewConstants, shadowParams) == 624, "ViewConstants layout drifted from view.slangh");
 static_assert(offsetof(ViewConstants, atmosphere0) == 640, "ViewConstants layout drifted from view.slangh");
+static_assert(offsetof(ViewConstants, ssao) == 720, "ViewConstants layout drifted from view.slangh");
 static_assert(offsetof(ViewConstants, cameraPos) == 256, "ViewConstants layout drifted from view.slangh");
 static_assert(offsetof(ViewConstants, params) == 320, "ViewConstants layout drifted from view.slangh");
 
@@ -52,7 +54,7 @@ struct PackedTangent {
 };
 inline PackedTangent PackTangent(const Vec4& t) {
     auto q = [](f32 v) { return static_cast<i8>(glm::clamp(v, -1.0f, 1.0f) * 127.0f + (v >= 0.0f ? 0.5f : -0.5f)); };
-    return {q(t.x), q(t.y), q(t.z), t.w < 0.0f ? static_cast<i8>(-127) : static_cast<i8>(127)};
+    return {q(t.x), q(t.y), q(t.z), q(t.w)}; // w is the bitangent sign (+-1); foliage meshes store their vertex occlusion here instead
 }
 
 // 36 bytes: normals stay full precision (they feed the G-buffer octahedral encode), tangents are

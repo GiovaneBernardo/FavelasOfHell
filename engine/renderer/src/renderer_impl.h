@@ -25,10 +25,14 @@
 #include "material_store.h"
 #include "mesh_store.h"
 #include "post_process.h"
+#include "probes.h"
 #include "texture_store.h"
 #include "water.h"
 
 namespace foh {
+
+inline constexpr u32 kBatchNoShadow = 1u; // not drawn into the shadow cascades
+inline constexpr u32 kBatchNoProbe = 2u;  // not drawn into light-probe captures
 
 // A scene's instances packed for the GPU, shared by every viewport that shows it.
 struct SceneGpu {
@@ -38,6 +42,7 @@ struct SceneGpu {
         u32 count;
         i32 skinBase = -1; // >= 0: a skinned character, drawn from the skinned vertex buffer starting at this vertex
         Vec4 sphere{0.0f}; // xyz centre, w radius: a static instance set, culled per viewport and cascade (w <= 0: always drawn)
+        u32 flags = 0;     // kBatchNoShadow | kBatchNoProbe
     };
     // One mesh block to deform (mirrored by SkinJob in shaders/skin.slang). Every job repeats the job count, which the
     // shader needs for its search and which saves a constant buffer.
@@ -84,6 +89,15 @@ struct ViewFrame {
     nvrhi::IBuffer* postCb = nullptr;
     nvrhi::IBuffer* exposureState = nullptr;
     u32 bloomLevels = 0; // 0 = bloom off for this frame
+    // Indirect light (see probes.h and docs/adr/0013): which of the passes run for this view this frame.
+    bool gtaoOn = false;
+    bool transmitOn = false;
+    bool envOn = false;
+    bool probesOn = false;
+    std::vector<ProbeJob> probeJobs; // probes captured this frame
+    ProbeConstants probe{};
+    nvrhi::IBuffer* probeCb = nullptr;     // volatile ProbeConstants
+    nvrhi::IBuffer* probeViewCb = nullptr; // volatile ViewConstants of the probe face being drawn
     u32 waterRings = 0; // clipmap rings (levels) this view draws
     nvrhi::IBuffer* viewCb = nullptr;
     nvrhi::IBuffer* shadowCb = nullptr;
@@ -128,6 +142,10 @@ struct Viewport {
 
     nvrhi::BufferHandle waterCb; // volatile; created on first use
 
+    // Light probes (ViewportFlags::Probes): the grid of SH textures follows this viewport's camera.
+    ProbeGrid probes;
+    nvrhi::BufferHandle probeCb, probeViewCb; // volatile; created on first use
+
     // Post-processing: constants for the exposure / bloom / tonemap passes, and the adapted exposure (it persists across
     // frames, so every viewport adapts on its own). `exposureValid` false = the next frame snaps to the target.
     nvrhi::BufferHandle postCb; // volatile
@@ -151,7 +169,12 @@ struct GpuResources {
     nvrhi::BindingLayoutHandle layoutView;       // b0
     nvrhi::BindingLayoutHandle layoutViewTexture; // b0 + t0
     nvrhi::BindingLayoutHandle layoutTexture;     // t0
-    nvrhi::BindingLayoutHandle layoutDeferred;    // b0 + t0..t4 (G-buffer, depth, shadow atlas) + t5..t7 (atmosphere) + s0, s1
+    nvrhi::BindingLayoutHandle layoutDeferred;    // b0 + t0..t19 (G-buffer, depth, shadow atlas, atmosphere, GTAO, foliage atlas, sky environment, probes, ground) + s0..s2
+    nvrhi::BindingLayoutHandle layoutProbeLight;  // layoutDeferred + b1 (ProbeConstants): the probe capture is lit with the same shader code
+    nvrhi::BindingLayoutHandle layoutGtao;        // b0 + t0 depth + t1 normal + t2 noisy visibility
+    nvrhi::BindingLayoutHandle layoutProbeSh;     // b0 ProbeConstants + t0 lit capture + u0..u3 SH coefficient textures
+    nvrhi::SamplerHandle probeSampler;            // bilinear wrap: the probe grid wraps around
+    nvrhi::TextureHandle dummy2D, dummyArray;     // stand-ins (all zero) for the inputs of passes that are switched off
     nvrhi::BindingLayoutHandle layoutSky;         // b0 + t0 (depth) + t1..t3 (atmosphere) + s0
     nvrhi::BindingLayoutHandle layoutMaterial;    // b0 + t0 (material buffer) + s0, for the passes that sample materials
     nvrhi::BindingLayoutHandle layoutSkin;        // t0 jobs, t1 source vertices, t2 influences, t3 palettes, u0 skinned vertices
@@ -188,6 +211,7 @@ struct Renderer::Impl {
     std::vector<SceneSlot> scenes;
     std::vector<std::unique_ptr<Viewport>> viewports; // creation order = submit order
     u32 nextId = 1;
+    u32 gpuTimerViewport = 0;
     u64 frame = 0;
 
     // Per-frame job argument scratch (stable addresses while jobs run; no per-frame allocation).

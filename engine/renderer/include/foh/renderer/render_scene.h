@@ -139,6 +139,9 @@ struct StaticInstanceSet {
     // Fraction of the instances drawn (the first ones: store them in random order). A cheap distance LOD for dense sets.
     f32 fraction = 1.0f;
     bool enabled = true;
+    // Small dense things (grass) cost more than they add as shadow casters and in light-probe captures: opt out.
+    bool castsShadow = true;
+    bool inProbes = true;
 };
 
 // The renderer's copy of one ECS World's render data. The ECS never exposes its

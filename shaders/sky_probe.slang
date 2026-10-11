@@ -10,6 +10,7 @@
 #include "common/fullscreen.slangh"
 #include "common/clouds.slangh"
 #include "common/water.slangh"
+#include "common/gbuffer.slangh"
 
 ConstantBuffer<ViewConstants> g_view : register(b0);
 ConstantBuffer<CloudConstants> g_cloud : register(b1);
@@ -66,4 +67,47 @@ float4 psSkyProbe(FullscreenOut i) : SV_Target0
         radiance = radiance * c.a + c.rgb;
     }
     return float4(radiance, 1.0);
+}
+
+// ---- sky environment (image-based lighting) ----------------------------------------------------------------------
+// The whole sphere around the camera as an octahedral image (gbuffer.slangh's octEncode), kEnvSize texels per side:
+// the sky and clouds above the horizon, a lit grey floor below it. The deferred pass reflects it off every surface
+// (blurred by env.slang for rough ones). Rendered every frame from the same tables and cloud march as the water probe.
+static const float kEnvSize = 128.0;
+
+float3 envGround(float3 sunDir)
+{
+    float3 albedo = g_view.atmosphere3.xyz;
+    if (g_view.atmosphere1.y < 0.5) return albedo * 0.4;
+    AtmoRt atmo = atmoFromView(g_view);
+    float r = atmo.geom.bottom + 0.001;
+    float muS = sunDir.y;
+    float3 sun = g_view.sunColor.rgb * atmoTransmittanceToSun(atmo, r, muS);
+    float3 sky = atmoSkyIrradiance(atmo, r, muS) * g_view.sunColor.rgb;
+    return albedo * (sun * max(muS, 0.0) + sky) * (1.0 / 3.14159265);
+}
+
+[shader("fragment")]
+float4 psSkyEnv(FullscreenOut i) : SV_Target0
+{
+    float3 dir = octDecode(i.position.xy / kEnvSize);
+    float3 above = normalize(float3(dir.x, max(dir.y, 0.003), dir.z));
+    float3 sunDir = -g_view.sunDirection.xyz;
+
+    float3 radiance;
+    if (g_view.atmosphere1.y < 0.5) {
+        radiance = gradientSky(above);
+    } else {
+        AtmoRt atmo = atmoFromView(g_view);
+        float3 camera = atmoPosition(atmo, g_view.cameraPos.xyz, g_view.cameraPos.xyz);
+        float3 transmittance;
+        radiance = atmoSkyRadiance(atmo, camera, above, sunDir, transmittance) * g_view.sunColor.rgb;
+    }
+    if (g_cloud.layer.z > 0.5 && dir.y > 0.0) {
+        float4 c = traceClouds(i.position.xy, 0.0, g_view.cameraPos.xyz, above);
+        radiance = radiance * c.a + c.rgb;
+    }
+    // Fade into the ground over the few degrees around the horizon.
+    float below = smoothstep(0.0, -0.08, dir.y);
+    return float4(min(lerp(radiance, envGround(sunDir), below), 64.0), 1.0);
 }

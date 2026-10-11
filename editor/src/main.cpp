@@ -17,6 +17,7 @@
 //   --roads-test      with --terrain: lays and carves a few roads along Leblon beach (QA)
 //   --profile       log the average CPU time of each frame phase every 120 frames (QA)
 //   --terrain [n]   create the terrain, open its panel and look at it: 0 from the sea, 1 Vidigal slope, 2 hill over the sea, 3 Leblon beach (QA)
+//   --cam x,z,eye,yaw,pitch  with --terrain: the Scene camera there (eye = metres above the ground; QA)
 //   --water-test [n] open the Water Test panel (coast scene) on camera preset n (0 hill, 1 beach, 2 aerial, 3 islet)
 //   --autoplay s     scripted game input, e.g. "W:30-150,SPACE:90,C:150-210,V:240,MOUSEX:40-60=12" (frame ranges; QA)
 //   --walk m/s       placed characters walk straight ahead at this speed (animation QA)
@@ -61,6 +62,8 @@ int main(int argc, char** argv) {
         } else if (!std::strcmp(argv[i], "--terrain")) {
             options.terrain = true;
             if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') options.terrainView = std::atoi(argv[++i]);
+        } else if (!std::strcmp(argv[i], "--cam") && i + 1 < argc) {
+            options.cam = argv[++i];
         } else if (!std::strcmp(argv[i], "--water-test")) {
             options.waterTest = (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') ? std::atoi(argv[++i]) : 0;
         } else if (!std::strcmp(argv[i], "--player-model") && i + 1 < argc) {

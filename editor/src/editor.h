@@ -71,6 +71,7 @@ struct EditorOptions {
     bool terrainSculpt = false;
     bool roadsTest = false;
     int terrainView = 0;
+    std::string cam; // --cam x,z,eye,yaw,pitch
     bool terrain = false;      // --terrain: creates the terrain, opens its panel and flies the Scene camera over it (QA)
     int waterTest = -1;        // --water-test [view]: opens and focuses the Water Test panel on camera preset `view` (QA)
 };
@@ -105,6 +106,7 @@ private:
         bool grid = true;
         bool sky = true;
         bool water = false; // draws the sea (ViewportFlags::Water)
+        bool probes = false; // dynamic light probes around this view's camera (ViewportFlags::Probes)
         bool open = true;
         bool capturing = false; // RMB look/fly in progress
         FlyCamera camera;

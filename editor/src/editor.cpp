@@ -2,6 +2,7 @@
 #include "foh/world/surface.h"
 #include "water_test_scene.h"
 
+#include <cstdio>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -103,6 +104,11 @@ bool Editor::init() {
     io.IniFilename = m_iniPath.c_str();
     m_prefs.load(GetExecutableDirectory() / "editor_prefs.txt");
     loadRenderSettings();
+    if (m_options.profile) {
+        RenderSettings r = m_renderer->renderSettings();
+        r.gpuTimers = true;
+        m_renderer->setRenderSettings(r);
+    }
     m_theme.init(*m_window);
     m_platform.init(*m_window);
     if (!m_imguiRenderer.init(*m_renderer)) return false;
@@ -155,6 +161,11 @@ bool Editor::init() {
     };
     addViewport("Scene", 0, true, true);
     addViewport("Game", 0, false, false);
+    for (size_t i = 0; i < 2; ++i) { // the two views of the world: they get light probes (each costs a few captures per frame)
+        m_viewports[i].probes = true;
+        m_renderer->setViewportFlags(m_viewports[i].id, FlagsOf(m_viewports[i]));
+    }
+    m_renderer->setGpuTimerViewport(m_viewports[1].id); // the Game view: the one whose cost matters
     addViewport("Animation Debug", 1, true, true);
     m_viewports[2].camera.position = Vec3(0.0f, 3.0f, 9.0f);
     addViewport("Prefab Preview", m_previewScene, true, true);
@@ -199,6 +210,15 @@ bool Editor::init() {
         cam.position = Vec3(v.x, v.eye < 0.0f ? -v.eye : m_terrainPanel.terrain()->height(v.x, vz) + v.eye, vz);
         cam.yaw = v.yaw;
         cam.pitch = v.pitch;
+        if (!m_options.cam.empty()) { // QA: an explicit camera, no panel in the way
+            f32 cx = 0, cz = 0, eye = 1.8f, yaw = 0, pitch = 0;
+            if (std::sscanf(m_options.cam.c_str(), "%f,%f,%f,%f,%f", &cx, &cz, &eye, &yaw, &pitch) == 5) {
+                cam.position = Vec3(cx, m_terrainPanel.terrain()->height(cx, cz) + eye, cz);
+                cam.yaw = yaw;
+                cam.pitch = pitch;
+                m_showTerrain = false;
+            }
+        }
         if (m_options.roadsTest) {
             // Roads QA: hover above the beach looking north at the avenue.
             cam.yaw = 0.0f;
@@ -800,7 +820,7 @@ void Editor::createPreviewScene() {
 
 ViewportFlags Editor::FlagsOf(const ViewportPanel& p) {
     return (p.sky ? ViewportFlags::Sky : ViewportFlags::None) | (p.grid ? ViewportFlags::Grid : ViewportFlags::None) |
-           (p.water ? ViewportFlags::Water : ViewportFlags::None);
+           (p.water ? ViewportFlags::Water : ViewportFlags::None) | (p.probes ? ViewportFlags::Probes : ViewportFlags::None);
 }
 
 // The editor's coast: the terrain mesh and the water's sea-floor texture come from the same height function.
@@ -1143,6 +1163,16 @@ bool Editor::frame(float dt) {
         std::sort(t.begin(), t.end(), [](const auto& a, const auto& b) { return a.ms > b.ms; });
         for (size_t i = 0; i < t.size() && i < 6; ++i) systems += std::format(" | {} {:.2f}", t[i].name, t[i].ms);
         FOH_INFO("{}", systems);
+        ViewportDebugInfo info;
+        if (m_renderer->viewportDebugInfo(m_viewports[1].id, info) && !info.gpu.empty()) {
+            std::vector<ViewportDebugInfo::Timing> gpu = info.gpu;
+            float total = 0.0f;
+            for (const auto& g : gpu) total += g.ms;
+            std::sort(gpu.begin(), gpu.end(), [](const auto& a, const auto& b) { return a.ms > b.ms; });
+            std::string line2 = std::format("GPU Game view {:.2f} ms; heaviest passes (ms):", total);
+            for (size_t i = 0; i < gpu.size() && i < 14; ++i) line2 += std::format(" | {} {:.2f}", gpu[i].name, gpu[i].ms);
+            FOH_INFO("{}", line2);
+        }
         m_profileFrames = 0;
     }
     return !m_quit;
@@ -1486,6 +1516,19 @@ void Editor::loadRenderSettings() {
     r.bloom = m_prefs.getBool("render.bloom", r.bloom);
     r.bloomStrength = m_prefs.getFloat("render.bloomStrength", r.bloomStrength);
     r.bloomLevels = static_cast<u32>(m_prefs.getFloat("render.bloomLevels", static_cast<float>(r.bloomLevels)));
+    r.gtao = m_prefs.getBool("render.gtao", r.gtao);
+    r.gtaoRadius = m_prefs.getFloat("render.gtaoRadius", r.gtaoRadius);
+    r.gtaoStrength = m_prefs.getFloat("render.gtaoStrength", r.gtaoStrength);
+    r.contactShadows = m_prefs.getBool("render.contactShadows", r.contactShadows);
+    r.contactShadowLength = m_prefs.getFloat("render.contactShadowLength", r.contactShadowLength);
+    r.canopyTransmission = m_prefs.getFloat("render.canopyTransmission", r.canopyTransmission);
+    r.ibl = m_prefs.getBool("render.ibl", r.ibl);
+    r.iblIntensity = m_prefs.getFloat("render.iblIntensity", r.iblIntensity);
+    r.probes = m_prefs.getBool("render.probes", r.probes);
+    r.probeSpacing = m_prefs.getFloat("render.probeSpacing", r.probeSpacing);
+    r.probesPerFrame = static_cast<u32>(m_prefs.getFloat("render.probesPerFrame", static_cast<float>(r.probesPerFrame)));
+    r.probeIntensity = m_prefs.getFloat("render.probeIntensity", r.probeIntensity);
+    r.probeInterval = static_cast<u32>(m_prefs.getFloat("render.probeInterval", static_cast<float>(r.probeInterval)));
     m_renderer->setRenderSettings(r);
 }
 
@@ -1541,6 +1584,44 @@ void Editor::drawRenderSettings() {
             ImGui::EndDisabled();
             ImGui::TreePop();
         }
+        if (ImGui::TreeNodeEx("Ambient occlusion (GTAO)", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Enabled##gtao", &r.gtao);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ground-truth AO from the depth buffer: darkens ambient and sky reflection in creases and under overhangs.");
+            ImGui::BeginDisabled(!r.gtao);
+            ImGui::SliderFloat("Radius (m)", &r.gtaoRadius, 0.2f, 4.0f, "%.2f");
+            ImGui::SliderFloat("Strength", &r.gtaoStrength, 0.2f, 3.0f, "%.2f");
+            ImGui::EndDisabled();
+            ImGui::TreePop();
+        }
+        if (ImGui::TreeNodeEx("Sun shadows: contact + canopy", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Contact shadows", &r.contactShadows);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Screen-space ray march toward the sun: grass, bark ridges, the crease under a ledge.");
+            ImGui::BeginDisabled(!r.contactShadows);
+            ImGui::SliderFloat("Contact length (m)", &r.contactShadowLength, 0.1f, 2.0f, "%.2f");
+            ImGui::EndDisabled();
+            ImGui::SliderFloat("Leaf transmission", &r.canopyTransmission, 0.0f, 2.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sun that leaks through the first layer of leaves above a surface (green, dappled shade). 0 = off.");
+            ImGui::TreePop();
+        }
+        if (ImGui::TreeNodeEx("Indirect light (IBL + probes)", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Sky reflections (IBL)", &r.ibl);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("The sky and clouds as an image every surface reflects, blurrier for rough ones. Needs the atmosphere.");
+            ImGui::BeginDisabled(!r.ibl);
+            ImGui::SliderFloat("Reflection intensity", &r.iblIntensity, 0.0f, 4.0f, "%.2f");
+            ImGui::EndDisabled();
+            ImGui::Checkbox("Light probes", &r.probes);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Ambient light measured from the scene around the camera, a few probes per frame. Needs terrain (its height field) and the atmosphere.");
+            ImGui::BeginDisabled(!r.probes);
+            ImGui::SliderFloat("Probe spacing (m)", &r.probeSpacing, 1.0f, 12.0f, "%.1f");
+            int perFrame = static_cast<int>(r.probesPerFrame);
+            if (ImGui::SliderInt("Probes per frame", &perFrame, 1, 8)) r.probesPerFrame = static_cast<u32>(perFrame);
+            int interval = static_cast<int>(r.probeInterval);
+            if (ImGui::SliderInt("Refresh every N frames", &interval, 1, 8)) r.probeInterval = static_cast<u32>(interval);
+            ImGui::SliderFloat("Probe intensity", &r.probeIntensity, 0.0f, 2.0f, "%.2f");
+            ImGui::EndDisabled();
+            ImGui::TreePop();
+        }
         if (ImGui::TreeNodeEx("Tonemap", ImGuiTreeNodeFlags_DefaultOpen)) {
             static const char* kTonemappers[] = {"Linear (clamp)", "Reinhard", "Reinhard extended", "Uncharted 2", "ACES (fit)", "PBR Neutral"};
             static_assert(sizeof(kTonemappers) / sizeof(kTonemappers[0]) == kTonemapperCount, "tonemapper names out of sync");
@@ -1554,6 +1635,7 @@ void Editor::drawRenderSettings() {
             ImGui::TreePop();
         }
         ImGui::PopItemWidth();
+        ImGui::Checkbox("GPU timers (per-pass ms in the table below)", &r.gpuTimers);
         if (ImGui::Button("Reset")) r = RenderSettings{};
         ImGui::SameLine();
         ImGui::TextDisabled("Applies to every viewport, saved with the editor prefs.");
@@ -1580,6 +1662,19 @@ void Editor::drawRenderSettings() {
         m_prefs.setBool("render.bloom", r.bloom);
         m_prefs.setFloat("render.bloomStrength", r.bloomStrength);
         m_prefs.setFloat("render.bloomLevels", static_cast<float>(r.bloomLevels));
+        m_prefs.setBool("render.gtao", r.gtao);
+        m_prefs.setFloat("render.gtaoRadius", r.gtaoRadius);
+        m_prefs.setFloat("render.gtaoStrength", r.gtaoStrength);
+        m_prefs.setBool("render.contactShadows", r.contactShadows);
+        m_prefs.setFloat("render.contactShadowLength", r.contactShadowLength);
+        m_prefs.setFloat("render.canopyTransmission", r.canopyTransmission);
+        m_prefs.setBool("render.ibl", r.ibl);
+        m_prefs.setFloat("render.iblIntensity", r.iblIntensity);
+        m_prefs.setBool("render.probes", r.probes);
+        m_prefs.setFloat("render.probeSpacing", r.probeSpacing);
+        m_prefs.setFloat("render.probesPerFrame", static_cast<float>(r.probesPerFrame));
+        m_prefs.setFloat("render.probeIntensity", r.probeIntensity);
+        m_prefs.setFloat("render.probeInterval", static_cast<float>(r.probeInterval));
     }
 }
 
@@ -1605,15 +1700,24 @@ void Editor::drawRenderGraphPanel() {
         ImGui::Text("%ux%u  |  %u instances  |  %u command list group(s)  |  %u/%u physical/virtual transients  |  %u barriers",
                     info.width, info.height, info.instances, info.groups, info.physicalTextures,
                     info.transientTextures, info.barriers);
-        if (ImGui::BeginTable(("passes##" + info.name).c_str(), 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+        float gpuTotal = 0.0f;
+        for (const auto& t : info.gpu) gpuTotal += t.ms;
+        if (!info.gpu.empty()) ImGui::Text("GPU %.2f ms (sum of the passes, a few frames old)", gpuTotal);
+        if (ImGui::BeginTable(("passes##" + info.name).c_str(), 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
             ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("GPU ms");
             ImGui::TableSetupColumn("Group");
             ImGui::TableSetupColumn("State");
             ImGui::TableHeadersRow();
+            size_t liveIndex = 0;
             for (const auto& pass : info.passes) {
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
                 if (pass.culled) ImGui::TextDisabled("%s", pass.name); else ImGui::TextUnformatted(pass.name);
+                ImGui::TableNextColumn();
+                // The timings come in the order of the live (not culled) passes.
+                if (!pass.culled && liveIndex < info.gpu.size()) ImGui::Text("%.3f", info.gpu[liveIndex].ms); else ImGui::TextDisabled("-");
+                if (!pass.culled) ++liveIndex;
                 ImGui::TableNextColumn();
                 if (pass.culled) ImGui::TextDisabled("-"); else ImGui::Text("%u", pass.group);
                 ImGui::TableNextColumn();

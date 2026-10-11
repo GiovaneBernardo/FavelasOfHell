@@ -1,0 +1,26 @@
+// Foliage helpers shared by the shadow passes (shadow.slang) and the lighting (common/lighting.slangh).
+#pragma once
+
+// Colour of the light that gets through a leaf: the leaf colour pulled toward a neutral warm grey, because the light
+// that crosses a whole canopy has been through many leaves and bounced off many more (it is never saturated green).
+float3 leafTransmitColor(float3 albedo, float translucency)
+{
+    return lerp(float3(0.42, 0.40, 0.30), sqrt(max(albedo, 0.0)), 0.45) * (0.55 + 0.7 * translucency);
+}
+
+// Colour of the backlit glow of a leaf: saturated, unlike the light that crossed a whole canopy.
+float3 leafGlowColor(float3 albedo, float translucency)
+{
+    return sqrt(max(albedo, 0.0)) * (0.35 + 0.8 * translucency);
+}
+
+// Gaps in a canopy: a share of the leaf texels of the shadow casters is dropped. A real crown has holes between its
+// leaves that a card cannot paint; the shadow filter turns the pattern into partial shade with the odd sun fleck.
+// The pattern lives in the LEAF TEXTURE (blocks of 1/80 of the atlas, a few centimetres on a card), not in shadow-map
+// texels: the cascades follow the camera, so a screen-fixed pattern crawls over the leaves and flickers while moving.
+bool foliageGap(float2 uv)
+{
+    float2 cell = floor(uv * 80.0);
+    float n = frac(52.9829189 * frac(dot(cell, float2(0.06711056, 0.00583715))));
+    return n < 0.26;
+}

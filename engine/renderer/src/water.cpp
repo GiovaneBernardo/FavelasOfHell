@@ -274,6 +274,20 @@ void Water::clearBed() {
     m_bedDirty = true;
 }
 
+f32 Water::groundAt(f32 x, f32 z) const {
+    if (m_bedData.empty()) return 0.0f;
+    // Same mapping as the shader (uv * size - 0.5 = texel coordinate, bilinear, clamped).
+    const f32 u = (x - m_bedOrigin.x) / m_bedSize.x * static_cast<f32>(m_bedWidth) - 0.5f;
+    const f32 v = (z - m_bedOrigin.y) / m_bedSize.y * static_cast<f32>(m_bedHeight) - 0.5f;
+    const f32 fu = std::clamp(u, 0.0f, static_cast<f32>(m_bedWidth - 1));
+    const f32 fv = std::clamp(v, 0.0f, static_cast<f32>(m_bedHeight - 1));
+    const u32 x0 = static_cast<u32>(fu), y0 = static_cast<u32>(fv);
+    const u32 x1 = std::min(x0 + 1, m_bedWidth - 1), y1 = std::min(y0 + 1, m_bedHeight - 1);
+    const f32 tx = fu - static_cast<f32>(x0), ty = fv - static_cast<f32>(y0);
+    auto at = [&](u32 xi, u32 yi) { return m_bedData[static_cast<size_t>(yi) * m_bedWidth + xi]; };
+    return glm::mix(glm::mix(at(x0, y0), at(x1, y0), tx), glm::mix(at(x0, y1), at(x1, y1), tx), ty);
+}
+
 void Water::uploadBed() {
     const bool has = !m_bedData.empty();
     const u32 w = has ? m_bedWidth : 1, h = has ? m_bedHeight : 1;

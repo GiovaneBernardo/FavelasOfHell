@@ -238,6 +238,17 @@ struct RenderGraph::Impl {
     std::vector<std::unordered_map<u64, BindEntry>> bindCaches; // one per group
     std::vector<nvrhi::CommandListHandle> cmdLists;
 
+    // GPU timers: one query per live pass, in a ring so results are read after the GPU is done with the frame.
+    static constexpr u32 kTimerRing = 3; // NVRHI allows only a few hundred timer queries per device
+    struct TimerSlot {
+        std::vector<nvrhi::TimerQueryHandle> queries;
+        std::vector<const char*> names;
+        u32 count = 0; // queries written when this slot was recorded
+    };
+    TimerSlot timerRing[kTimerRing];
+    std::vector<RgPassTiming> timings;
+    nvrhi::IDevice* timerDevice = nullptr;
+
     // compile() scratch, kept to avoid per-frame allocations
     std::vector<u32> scratchPoolTex, scratchPoolBuf;
     std::vector<Transition> scratchMerged;
@@ -285,6 +296,19 @@ void* RenderGraph::allocate(size_t size, size_t align) { return m_impl->allocate
 void RenderGraph::reset(u64 frameIndex) {
     Impl& s = *m_impl;
     s.frame = frameIndex;
+    if (s.timerDevice) {
+        // The slot this frame will use was last written kTimerRing frames ago: the GPU is done with it.
+        Impl::TimerSlot& slot = s.timerRing[frameIndex % Impl::kTimerRing];
+        if (slot.count) {
+            s.timings.clear();
+            for (u32 i = 0; i < slot.count; ++i) {
+                s.timerDevice->pollTimerQuery(slot.queries[i]);
+                s.timings.push_back({slot.names[i], static_cast<float>(s.timerDevice->getTimerQueryTime(slot.queries[i]) * 1000.0)});
+                s.timerDevice->resetTimerQuery(slot.queries[i]);
+            }
+            slot.count = 0;
+        }
+    }
     s.compiled = false;
     s.recorded = false;
     s.buildingPass = false;
@@ -754,6 +778,14 @@ void RenderGraph::Impl::record(nvrhi::IDevice* device, RenderGraph& graph) {
     FOH_ASSERT(compiled, "record() before compile()");
     recorded = false;
     if (groups.empty()) return;
+    if (cfg.gpuTimers) {
+        timerDevice = device;
+        TimerSlot& slot = timerRing[frame % kTimerRing];
+        while (slot.queries.size() < live.size()) slot.queries.push_back(device->createTimerQuery());
+        slot.names.resize(live.size());
+        for (size_t k = 0; k < live.size(); ++k) slot.names[k] = passes[live[k]].name;
+        slot.count = static_cast<u32>(live.size());
+    }
 
     // Framebuffers are resolved up front on this thread, so pass bodies only read.
     for (const u32 index : live) {
@@ -848,6 +880,8 @@ void RenderGraph::Impl::recordGroup(nvrhi::IDevice* device, RenderGraph& graph, 
         const u32 passIndex = live[k];
         const Pass& p = passes[passIndex];
         if (cfg.debugMarkers) cmd->beginMarker(p.name);
+        nvrhi::ITimerQuery* timer = cfg.gpuTimers ? timerRing[frame % kTimerRing].queries[k].Get() : nullptr;
+        if (timer) cmd->beginTimerQuery(timer);
 
         for (u32 i = 0; i < p.transCount; ++i) {
             const Transition& t = transitions[p.transBegin + i];
@@ -869,6 +903,7 @@ void RenderGraph::Impl::recordGroup(nvrhi::IDevice* device, RenderGraph& graph, 
         ctx.m_pass = passIndex;
         p.invoke(p.fn, p.data, ctx);
 
+        if (timer) cmd->endTimerQuery(timer);
         if (cfg.debugMarkers) cmd->endMarker();
     }
 
@@ -939,6 +974,8 @@ ResourceStates RenderGraph::finalStateOf(RgBuffer b) const {
     return r.phys == kRgInvalid ? r.initial : r.endState;
 }
 std::span<const RgPassInfo> RenderGraph::passInfos() const { return m_impl->passInfos; }
+std::span<const RgPassTiming> RenderGraph::gpuTimings() const { return m_impl->timings; }
+void RenderGraph::setGpuTimers(bool on) { m_impl->cfg.gpuTimers = on; }
 const RgStats& RenderGraph::stats() const { return m_impl->stats; }
 u64 RenderGraph::frameIndex() const { return m_impl->frame; }
 

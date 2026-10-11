@@ -97,10 +97,32 @@ std::unique_ptr<Renderer> Renderer::create(const RendererDesc& desc) {
         nvrhi::BindingLayoutDesc dl;
         dl.visibility = nvrhi::ShaderType::All;
         dl.addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(0));
-        for (u32 t = 0; t < 8; ++t) dl.addItem(nvrhi::BindingLayoutItem::Texture_SRV(t));
+        // t0..t3 G-buffer + depth, t4 shadow atlas, t5..t7 atmosphere, t8 GTAO, t9 foliage transmission atlas,
+        // t10..t14 sky environment levels, t15..t18 probe SH, t19 ground height (common/lighting.slangh)
+        for (u32 t = 0; t < 20; ++t) dl.addItem(nvrhi::BindingLayoutItem::Texture_SRV(t));
         dl.addItem(nvrhi::BindingLayoutItem::Sampler(0));
         dl.addItem(nvrhi::BindingLayoutItem::Sampler(1)); // bilinear clamp for the atmosphere tables
+        dl.addItem(nvrhi::BindingLayoutItem::Sampler(2)); // bilinear wrap for the probe grid
         s.gpu.layoutDeferred = dev->createBindingLayout(dl);
+        dl.addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(1)); // ProbeConstants
+        s.gpu.layoutProbeLight = dev->createBindingLayout(dl);
+
+        nvrhi::BindingLayoutDesc gl;
+        gl.visibility = nvrhi::ShaderType::All;
+        gl.addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(0));
+        for (u32 t = 0; t < 3; ++t) gl.addItem(nvrhi::BindingLayoutItem::Texture_SRV(t));
+        s.gpu.layoutGtao = dev->createBindingLayout(gl);
+
+        nvrhi::BindingLayoutDesc pl;
+        pl.visibility = nvrhi::ShaderType::All;
+        pl.addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(0));
+        pl.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
+        for (u32 t = 0; t < 4; ++t) pl.addItem(nvrhi::BindingLayoutItem::Texture_UAV(t));
+        s.gpu.layoutProbeSh = dev->createBindingLayout(pl);
+
+        nvrhi::SamplerDesc psd;
+        psd.setAllFilters(true).setAllAddressModes(nvrhi::SamplerAddressMode::Wrap);
+        s.gpu.probeSampler = dev->createSampler(psd);
 
         nvrhi::BindingLayoutDesc sl;
         sl.visibility = nvrhi::ShaderType::All;
@@ -197,6 +219,33 @@ std::unique_ptr<Renderer> Renderer::create(const RendererDesc& desc) {
     s.gpu.materials.upload(dev);
     s.warmPipelines();
 
+    // Stand-ins for the inputs of passes that are off (GTAO, foliage atlas, sky environment, probes): the shaders skip
+    // them by a flag in the view constants, but the binding sets still need valid textures.
+    {
+        auto make = [&](bool array, const char* name) {
+            nvrhi::TextureDesc td;
+            td.width = td.height = 1;
+            td.format = nvrhi::Format::RGBA16_FLOAT;
+            if (array) {
+                td.dimension = nvrhi::TextureDimension::Texture2DArray;
+                td.arraySize = kProbeLayers;
+            }
+            td.initialState = nvrhi::ResourceStates::ShaderResource;
+            td.keepInitialState = true;
+            td.debugName = name;
+            return dev->createTexture(td);
+        };
+        s.gpu.dummy2D = make(false, "Dummy2D");
+        s.gpu.dummyArray = make(true, "DummyArray");
+        nvrhi::CommandListHandle cmd = dev->createCommandList();
+        const u16 zeros[4] = {};
+        cmd->open();
+        cmd->writeTexture(s.gpu.dummy2D, 0, 0, zeros, sizeof(zeros));
+        for (u32 layer = 0; layer < kProbeLayers; ++layer) cmd->writeTexture(s.gpu.dummyArray, layer, 0, zeros, sizeof(zeros));
+        cmd->close();
+        dev->executeCommandList(cmd);
+    }
+
     // Atmosphere tables: loaded from the cache, or generated once (in the background of the first frames).
     {
         const std::filesystem::path cacheDir = desc.cacheDirectory.empty() ? GetExecutableDirectory() / "cache" : desc.cacheDirectory;
@@ -252,6 +301,15 @@ void Renderer::setRenderSettings(const RenderSettings& settings) {
     s.meterCenterWeight = std::clamp(s.meterCenterWeight, 0.0f, 1.0f);
     s.bloomStrength = std::clamp(s.bloomStrength, 0.0f, 1.0f);
     s.bloomLevels = std::clamp(s.bloomLevels, 1u, kMaxBloomLevels);
+    s.gtaoRadius = std::clamp(s.gtaoRadius, 0.1f, 8.0f);
+    s.gtaoStrength = std::clamp(s.gtaoStrength, 0.1f, 4.0f);
+    s.contactShadowLength = std::clamp(s.contactShadowLength, 0.05f, 4.0f);
+    s.canopyTransmission = std::clamp(s.canopyTransmission, 0.0f, 2.0f);
+    s.iblIntensity = std::clamp(s.iblIntensity, 0.0f, 8.0f);
+    s.probeSpacing = std::clamp(s.probeSpacing, 1.0f, 16.0f);
+    s.probesPerFrame = std::clamp(s.probesPerFrame, 1u, kProbeMaxPerFrame);
+    s.probeInterval = std::clamp(s.probeInterval, 1u, 16u);
+    s.probeIntensity = std::clamp(s.probeIntensity, 0.0f, 4.0f);
 }
 const RenderSettings& Renderer::renderSettings() const { return m_impl->settings; }
 
@@ -317,6 +375,19 @@ bool Renderer::uploadMeshAsset(const AssetId& asset, const MeshGeometry& geometr
     const bool skinned = !geometry.skinJoints.empty();
     if (skinned && (geometry.skinJoints.size() != vertexCount || geometry.skinWeights.size() != vertexCount)) return false;
 
+    // Local bounding sphere (centre of the box, farthest vertex): lets every pass cull the instances that are not in view.
+    Vec4 bounds(0.0f);
+    {
+        Vec3 lo(1e30f), hi(-1e30f);
+        for (const Vec3& p : geometry.positions) {
+            lo = glm::min(lo, p);
+            hi = glm::max(hi, p);
+        }
+        const Vec3 centre = 0.5f * (lo + hi);
+        f32 r2 = 0.0f;
+        for (const Vec3& p : geometry.positions) r2 = std::max(r2, glm::dot(p - centre, p - centre));
+        bounds = Vec4(centre, std::sqrt(r2));
+    }
     std::vector<MeshVertex> vertices(vertexCount);
     for (size_t i = 0; i < vertexCount; ++i) {
         vertices[i].position = geometry.positions[i];
@@ -343,7 +414,7 @@ bool Renderer::uploadMeshAsset(const AssetId& asset, const MeshGeometry& geometr
     std::vector<u32> ids;
     ids.reserve(submeshes.size());
     for (const MeshIndexRange& r : submeshes)
-        ids.push_back(s.gpu.meshes.addRange({block.firstIndex + r.firstIndex, r.indexCount, block.baseVertex, static_cast<u32>(vertexCount), skinned, block.id}));
+        ids.push_back(s.gpu.meshes.addRange({block.firstIndex + r.firstIndex, r.indexCount, block.baseVertex, static_cast<u32>(vertexCount), skinned, block.id, bounds}));
     s.meshLookup.set(asset, std::move(ids));
     for (const u32 id : previous) s.retiredMeshes.push_back({s.frame, id});
     return true;
@@ -475,6 +546,7 @@ void Renderer::setViewportCamera(ViewportId id, const RenderViewParams& params) 
 void Renderer::clearViewportCamera(ViewportId id) {
     if (Viewport* v = m_impl->findViewport(id)) v->hasCameraOverride = false;
 }
+void Renderer::setGpuTimerViewport(ViewportId id) { m_impl->gpuTimerViewport = id.value; }
 void Renderer::setViewportActive(ViewportId id, bool active) {
     if (Viewport* v = m_impl->findViewport(id)) v->active = active;
 }
@@ -568,6 +640,25 @@ void Renderer::Impl::prepareScene(SceneSlot& slot) {
     packed.instances.resize(meshes.size());
     for (const ExtractedMesh& m : meshes) packed.instances[packed.cursor[keyOf(m)]++] = packInstance(m);
 
+    // Bounding sphere of every batch from the mesh bounds and its instances (one tile of terrain = one instance = an exact
+    // sphere; many instances = the box of their centres, grown by the radius): the passes cull on it like on a static set.
+    for (SceneGpu::Batch& b : packed.batches) {
+        const MeshRange& range = gpu.meshes.range(b.mesh);
+        if (range.skinned || range.bounds.w <= 0.0f) continue;
+        Vec3 lo(1e30f), hi(-1e30f);
+        f32 reach = 0.0f;
+        for (u32 k = 0; k < b.count; ++k) {
+            const GpuInstance& g = packed.instances[b.first + k];
+            const Vec4 c(range.bounds.x, range.bounds.y, range.bounds.z, 1.0f);
+            const Vec3 centre(glm::dot(g.row0, c), glm::dot(g.row1, c), glm::dot(g.row2, c));
+            const f32 scale = std::sqrt(std::max({glm::dot(Vec3(g.row0), Vec3(g.row0)), glm::dot(Vec3(g.row1), Vec3(g.row1)), glm::dot(Vec3(g.row2), Vec3(g.row2))}));
+            lo = glm::min(lo, centre);
+            hi = glm::max(hi, centre);
+            reach = std::max(reach, range.bounds.w * scale);
+        }
+        b.sphere = Vec4(0.5f * (lo + hi), 0.5f * glm::length(hi - lo) + reach + 0.5f);
+    }
+
     // Static instance sets (trees, grass): packed after the entities' instances, one culled batch per set.
     struct StaticBatch {
         u32 cls;
@@ -596,7 +687,7 @@ void Renderer::Impl::prepareScene(SceneSlot& slot) {
             g.pad = 0;
             packed.instances.push_back(g);
         }
-        staticBatches.push_back({static_cast<u32>(gpu.materials.classOf(material)), {mesh, first, count, -1, Vec4(set.center, set.radius)}});
+        staticBatches.push_back({static_cast<u32>(gpu.materials.classOf(material)), {mesh, first, count, -1, Vec4(set.center, set.radius), (set.castsShadow ? 0u : kBatchNoShadow) | (set.inProbes ? 0u : kBatchNoProbe)}});
     }
 
     // Skinned characters: one instance and one single-instance batch each (every character has its own deformed

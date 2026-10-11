@@ -17,11 +17,13 @@ using noise::Smoothstep;
 
 namespace {
 
-constexpr f32 kTreeTile = 64.0f;
-constexpr f32 kGrassTile = 16.0f;
+// Every tile is one retained batch per tree kind and per trunk/leaf mesh, drawn by every pass (depth, four cascades, G-buffer,
+// probes): big tiles keep the draw count, which is what costs in a Debug build and on the CPU, low. 128 m / 32 m.
+constexpr f32 kTreeTile = 128.0f;
+constexpr f32 kGrassTile = 32.0f;
 constexpr f32 kTreeSpacing = 5.0f;  // m between planting spots at density 1
 constexpr f32 kPalmSpacing = 7.0f;
-constexpr f32 kGrassSpacing = 0.48f; // m: tufts overlap, so the ground reads as lawn, not as dots
+constexpr f32 kGrassSpacing = 0.40f; // m: tufts overlap, so the ground reads as lawn, not as dots
 
 constexpr u64 kAssetHi = 0x7E44A1A1ull;
 // Mesh ids: kind 0..kTreeVariants-1 are trees, kTreeVariants the palm; per kind and LOD one trunk and one leaf mesh.
@@ -148,8 +150,8 @@ struct Vegetation::Impl {
             up.mips = BuildFoliageMips(img, cutoff, levels);
             renderer.uploadTexture(std::move(up));
         };
-        uploadImage(kLeafTexture, BuildLeafAtlas(), 0.5f, 7, TextureFormat::Rgba8Srgb);
-        uploadImage(kGrassTexture, BuildGrassImage(), 0.5f, 8, TextureFormat::Rgba8Srgb);
+        uploadImage(kLeafTexture, BuildLeafAtlas(), 0.5f, 9, TextureFormat::Rgba8Srgb);
+        uploadImage(kGrassTexture, BuildGrassImage(), 0.5f, 9, TextureFormat::Rgba8Srgb);
         uploadImage(kBarkTexture, BuildBarkImage(), 0.0f, 8, TextureFormat::Rgba8Srgb);
 
         MaterialParams leaf;
@@ -163,7 +165,7 @@ struct Vegetation::Impl {
         renderer.setMaterial(kLeafMaterial, leaf);
         MaterialParams grass = leaf;
         grass.baseColorTexture = kGrassTexture;
-        grass.translucency = 0.45f;
+        grass.translucency = 0.30f;
         grass.roughness = 0.9f;
         renderer.setMaterial(kGrassMaterial, grass);
         setBark(kBarkTexture, {});
@@ -250,7 +252,7 @@ struct Vegetation::Impl {
                 if (Rand01(gi, gj, seed + 4) > chance) continue;
                 const f32 v = Rand01(gi, gj, seed + 8);
                 out.tufts.push_back(MakeStaticInstance(Vec3(x, h - 0.04f, z), Rand01(gi, gj, seed + 6) * 6.2831853f, 0.65f + 0.85f * Rand01(gi, gj, seed + 7),
-                                                       PackColor(0.80f + 0.35f * v, 0.86f + 0.22f * v, 0.70f + 0.2f * v)));
+                                                       PackColor(0.62f + 0.26f * v, 0.66f + 0.18f * v, 0.54f + 0.18f * v)));
                 out.minY = std::min(out.minY, h);
                 out.maxY = std::max(out.maxY, h);
             }
@@ -297,6 +299,8 @@ struct Vegetation::Impl {
                 StaticInstanceSet set;
                 set.mesh = kGrassMesh;
                 set.material = kGrassMaterial;
+                set.castsShadow = false; // the ground is shaded by contact shadows + AO; 70k blades in four cascades is not worth it
+                set.inProbes = false;
                 set.center = Vec3((f32(t.x) + 0.5f) * kGrassTile, 0.5f * (r.minY + r.maxY) + 0.3f, (f32(t.z) + 0.5f) * kGrassTile);
                 set.radius = kGrassTile * 0.71f + 0.5f * (r.maxY - r.minY) + 1.0f;
                 set.instances = std::move(r.tufts);
@@ -369,7 +373,7 @@ struct Vegetation::Impl {
         waiting += static_cast<u32>(todo.size());
         for (Tile* t : todo) {
             if (inFlight >= maxInFlight) break;
-            if (!grass) t->lod = t->dist < settingsRef->treeNearDistance ? 0 : 1;
+            if (!grass) t->lod = t->dist - 0.5f * kTreeTile < settingsRef->treeNearDistance ? 0 : 1; // detailed if any part of the tile is near
             submit(terrain, *settingsRef, *t, grass);
             --waiting;
         }
@@ -513,7 +517,8 @@ void Vegetation::update(const Terrain& terrain, Vec3 focus) {
     if (im.scene) {
         for (auto& [k, t] : im.treeTiles) {
             if (!t.built) continue;
-            const u8 want = t.dist < settings.treeNearDistance ? 0 : (t.dist > settings.treeNearDistance + 25.0f ? 1 : t.lod);
+            const f32 near = t.dist - 0.5f * kTreeTile; // distance to the near edge of the tile
+            const u8 want = near < settings.treeNearDistance ? 0 : (near > settings.treeNearDistance + 25.0f ? 1 : t.lod);
             if (want == t.lod) continue;
             t.lod = want;
             for (size_t i = 0; i < t.sets.size(); ++i)

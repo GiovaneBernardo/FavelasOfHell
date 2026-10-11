@@ -17,6 +17,7 @@ foh_add_engine_module(renderer
         src/material_store.cpp
         src/mesh_store.cpp
         src/post_process.cpp
+        src/probes.cpp
         src/render_extract.cpp
         src/renderer.cpp
         src/shadow_cascades.cpp

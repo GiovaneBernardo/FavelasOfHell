@@ -119,6 +119,7 @@ enum class ViewportFlags : u32 {
     Sky = 1u << 0,  // procedural sky background (otherwise a flat clear color)
     Grid = 1u << 1, // editor ground grid
     Water = 1u << 2, // the sea (see WaterDesc); opt-in so scenes without it (previews) stay dry
+    Probes = 1u << 3, // dynamic light probes around this viewport's camera (RenderSettings::probes); opt-in: each one costs captures
 };
 constexpr ViewportFlags operator|(ViewportFlags a, ViewportFlags b) {
     return static_cast<ViewportFlags>(static_cast<u32>(a) | static_cast<u32>(b));
@@ -284,7 +285,7 @@ inline constexpr u32 kTonemapperCount = 6;
 struct RenderSettings {
     bool shadows = true;           // ShadowCascades pass (off: the pass only clears a 1x1 stand-in)
     u32 shadowCascadeSize = 2048;  // texels per cascade side (four cascades, one 2x2 atlas)
-    f32 shadowDistance = 400.0f;   // meters from the camera; farther surfaces are unshadowed
+    f32 shadowDistance = 250.0f;   // meters from the camera; farther surfaces are unshadowed
     bool atmosphere = true;        // sky, sun color and ambient from the atmosphere tables (off: gradient sky, constant ambient)
     bool aerialPerspective = true; // distance haze on lit pixels (needs `atmosphere`)
     f32 exposure = 1.0f;           // linear multiplier before tonemapping (used when autoExposure is off)
@@ -306,6 +307,34 @@ struct RenderSettings {
     bool bloom = true;
     f32 bloomStrength = 0.06f;     // blend between the scene and the bloom chain (energy conserving)
     u32 bloomLevels = 6;           // downsample steps (1..8); more = a wider glow
+
+    // Ambient occlusion (GTAO, Jimenez et al. 2016): darkens the ambient and sky-reflected light in creases and under
+    // overhangs. Screen space: it only knows what the depth buffer shows.
+    bool gtao = true;
+    f32 gtaoRadius = 1.5f;         // metres of the search around each pixel
+    f32 gtaoStrength = 1.2f;       // exponent applied to the visibility (higher = darker)
+
+    // Screen-space sun shadows over a short distance, for what the shadow cascades are too coarse to resolve.
+    bool contactShadows = true;
+    f32 contactShadowLength = 0.8f; // metres toward the sun that are searched
+
+    // Sun light that gets through the first layer of leaves above a surface (a shaded forest floor is green and
+    // dappled, not black). 0 = off; scales the light, which is tinted by the leaf colour.
+    f32 canopyTransmission = 0.6f;
+
+    // Sky image-based lighting: the sky and clouds around the camera are reflected by every surface, rough ones blurrier.
+    bool ibl = true;
+    f32 iblIntensity = 1.0f;
+
+    // Light probes (ViewportFlags::Probes): ambient light measured from the scene around the camera. They need the
+    // terrain height field (Renderer::setWaterBed) to sit at a fixed height above the ground.
+    bool probes = true;
+    f32 probeSpacing = 4.0f;       // metres between probes (the window is 24 probes wide)
+    u32 probesPerFrame = 1;        // probes refreshed per refresh frame (1..8): more = the lighting follows changes faster
+    u32 probeInterval = 2;         // a refresh happens every this many frames (1 = every frame)
+    f32 probeIntensity = 1.0f;     // multiplier of the probes' contribution
+
+    bool gpuTimers = false;        // measure the GPU time of every pass of ONE viewport (setGpuTimerViewport; ViewportDebugInfo::gpu, a few frames late)
 };
 
 struct RendererDesc {
@@ -325,7 +354,7 @@ struct RendererDesc {
     u64 textureUploadBudget = 32ull << 20;
     // Initial values of RenderSettings::shadowCascadeSize / shadowDistance.
     u32 shadowCascadeSize = 2048;
-    f32 shadowDistance = 400.0f; // meters from the camera; farther surfaces are unshadowed
+    f32 shadowDistance = 250.0f; // meters from the camera; farther surfaces are unshadowed
     std::filesystem::path shaderDirectory; // default: <exe dir>/shaders
     // Generated data that is expensive to rebuild (the atmosphere tables). Default: <exe dir>/cache.
     std::filesystem::path cacheDirectory;
@@ -346,6 +375,11 @@ struct ViewportDebugInfo {
     u32 transientTextures = 0;
     u32 barriers = 0;
     std::vector<Pass> passes;
+    struct Timing {
+        const char* name;
+        float ms;
+    };
+    std::vector<Timing> gpu; // RenderSettings::gpuTimers: GPU time per pass of a recent frame
 };
 
 // Thread-safety: main thread, except where noted. Internally the renderer runs
@@ -423,6 +457,8 @@ public:
     void clearViewportCamera(ViewportId id);
     // Inactive viewports (hidden panels) cost nothing.
     void setViewportActive(ViewportId id, bool active);
+    // The viewport whose passes get GPU timers when RenderSettings::gpuTimers is on (NVRHI has few timer queries).
+    void setGpuTimerViewport(ViewportId id);
     u32 viewportWidth(ViewportId id) const;
     u32 viewportHeight(ViewportId id) const;
     // The finished sRGB image. Always in the shader-resource state between frames.

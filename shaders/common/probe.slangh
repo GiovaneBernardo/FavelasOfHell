@@ -1,0 +1,14 @@
+// Light-probe capture, shared by probe_light.slang and probe_sh.slang. MIRRORED by foh::ProbeConstants in
+// engine/renderer/src/probes.h.
+#pragma once
+
+static const int kProbeFace = 32;       // texels per face side
+static const int kProbeMaxPerFrame = 8; // probes refreshed per frame, at most
+static const int kProbeFaces = 6;
+
+struct ProbeConstants {
+    float4x4 invViewProj[kProbeMaxPerFrame * kProbeFaces]; // clip -> world, per probe and face
+    float4 origin[kProbeMaxPerFrame];                      // xyz = world position of the probe
+    uint4 slot[kProbeMaxPerFrame];                         // x, y = texel in the grid, z = layer, w = 1 to blend with the old value
+    uint4 count;                                           // x = probes this frame
+};

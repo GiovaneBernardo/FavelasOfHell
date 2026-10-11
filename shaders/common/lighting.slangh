@@ -1,0 +1,317 @@
+// Surface lighting shared by the deferred pass (deferred.slang) and the probe capture (probe_light.slang):
+// GGX direct sun with cascaded shadows and leaf transmission, atmosphere ambient, light probes, sky image-based
+// lighting, and the aerial perspective veil.
+//
+// The including shader declares the G-buffer inputs itself (its own t0..t3, t8). Everything below uses the layout
+// registers of `GpuResources::layoutDeferred` (renderer.cpp), so both shaders bind the same layout:
+//   b0 view | t4 shadow atlas | t5..t7 atmosphere | t9 foliage transmission atlas | t10..t14 sky environment, levels
+//   0..4 (rougher = blurrier) | t15..t18 probe SH coefficients | t19 ground height | s0 shadow compare | s1 bilinear clamp
+//   | s2 bilinear wrap
+#pragma once
+#include "common/view.slangh"
+#include "common/gbuffer.slangh"
+#include "common/foliage.slangh"
+
+ConstantBuffer<ViewConstants> g_view : register(b0);
+Texture2D<float> g_shadowAtlas : register(t4);
+Texture2D<float4> g_atmoTransmittance : register(t5);
+Texture3D<float4> g_atmoScattering : register(t6);
+Texture2D<float4> g_atmoIrradiance : register(t7);
+Texture2D<float4> g_foliage : register(t9);
+Texture2D<float4> g_env0 : register(t10);
+Texture2D<float4> g_env1 : register(t11);
+Texture2D<float4> g_env2 : register(t12);
+Texture2D<float4> g_env3 : register(t13);
+Texture2D<float4> g_env4 : register(t14);
+Texture2DArray<float4> g_probe0 : register(t15);
+Texture2DArray<float4> g_probe1 : register(t16);
+Texture2DArray<float4> g_probe2 : register(t17);
+Texture2DArray<float4> g_probe3 : register(t18);
+Texture2D<float> g_bed : register(t19);
+SamplerComparisonState g_shadowSampler : register(s0);
+SamplerState g_atmoSampler : register(s1);
+SamplerState g_probeSampler : register(s2);
+
+#include "common/atmosphere.slangh"
+
+static const float kPi = 3.14159265;
+
+float luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+
+float distributionGGX(float nh, float a)
+{
+    float a2 = a * a;
+    float d = nh * nh * (a2 - 1.0) + 1.0;
+    return a2 / (kPi * d * d);
+}
+
+// Height-correlated Smith visibility (includes the 1 / (4 n.l n.v) term).
+float visibilitySmith(float nl, float nv, float a)
+{
+    float a2 = a * a;
+    float gv = nl * sqrt(nv * nv * (1.0 - a2) + a2);
+    float gl = nv * sqrt(nl * nl * (1.0 - a2) + a2);
+    return 0.5 / max(gv + gl, 1e-5);
+}
+
+// 1 = fully lit. The cascade is picked by view depth; the receiver is moved toward the light and along its normal by a
+// few shadow texels (the usual acne / peter-panning trade). `transmitted` is the colour of the sun that leaks through
+// the first leaf layer above the receiver (the foliage atlas, see FoliageTransmit): it only exists where the sun
+// shadow was cast by foliage, never behind trunks or walls.
+float sunShadow(float3 worldPos, float3 n, float3 toSun, float nl, out float3 transmitted)
+{
+    transmitted = float3(0.0);
+    if (g_view.shadowParams.w < 0.5) return 1.0;
+    float viewDepth = -mul(g_view.view, float4(worldPos, 1.0)).z;
+    int cascade = 0;
+    [unroll] for (int c = 0; c < 3; ++c) { if (viewDepth > g_view.cascadeSplits[c]) cascade = c + 1; }
+    float lastSplit = g_view.cascadeSplits.w;
+    if (viewDepth >= lastSplit) return 1.0;
+
+    float texel = g_view.cascadeTexel[cascade];
+    float3 p = worldPos + n * (texel * (1.0 + 2.0 * (1.0 - nl))) + toSun * (texel * 2.0);
+    float4 clip = mul(g_view.cascadeViewProj[cascade], float4(p, 1.0));
+
+    float tile = g_view.shadowParams.y;
+    float2 origin = float2(cascade & 1, cascade >> 1) * tile;
+    float2 uv = clip.xy * float2(0.5, -0.5) + 0.5;
+    // The near cascades get a 4x4 kernel of bilinear compares (soft penumbrae, which is what makes a canopy's shadow
+    // read as light through leaves and not as a cut-out); the far ones a 3x3. Keep the kernel inside the cascade's tile.
+    float margin = 2.5 * g_view.shadowParams.x;
+    uv = clamp(uv * tile, margin, tile - margin) + origin;
+
+    float occluded = 0.0;
+    float lit;
+    if (cascade < 2) {
+        [unroll] for (int y = 0; y < 4; ++y) {
+            [unroll] for (int x = 0; x < 4; ++x) {
+                occluded += g_shadowAtlas.SampleCmpLevelZero(g_shadowSampler, uv + (float2(x, y) - 1.5) * g_view.shadowParams.x, clip.z);
+            }
+        }
+        lit = 1.0 - occluded / 16.0;
+    } else {
+        [unroll] for (int y = -1; y <= 1; ++y) {
+            [unroll] for (int x = -1; x <= 1; ++x) {
+                occluded += g_shadowAtlas.SampleCmpLevelZero(g_shadowSampler, uv + float2(x, y) * g_view.shadowParams.x, clip.z);
+            }
+        }
+        lit = 1.0 - occluded / 9.0;
+    }
+    // Fade the last 10% of the range out instead of a hard edge.
+    float visible = lerp(1.0, lit, saturate((lastSplit - viewDepth) / (0.1 * lastSplit)));
+    if (g_view.canopy.y > 0.5 && visible < 1.0 && cascade < 2) { // kTransmitCascades in viewport_graph.cpp
+        float4 t = g_foliage.SampleLevel(g_atmoSampler, uv, 0);
+        transmitted = t.rgb * t.a * g_view.canopy.x * (1.0 - visible);
+    }
+    return visible;
+}
+
+// ---- sky image-based lighting -------------------------------------------------------------------------------------
+
+// The environment image is octahedral (gbuffer.slangh), rendered every frame from the atmosphere and the clouds,
+// then blurred into four smaller levels: level i answers for a roughness of i / 4.
+float3 envLevel(int level, float2 uv)
+{
+    if (level <= 0) return g_env0.SampleLevel(g_atmoSampler, uv, 0).rgb;
+    if (level == 1) return g_env1.SampleLevel(g_atmoSampler, uv, 0).rgb;
+    if (level == 2) return g_env2.SampleLevel(g_atmoSampler, uv, 0).rgb;
+    if (level == 3) return g_env3.SampleLevel(g_atmoSampler, uv, 0).rgb;
+    return g_env4.SampleLevel(g_atmoSampler, uv, 0).rgb;
+}
+
+float3 envRadiance(float3 dir, float roughness)
+{
+    float2 uv = octEncode(dir);
+    float level = saturate(roughness) * 4.0;
+    int l0 = (int)floor(level);
+    return lerp(envLevel(l0, uv), envLevel(min(l0 + 1, 4), uv), frac(level));
+}
+
+// Karis' analytic fit of the split-sum BRDF integral (no lookup table).
+float3 envBrdfApprox(float3 f0, float roughness, float nv)
+{
+    const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
+    const float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
+    float4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * nv)) * r.x + r.y;
+    float2 ab = float2(-1.04, 1.04) * a004 + r.zw;
+    return f0 * ab.x + ab.y;
+}
+
+// Lagarde: how much of the specular lobe the occlusion hides.
+float specularOcclusion(float nv, float ao, float roughness)
+{
+    return saturate(pow(nv + ao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao);
+}
+
+// Jimenez: occlusion hides less of a bright surface because light bounces between the occluders.
+float3 multiBounceAo(float ao, float3 albedo)
+{
+    float3 a = 2.0404 * albedo - 0.3324;
+    float3 b = -4.7951 * albedo + 0.6417;
+    float3 c = 2.7552 * albedo + 0.6903;
+    return max(float3(ao), ((ao * a + b) * ao + c) * ao);
+}
+
+// ---- light probes -------------------------------------------------------------------------------------------------
+
+// Probes sit in two layers above the ground, in a window of cells that follows the camera and wraps around (a probe
+// keeps its texel while the window slides). Each stores the radiance around it as first-order spherical harmonics:
+// four textures (L00, L1-1, L10, L11) x RGB, with the alpha of the first one = 1 where the probe holds a capture.
+float groundHeight(float2 xz)
+{
+    return g_bed.SampleLevel(g_atmoSampler, (xz - g_view.bed.xy) * g_view.bed.zw, 0);
+}
+
+// Irradiance (E, so diffuse = albedo / pi * E) from the probe grid. `weight` is how far to trust it: zero outside the
+// window or where no probe was captured yet (the caller then falls back to the atmosphere's sky light).
+float3 probeIrradiance(float3 worldPos, float3 n, out float weight)
+{
+    weight = 0.0;
+    if (g_view.ibl.z < 0.5) return float3(0.0);
+    float cell = g_view.ibl.w;
+    float dims = g_view.probeA.z;
+    float halfSpan = dims * cell * 0.5;
+    float2 d = abs(worldPos.xz - g_view.probeA.xy);
+    // The outermost cells are the ones being refilled as the window slides: fade them out.
+    float edge = saturate((halfSpan - max(d.x, d.y) - 1.5 * cell) / (2.0 * cell));
+    if (edge <= 0.0) return float3(0.0);
+
+    float height = worldPos.y - groundHeight(worldPos.xz);
+    float t = saturate((height - g_view.probeB.x) / max(g_view.probeB.y - g_view.probeB.x, 0.1));
+    float2 uv = (worldPos.xz + n.xz * (0.3 * cell)) / (cell * dims);
+    float4 c0 = lerp(g_probe0.SampleLevel(g_probeSampler, float3(uv, 0.0), 0), g_probe0.SampleLevel(g_probeSampler, float3(uv, 1.0), 0), t);
+    float4 c1 = lerp(g_probe1.SampleLevel(g_probeSampler, float3(uv, 0.0), 0), g_probe1.SampleLevel(g_probeSampler, float3(uv, 1.0), 0), t);
+    float4 c2 = lerp(g_probe2.SampleLevel(g_probeSampler, float3(uv, 0.0), 0), g_probe2.SampleLevel(g_probeSampler, float3(uv, 1.0), 0), t);
+    float4 c3 = lerp(g_probe3.SampleLevel(g_probeSampler, float3(uv, 0.0), 0), g_probe3.SampleLevel(g_probeSampler, float3(uv, 1.0), 0), t);
+
+    // Bilinear weights of captured probes sum to alpha: divide it out so empty neighbours do not darken the result.
+    float alpha = c0.a;
+    weight = saturate((alpha - 0.1) / 0.5) * edge;
+    if (weight <= 0.0) return float3(0.0);
+    float inv = 1.0 / max(alpha, 1e-3);
+    // Cosine-lobe convolution of the L0 / L1 bands: A0 = pi, A1 = 2 pi / 3.
+    float3 e = c0.rgb * (0.282095 * kPi) + (c1.rgb * n.y + c2.rgb * n.z + c3.rgb * n.x) * (0.488603 * 2.0 * kPi / 3.0);
+    return max(e * inv, 0.0) * g_view.probeA.w;
+}
+
+// ---- the surface ------------------------------------------------------------------------------------------------
+
+struct Surface {
+    float3 worldPos;
+    float3 n;
+    float3 albedo;
+    float3 cameraPos;   // the eye (the probe origin while capturing a probe)
+    float roughness;
+    float metallic;
+    float ao;           // material occlusion
+    float translucency; // foliage
+    float occlusion;    // GTAO, 1 = open
+    float contact;      // contact shadow of the sun, 1 = none
+};
+
+float3 gradientSky(float3 dir)
+{
+    float3 horizon = float3(0.70, 0.80, 0.92);
+    float3 zenith = float3(0.12, 0.30, 0.68);
+    return lerp(horizon, zenith, pow(saturate(dir.y), 0.45));
+}
+
+// Lights one visible surface point. `main` = the camera's own deferred pass: it also gets the specular environment
+// reflection. A probe capture skips that and the screen-space terms.
+float3 shadeSurface(Surface s, bool main)
+{
+    float3 n = s.n;
+    float3 v = normalize(s.cameraPos - s.worldPos);
+    float3 toSun = -g_view.sunDirection.xyz;
+    float nlRaw = dot(n, toSun);
+    float nl = saturate(nlRaw) * g_view.sunDirection.w;
+    // Foliage wraps its light a little (not by its whole translucency: that lights every leaf evenly and flattens the crown).
+    float wrap = 0.4 * s.translucency;
+    float nlDiffuse = saturate((nlRaw + wrap) / (1.0 + wrap)) * g_view.sunDirection.w;
+    float roughness = max(s.roughness, 0.045);
+    float nv = max(dot(n, v), 1e-4);
+
+    float3 f0 = lerp(float3(0.04), s.albedo, s.metallic);
+    float3 diffuseColor = s.albedo * (1.0 - s.metallic);
+
+    bool atmosphereOn = g_view.atmosphere1.y > 0.5;
+    AtmoRt atmo = atmoFromView(g_view);
+    float3 sunDir = toSun;
+    float3 sunRadiance = g_view.sunColor.rgb; // irradiance on a surface facing the sun
+    float3 pointKm = atmoPosition(atmo, s.worldPos, s.cameraPos);
+    float pointR = length(pointKm);
+    float muS = dot(pointKm, sunDir) / pointR;
+    float3 skyIrradiance = float3(0.0);
+    if (atmosphereOn) {
+        sunRadiance *= atmoTransmittanceToSun(atmo, pointR, muS);
+        // Sky dome light, scaled by how much of the dome the normal sees; the ground bounce fills the lower half.
+        float3 sky = atmoSkyIrradiance(atmo, pointR, muS) * g_view.sunColor.rgb;
+        float3 bounce = atmo.groundAlbedo * (sunRadiance * max(muS, 0.0) + sky) * (1.0 / kPi);
+        skyIrradiance = sky * (n.y * 0.5 + 0.5) + bounce * (0.5 - n.y * 0.5) * kPi;
+    }
+
+    float3 color = 0.0;
+    float3 transmitted = float3(0.0);
+    float lit = 1.0;
+    if (nlDiffuse > 0.0) {
+        // Diffuse wraps for translucent surfaces; the shadow is read once with the wrapped term.
+        lit = sunShadow(s.worldPos, n, toSun, nlDiffuse, transmitted) * s.contact;
+        // Leaves inside a crown are shaded by the leaves around them (the vertex occlusion of the card), which the cascades are too coarse to resolve.
+        if (s.translucency > 0.01) lit *= 0.35 + 0.65 * saturate(s.ao);
+        // Sun that leaks through the leaves above: the light of a shaded forest floor, tinted by the foliage.
+        float3 direct = lit + transmitted;
+        color += diffuseColor * (1.0 - f0) / kPi * sunRadiance * nlDiffuse * direct;
+        // Backlit leaves glow: light that crosses them, strongest looking toward the sun.
+        float glow = pow(saturate(dot(-v, toSun)), 3.0) * s.translucency;
+        color += leafGlowColor(s.albedo, s.translucency) * sunRadiance * glow * 0.45 * lit;
+    }
+    if (nl > 0.0) {
+        float3 h = normalize(v + toSun);
+        float nh = saturate(dot(n, h));
+        float vh = saturate(dot(v, h));
+        float a = roughness * roughness;
+        float3 fresnel = f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);
+        float3 specular = distributionGGX(nh, a) * visibilitySmith(nl, nv, a) * fresnel;
+        color += specular * sunRadiance * nl * lit;
+    }
+
+    // Screen-space AO on foliage mostly darkens the roots of grass twice (the texture already has them dark).
+    float visibility = saturate(s.ao * lerp(s.occlusion, 1.0, s.translucency > 0.01 ? 0.6 : 0.0));
+    if (atmosphereOn) {
+        // Light probes see what the sky model cannot: the canopy, the walls, the bounce off sunlit ground.
+        float3 irradiance = skyIrradiance;
+        float probeWeight;
+        float3 probeE = probeIrradiance(s.worldPos, n, probeWeight);
+        float skyVisibility = 1.0;
+        if (probeWeight > 0.0) {
+            // Never below a share of the open-sky light: shade is lit by scattered light the probes cannot see (far canopy,
+            // light bounced many times), and without a floor the forest floor goes black next to the sun-lit ground.
+            irradiance = lerp(skyIrradiance, max(probeE, 0.35 * skyIrradiance), probeWeight);
+            skyVisibility = lerp(1.0, saturate(luminance(probeE) / max(luminance(skyIrradiance), 1e-3)), probeWeight);
+        }
+        color += diffuseColor * irradiance * (1.0 / kPi) * multiBounceAo(visibility, s.albedo);
+        // A faint floor so moonless nights are dark but not pitch black.
+        color += diffuseColor * float3(0.002, 0.0025, 0.0045) * s.ao;
+
+        if (main && g_view.ibl.x > 0.5) {
+            float3 r = reflect(-v, n);
+            float3 env = envRadiance(r, roughness);
+            // The environment image knows nothing of the canopy over the receiver: the probes and the AO scale it down.
+            float horizon = saturate(1.0 + 2.0 * dot(r, n));
+            float occ = specularOcclusion(nv, visibility, roughness) * skyVisibility * horizon;
+            color += env * envBrdfApprox(f0, roughness, nv) * occ * g_view.ibl.y;
+        }
+
+        if (g_view.render.y > 0.5) {
+            float3 cameraKm = atmoPosition(atmo, s.cameraPos, s.cameraPos);
+            float3 transmittance;
+            float3 inscatter = atmoSkyRadianceToPoint(atmo, cameraKm, pointKm, sunDir, transmittance);
+            color = color * transmittance + inscatter * g_view.sunColor.rgb;
+        }
+    } else {
+        float3 ambient = lerp(float3(0.10, 0.09, 0.08), float3(0.30, 0.38, 0.52), n.y * 0.5 + 0.5);
+        color += diffuseColor * ambient * visibility;
+    }
+    return color;
+}

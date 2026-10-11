@@ -61,8 +61,13 @@ void StampLine(VegImage& im, const Rect& r, Vec2 a, Vec2 b, f32 w0, f32 w1, Vec3
     }
 }
 
-// A leaf: pointed ellipse along `angle`, with a lighter midrib and a darker edge.
-void PaintLeaf(VegImage& im, const Rect& r, Vec2 c, f32 angle, f32 len, f32 wid, Vec3 color) {
+// ---- foliage textures -------------------------------------------------------------------------------------------------
+// Everything is painted at twice the final size and box-filtered down, so the alpha of every cut-out has anti-aliased
+// edges: the alpha test (cutoff 0.5) then follows the bilinear-filtered edge instead of stair-stepping along texels.
+
+// A leaf: pointed ellipse along `angle`, with a lighter midrib, fine side veins and a slightly darker rim. Lengths in
+// pixels of the image being painted.
+void PaintLeaf(VegImage& im, const Rect& r, Vec2 c, f32 angle, f32 len, f32 wid, Vec3 color, f32 vein) {
     const f32 ca = std::cos(angle), sa = std::sin(angle);
     const f32 R = len * 0.5f + 2.0f;
     for (i32 y = i32(c.y - R); y <= i32(c.y + R); ++y)
@@ -71,17 +76,23 @@ void PaintLeaf(VegImage& im, const Rect& r, Vec2 c, f32 angle, f32 len, f32 wid,
             const f32 u = dx * ca + dy * sa, v = -dx * sa + dy * ca;
             const f32 t = u / len + 0.5f;
             if (t < 0.0f || t > 1.0f) continue;
-            const f32 halfW = wid * 0.5f * std::pow(std::sin(3.14159265f * std::pow(t, 0.75f)), 0.85f);
+            // Widest a third of the way along, a drawn-out tip, a rounded base.
+            const f32 halfW = wid * 0.5f * std::pow(std::sin(3.14159265f * std::pow(t, 0.62f)), 0.8f);
             if (std::abs(v) > halfW) continue;
-            f32 shade = 0.9f + 0.2f * noise::ValueNoise(f32(x) * 0.5f, f32(y) * 0.5f, 5);
-            if (std::abs(v) < 0.55f) shade *= 1.22f; // midrib
-            shade *= 0.78f + 0.4f * (1.0f - std::abs(v) / std::max(halfW, 0.01f));
+            const f32 across = std::abs(v) / std::max(halfW, 0.01f); // 0 on the midrib .. 1 at the rim
+            f32 shade = 1.0f - 0.18f * across * across;
+            shade *= 1.0f + 0.10f * (0.5f - t); // base a little darker than the tip
+            if (std::abs(v) < vein) shade *= 1.18f; // midrib
+            // Side veins: faint diagonal ridges.
+            const f32 ridge = std::sin((t * 9.0f + across * 0.9f) * 6.2831853f);
+            shade *= 1.0f + 0.035f * ridge * (1.0f - across);
             SetPixel(im, x, y, r, color * shade);
         }
 }
 
 void FillLeafCluster(VegImage& im, const Rect& r, u32 seed, Vec3 greenA, Vec3 greenB, Vec3 accent) {
     Rng rng(seed);
+    const f32 K = f32(r.x1 - r.x0) / 256.0f; // the proportions below were tuned on a 256 px cluster
     const Vec2 center(f32(r.x0 + r.x1) * 0.5f, f32(r.y0 + r.y1) * 0.5f);
     const f32 R = f32(r.x1 - r.x0) * 0.46f;
     // Thin twigs first, so leaves cover most of them.
@@ -89,52 +100,89 @@ void FillLeafCluster(VegImage& im, const Rect& r, u32 seed, Vec3 greenA, Vec3 gr
         const f32 a = rng.range(0.0f, 6.2831853f), L = rng.range(0.55f, 0.95f) * R;
         const Vec2 mid = center + Vec2(std::cos(a + 0.3f), std::sin(a + 0.3f)) * L * 0.55f;
         const Vec2 end = center + Vec2(std::cos(a), std::sin(a)) * L;
-        StampLine(im, r, center, mid, 3.0f, 2.2f, Vec3(64, 48, 32), Vec3(62, 47, 31));
-        StampLine(im, r, mid, end, 2.2f, 1.2f, Vec3(62, 47, 31), Vec3(56, 43, 29));
+        StampLine(im, r, center, mid, 3.0f * K, 2.2f * K, Vec3(64, 48, 32), Vec3(62, 47, 31));
+        StampLine(im, r, mid, end, 2.2f * K, 1.2f * K, Vec3(62, 47, 31), Vec3(56, 43, 29));
     }
-    for (int k = 0; k < 1500; ++k) {
-        const f32 rr = R * std::pow(rng.next(), 0.55f), ang = rng.range(0.0f, 6.2831853f);
-        const Vec2 c = center + Vec2(std::cos(ang), std::sin(ang)) * rr;
-        const f32 dir = ang + rng.range(-1.0f, 1.0f);
-        Vec3 col = glm::mix(greenA, greenB, rng.next());
-        if (rng.next() < 0.05f) col = accent;
-        col *= 0.60f + 0.55f * (rr / R); // darker inside the clump
-        PaintLeaf(im, r, c, dir, rng.range(11.0f, 19.0f), rng.range(5.0f, 8.5f), col);
+    // Leaves from the middle outward: the inner ones are deep in the shade of the crown, the outer ones catch the light,
+    // and painting in that order lets the bright ones overlap the dark.
+    struct Spot {
+        f32 rr, ang;
+    };
+    std::vector<Spot> spots;
+    const int count = 1300;
+    spots.reserve(count);
+    for (int k = 0; k < count; ++k) spots.push_back({R * std::pow(rng.next(), 0.55f), rng.range(0.0f, 6.2831853f)});
+    std::sort(spots.begin(), spots.end(), [](const Spot& a, const Spot& b) { return a.rr < b.rr; });
+    for (const Spot& sp : spots) {
+        const Vec2 c = center + Vec2(std::cos(sp.ang), std::sin(sp.ang)) * sp.rr;
+        // Leaves point mostly outward and droop: nothing like the random sticks of a flat scatter.
+        const f32 dir = sp.ang + rng.range(-1.1f, 1.1f);
+        Vec3 col = glm::mix(greenA, greenB, std::clamp(0.5f * rng.next() + 0.6f * (sp.rr / R) - 0.1f, 0.0f, 1.0f));
+        if (rng.next() < 0.04f) col = accent;
+        col *= 0.52f + 0.42f * (sp.rr / R);
+        col *= 0.92f + 0.16f * noise::ValueNoise(c.x / (22.0f * K), c.y / (22.0f * K), seed); // slow patches of lighter / darker foliage
+        PaintLeaf(im, r, c, dir, rng.range(9.0f, 15.0f) * K, rng.range(4.0f, 6.6f) * K, col, 0.5f * K);
     }
 }
 
 void FillFrondRegion(VegImage& im) {
-    // 512 x 256 at the bottom: rachis along the middle, pairs of long thin leaflets sweeping forward and down.
-    const Rect r{0, 256, 512, 512};
+    // Bottom band (full width, half the height of the image): rachis along the middle, pairs of long thin leaflets
+    // sweeping forward and down.
+    const f32 K = f32(im.width) / 512.0f;
+    const Rect r{0, i32(im.height) / 2, i32(im.width), i32(im.height)};
     Rng rng(31);
-    const f32 midY = 256.0f + 128.0f;
-    StampLine(im, r, Vec2(2, midY), Vec2(508, midY - 6.0f), 7.0f, 2.5f, Vec3(70, 92, 40), Vec3(60, 96, 40));
+    const f32 midY = f32(r.y0) + f32(r.y1 - r.y0) * 0.5f;
+    StampLine(im, r, Vec2(2 * K, midY), Vec2(508 * K, midY - 6.0f * K), 7.0f * K, 2.5f * K, Vec3(70, 92, 40), Vec3(60, 96, 40));
     for (int k = 0; k < 70; ++k) {
         const f32 t = f32(k) / 69.0f;
-        const f32 x = 20.0f + t * 470.0f;
-        const f32 y = midY - 6.0f * t;
-        const f32 len = (24.0f + 100.0f * std::pow(std::sin(3.14159265f * (0.08f + 0.9f * t)), 0.8f)) * rng.range(0.9f, 1.05f);
+        const f32 x = (20.0f + t * 470.0f) * K;
+        const f32 y = midY - 6.0f * t * K;
+        const f32 len = (24.0f + 100.0f * std::pow(std::sin(3.14159265f * (0.08f + 0.9f * t)), 0.8f)) * rng.range(0.9f, 1.05f) * K;
         for (int side = -1; side <= 1; side += 2) {
             const Vec2 d = glm::normalize(Vec2(0.62f, f32(side) * 0.78f));
-            const Vec2 a(x, y), mid = a + d * len * 0.55f + Vec2(0.0f, f32(side) * 4.0f), b = a + d * len + Vec2(0.0f, f32(side) * 14.0f);
+            const Vec2 a(x, y), mid = a + d * len * 0.55f + Vec2(0.0f, f32(side) * 4.0f * K), b = a + d * len + Vec2(0.0f, f32(side) * 14.0f * K);
             const Vec3 c0(38, 88, 28), c1 = glm::mix(Vec3(62, 112, 36), Vec3(88, 126, 44), rng.next());
-            StampLine(im, r, a, mid, 6.0f, 5.0f, c0, glm::mix(c0, c1, 0.6f));
-            StampLine(im, r, mid, b, 5.0f, 1.0f, glm::mix(c0, c1, 0.6f), c1);
+            StampLine(im, r, a, mid, 6.0f * K, 5.0f * K, c0, glm::mix(c0, c1, 0.6f));
+            StampLine(im, r, mid, b, 5.0f * K, 1.0f * K, glm::mix(c0, c1, 0.6f), c1);
         }
     }
+}
+
+// 2x2 box filter that weights the colour by alpha (no dark fringes where a leaf meets the empty background) and keeps the
+// averaged alpha: the soft edge the supersampling is for.
+VegImage Downsample2(const VegImage& hi) {
+    VegImage lo;
+    lo.width = hi.width / 2;
+    lo.height = hi.height / 2;
+    lo.rgba.assign(size_t(lo.width) * lo.height * 4, 0);
+    for (u32 y = 0; y < lo.height; ++y)
+        for (u32 x = 0; x < lo.width; ++x) {
+            f32 rgb[3] = {0, 0, 0}, a = 0.0f;
+            for (u32 dy = 0; dy < 2; ++dy)
+                for (u32 dx = 0; dx < 2; ++dx) {
+                    const u8* p = &hi.rgba[(size_t(y * 2 + dy) * hi.width + (x * 2 + dx)) * 4];
+                    const f32 wa = f32(p[3]);
+                    for (int c = 0; c < 3; ++c) rgb[c] += f32(p[c]) * wa;
+                    a += wa;
+                }
+            u8* o = &lo.rgba[(size_t(y) * lo.width + x) * 4];
+            for (int c = 0; c < 3; ++c) o[c] = static_cast<u8>(a > 0.0f ? rgb[c] / a : 0.0f);
+            o[3] = static_cast<u8>(a * 0.25f);
+        }
+    return lo;
 }
 
 } // namespace
 
 VegImage BuildLeafAtlas() {
-    VegImage im;
-    im.width = 512;
-    im.height = 512;
-    im.rgba.assign(size_t(512) * 512 * 4, 0);
-    FillLeafCluster(im, {0, 0, 256, 256}, 11, Vec3(24, 58, 20), Vec3(48, 90, 28), Vec3(86, 104, 34));
-    FillLeafCluster(im, {256, 0, 512, 256}, 12, Vec3(30, 64, 22), Vec3(62, 96, 30), Vec3(112, 112, 36)); // a warmer, yellower tree
-    FillFrondRegion(im);
-    return im;
+    VegImage hi;
+    hi.width = 2048; // painted at 2x of the 1024 px atlas
+    hi.height = 2048;
+    hi.rgba.assign(size_t(2048) * 2048 * 4, 0);
+    FillLeafCluster(hi, {0, 0, 1024, 1024}, 11, Vec3(24, 58, 20), Vec3(56, 98, 30), Vec3(96, 112, 34));
+    FillLeafCluster(hi, {1024, 0, 2048, 1024}, 12, Vec3(32, 66, 22), Vec3(70, 102, 30), Vec3(122, 118, 36)); // a warmer, yellower tree
+    FillFrondRegion(hi);
+    return Downsample2(hi);
 }
 
 VegImage BuildBarkImage() {
@@ -159,30 +207,55 @@ VegImage BuildBarkImage() {
     return im;
 }
 
+// A tuft: ~340 blades fanning out of the bottom middle, each a tapered curved ribbon, dark at the root (the ground
+// shades it) and yellow-green at the tip, with a few dry straw-coloured ones. 512 px, painted at 1024.
 VegImage BuildGrassImage() {
-    VegImage im;
-    im.width = 256;
-    im.height = 256;
-    im.rgba.assign(size_t(256) * 256 * 4, 0);
-    const Rect r{0, 0, 256, 256};
+    VegImage hi;
+    hi.width = 1024;
+    hi.height = 1024;
+    hi.rgba.assign(size_t(1024) * 1024 * 4, 0);
+    const Rect r{0, 0, 1024, 1024};
     Rng rng(7);
-    for (int k = 0; k < 120; ++k) {
-        const f32 baseX = 128.0f + rng.range(-52.0f, 52.0f);
-        const f32 lean = rng.range(-1.0f, 1.0f) * (0.35f + std::abs(baseX - 128.0f) / 70.0f);
-        const f32 len = rng.range(110.0f, 245.0f), w = rng.range(3.0f, 7.0f);
-        const f32 bright = rng.range(0.8f, 1.2f);
-        const Vec3 dark = Vec3(14, 34, 9) * bright, tip = glm::mix(Vec3(62, 98, 30), Vec3(112, 138, 46), rng.next()) * bright;
-        Vec2 prev(baseX, 255.5f);
-        const int segs = 14;
+    struct Blade {
+        f32 baseX, lean, len, w, bright, curl;
+        bool dry;
+        f32 mixTip;
+    };
+    std::vector<Blade> blades;
+    for (int k = 0; k < 340; ++k) {
+        Blade b;
+        b.baseX = 512.0f + rng.range(-250.0f, 250.0f);
+        const f32 edge = std::abs(b.baseX - 512.0f) / 270.0f;
+        b.lean = rng.range(-1.0f, 1.0f) * (0.30f + edge * 0.9f) + (b.baseX - 512.0f) / 900.0f; // the outer blades splay
+        b.len = rng.range(380.0f, 990.0f) * (1.0f - 0.3f * edge * edge);
+        b.w = rng.range(9.0f, 17.0f);
+        b.bright = rng.range(0.8f, 1.2f);
+        b.curl = rng.range(0.5f, 1.4f);
+        b.dry = rng.next() < 0.07f;
+        b.mixTip = rng.next();
+        blades.push_back(b);
+    }
+    // Short blades first (they are in the back), long ones over them.
+    std::sort(blades.begin(), blades.end(), [](const Blade& a, const Blade& b) { return a.len < b.len; });
+    for (const Blade& b : blades) {
+        const Vec3 dark = Vec3(20, 46, 13) * b.bright;
+        const Vec3 mid = glm::mix(Vec3(30, 70, 18), Vec3(46, 86, 24), b.mixTip) * b.bright;
+        const Vec3 tip = b.dry ? Vec3(150, 128, 62) * b.bright : glm::mix(Vec3(66, 106, 30), Vec3(106, 130, 42), b.mixTip) * b.bright;
+        auto colorAt = [&](f32 t) {
+            const Vec3 c = t < 0.35f ? glm::mix(dark, b.dry ? tip * 0.8f : mid, t / 0.35f) : glm::mix(b.dry ? tip * 0.8f : mid, tip, (t - 0.35f) / 0.65f);
+            return c;
+        };
+        Vec2 prev(b.baseX, 1023.5f);
+        const int segs = 22;
         for (int s = 1; s <= segs; ++s) {
-            const f32 t = f32(s) / f32(segs);
-            const Vec2 p(baseX + lean * len * t * t * 0.8f + std::sin(t * 3.2f + baseX) * 2.0f, 255.5f - len * t);
-            const f32 t0 = f32(s - 1) / f32(segs);
-            StampLine(im, r, prev, p, w * std::pow(1.0f - t0, 0.75f), w * std::pow(1.0f - t, 0.75f), glm::mix(dark, tip, std::pow(t0, 0.8f)), glm::mix(dark, tip, std::pow(t, 0.8f)));
+            const f32 t = f32(s) / f32(segs), t0 = f32(s - 1) / f32(segs);
+            // A blade rises straight, then bends over toward its lean: a parabola with a small wobble.
+            const Vec2 p(b.baseX + b.lean * b.len * std::pow(t, 1.0f + b.curl) * 0.75f + std::sin(t * 3.0f + b.baseX) * 3.0f, 1023.5f - b.len * t * (1.0f - 0.12f * t * b.lean * b.lean));
+            StampLine(hi, r, prev, p, b.w * std::pow(1.0f - t0, 0.7f), b.w * std::pow(1.0f - t, 0.7f), colorAt(t0), colorAt(t));
             prev = p;
         }
     }
-    return im;
+    return Downsample2(hi);
 }
 
 std::vector<std::vector<u8>> BuildFoliageMips(const VegImage& image, f32 cutoff, u32 maxLevels) {
@@ -238,12 +311,13 @@ std::vector<std::vector<u8>> BuildFoliageMips(const VegImage& image, f32 cutoff,
 
 namespace {
 
-void AddQuad(VegMesh& m, const Vec3 p[4], const Vec3 n[4], const Vec2 uv[4]) {
+void AddQuad(VegMesh& m, const Vec3 p[4], const Vec3 n[4], const Vec2 uv[4], f32 ao) {
     const u32 base = static_cast<u32>(m.positions.size());
     for (int i = 0; i < 4; ++i) {
         m.positions.push_back(p[i]);
         m.normals.push_back(n[i]);
         m.uvs.push_back(uv[i]);
+        m.tangents.push_back(Vec4(1.0f, 0.0f, 0.0f, ao * 2.0f - 1.0f)); // w: baked occlusion (see opaque.slang)
     }
     for (u32 i : {0u, 1u, 2u, 0u, 2u, 3u}) m.indices.push_back(base + i);
 }
@@ -277,12 +351,13 @@ void AddTube(VegMesh& m, Vec3 a, Vec3 b, f32 r0, f32 r1, f32 flare, u32 sides, u
     for (u32 s = 0; s < segments; ++s)
         for (u32 k = 0; k < sides; ++k) {
             const u32 i0 = start + s * stride + k, i1 = i0 + 1, i2 = i0 + stride, i3 = i2 + 1;
-            for (u32 i : {i0, i1, i2, i1, i3, i2}) m.indices.push_back(i);
+            // Counter-clockwise seen from outside (the pipelines use frontCounterClockwise + back-face culling).
+            for (u32 i : {i0, i2, i1, i1, i2, i3}) m.indices.push_back(i);
         }
 }
 
 // A card (quad) at `center`, oriented by `q`, size x size; normals shaded as part of a ball around `crown`.
-void AddLeafCard(VegMesh& m, Vec3 center, Quat q, f32 size, Vec3 crown, f32 uMin, f32 uMax, f32 vMin, f32 vMax) {
+void AddLeafCard(VegMesh& m, Vec3 center, Quat q, f32 size, Vec3 crown, f32 uMin, f32 uMax, f32 vMin, f32 vMax, f32 ao) {
     const f32 h = size * 0.5f;
     const Vec3 local[4] = {{-h, -h, 0}, {h, -h, 0}, {h, h, 0}, {-h, h, 0}};
     const Vec2 uv[4] = {{uMin, vMax}, {uMax, vMax}, {uMax, vMin}, {uMin, vMin}};
@@ -295,22 +370,31 @@ void AddLeafCard(VegMesh& m, Vec3 center, Quat q, f32 size, Vec3 crown, f32 uMin
         const Vec3 facing = glm::dot(cardN, out) >= 0.0f ? cardN : -cardN;
         n[i] = glm::normalize(out * 0.85f + facing * 0.15f + Vec3(0, 0.2f, 0));
     }
-    AddQuad(m, p, n, uv);
+    AddQuad(m, p, n, uv, ao);
 }
 
 void AddLeafClusters(VegMesh& m, Rng& rng, Vec3 crown, f32 rx, f32 ry, f32 floorY, int count, f32 sizeMin, f32 sizeMax) {
     for (int i = 0; i < count; ++i) {
         const Vec3 d = glm::normalize(rng.inSphere());
-        const f32 shell = rng.range(0.4f, 1.0f);
+        const f32 shell = rng.range(0.30f, 1.0f); // how far out in the crown: 1 = the surface
         Vec3 p = crown + Vec3(d.x * rx, d.y * ry, d.z * rx) * shell;
         p.y = std::max(p.y, floorY);
         const f32 size = rng.range(sizeMin, sizeMax);
-        const Quat q = glm::angleAxis(rng.range(0.0f, 6.2831853f), Vec3(0, 1, 0)) * glm::angleAxis(rng.range(-0.7f, 0.7f), Vec3(1, 0, 0)) *
-                       glm::angleAxis(rng.range(-0.7f, 0.7f), Vec3(0, 0, 1));
+        // Cards face outward with a lot of scatter, so neighbours catch the light at different angles: a crown of
+        // randomly standing quads reads as cardboard, a crown of leaf masses turned every which way reads as foliage.
+        const Vec3 out = glm::normalize(p - crown + Vec3(0.0f, 0.001f, 0.0f));
+        const Vec3 facing = glm::normalize(out * 0.55f + rng.inSphere() * 0.75f + Vec3(0.0f, 0.25f, 0.0f));
+        const Vec3 spin = glm::cross(Vec3(0, 0, 1), facing) + Vec3(1e-6f, 0.0f, 0.0f);
+        const Quat tilt = glm::angleAxis(std::acos(std::clamp(facing.z, -1.0f, 1.0f)), glm::normalize(spin));
+        const Quat q = glm::angleAxis(rng.range(0.0f, 6.2831853f), facing) * tilt;
+        // Occlusion baked per card: dark deep inside the crown and on its underside, open at the top and rim.
+        const f32 height = std::clamp((p.y - crown.y) / std::max(ry, 0.01f) * 0.5f + 0.5f, 0.0f, 1.0f);
+        const f32 ao = std::clamp((0.22f + 0.78f * std::pow(shell, 1.4f)) * (0.72f + 0.28f * height), 0.0f, 1.0f);
         const bool second = rng.next() < 0.5f; // which of the two twigs of the atlas
         const f32 u0 = second ? 0.51f : 0.01f, u1 = second ? 0.99f : 0.49f;
-        AddLeafCard(m, p, q, size, crown, u0, u1, 0.01f, 0.49f);
-        AddLeafCard(m, p, q * glm::angleAxis(1.5707963f, Vec3(0, 1, 0)), size, crown, u0, u1, 0.01f, 0.49f);
+        AddLeafCard(m, p, q, size, crown, u0, u1, 0.01f, 0.49f, ao);
+        // A second card across the first (rotated about the card's own up axis) so the clump has depth from any side.
+        AddLeafCard(m, p, q * glm::angleAxis(rng.range(1.0f, 2.1f), Vec3(0, 1, 0)), size, crown, u0, u1, 0.01f, 0.49f, ao);
     }
 }
 
@@ -341,7 +425,7 @@ TreeMeshes BuildTree(u32 variant, u32 lod) {
         }
     }
     Rng leafRng(99 + variant * 31);
-    AddLeafClusters(t.leaves, leafRng, crown, rx, ry, trunkH * 0.80f, lod == 0 ? 46 : 14, lod == 0 ? 3.4f : 5.5f, lod == 0 ? 5.2f : 8.0f);
+    AddLeafClusters(t.leaves, leafRng, crown, rx, ry, trunkH * 0.80f, lod == 0 ? 120 : 34, lod == 0 ? 1.9f : 3.4f, lod == 0 ? 3.1f : 5.2f);
     return t;
 }
 
@@ -370,6 +454,7 @@ TreeMeshes BuildPalm(u32 lod) {
                 t.leaves.positions.push_back(c + side * (e == 0 ? -w : w));
                 t.leaves.normals.push_back(glm::normalize(Vec3(0, 1, 0) + dir * 0.2f));
                 t.leaves.uvs.push_back({0.01f + 0.98f * u, e == 0 ? 0.51f : 0.99f});
+                t.leaves.tangents.push_back(Vec4(1.0f, 0.0f, 0.0f, 1.0f));
             }
         }
         for (int s = 0; s < segments; ++s) {

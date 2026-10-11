@@ -45,11 +45,11 @@ TreeMeshes BuildPalm(u32 lod);
 // A tuft of grass: crossed, slightly bent cards about 0.8 m wide and 0.55 m tall.
 VegMesh BuildGrassMesh();
 
-// 512 x 512: two leafy twigs (alpha-cut) side by side on top, a palm frond (alpha-cut) in the bottom half.
+// 1024 x 1024: two leafy twigs (alpha-cut) side by side on top, a palm frond (alpha-cut) in the bottom half.
 VegImage BuildLeafAtlas();
 // A seamless-enough bark stand-in used until the real bark textures are resident.
 VegImage BuildBarkImage();
-// Blades of grass fanning from the bottom centre, 256 x 256.
+// Blades of grass fanning from the bottom centre, 512 x 512.
 VegImage BuildGrassImage();
 
 // Mip chain (largest first) of an alpha-tested image: colour is averaged weighted by alpha and the alpha of every

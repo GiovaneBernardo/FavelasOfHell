@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
     vd.width = w;
     vd.height = h;
     vd.scene = scene;
-    vd.flags = foh::ViewportFlags::Sky;
+    vd.flags = foh::ViewportFlags::Sky | foh::ViewportFlags::Probes;
     const foh::ViewportId viewport = renderer->createViewport(vd);
 
     // Dev only: rebuild the game module / shaders when their sources are saved.

@@ -21,6 +21,7 @@ struct MeshRange {
     u32 vertexCount = 0;
     bool skinned = false;
     u32 block = kNoMeshBlock; // the vertex/index block the range lives in; freed when its last range is released
+    Vec4 bounds{0.0f};        // local bounding sphere of the mesh (xyz centre, w radius; w <= 0: unknown), for culling
 };
 
 // Joint indices (4 x u8) and weights (4 x unorm8, summing to 255) of one vertex. Parallel to MeshVertex.

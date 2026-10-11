@@ -27,6 +27,15 @@ struct ViewConstants {
     float4 atmosphere3; // xyz = ground albedo
 
     float4 render; // x = 1 to dither the tonemapped output, y = 1 for aerial perspective (needs atmosphere1.y)
+
+    // Indirect light and small-scale shadowing (common/lighting.slangh). Every feature is switched by a flag here, so a
+    // viewport that does not run it binds stand-in textures and the shader skips the work.
+    float4 ssao;   // x = 1 if the GTAO texture is valid, y = strength (exponent), z = contact shadow length (m, 0 = off), w = GTAO radius (m)
+    float4 canopy; // x = leaf transmission strength (0 = off), y = 1 if the foliage transmission atlas is valid
+    float4 ibl;    // x = 1 if the sky environment is valid, y = its intensity, z = 1 if the probe grid is valid, w = probe cell size (m)
+    float4 probeA; // xy = world xz of the centre of the probe window, z = probes per side, w = intensity
+    float4 probeB; // x = height of probe layer 0 above the ground (m), y = layer 1, zw = unused
+    float4 bed;    // xy = origin (m), zw = 1 / size (1 / m) of the ground height field (the water's sea floor)
 };
 
 // World-space point under a pixel at the given depth (reverse-Z: near plane is depth 1).

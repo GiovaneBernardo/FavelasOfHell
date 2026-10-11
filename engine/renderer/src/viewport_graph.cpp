@@ -3,8 +3,12 @@
 //   UploadInstances (copy)   scene instances -> transient vertex stream
 //   DepthPrepass             depth of all opaque geometry (VS only)
 //   ShadowCascades           sun shadow map: 4 cascades tiled in one depth atlas
+//   FoliageTransmit          colour of the sun that leaks through the first leaf layer, same atlas layout as the shadow map
 //   Opaque                   G-buffer fill (albedo, normal, material), depth-tested
 //                            against the pre-pass so every pixel is shaded once
+//   GtaoMain/GtaoBlur        ground-truth ambient occlusion from the depth + normal buffers
+//   SkyEnv/EnvDown           the whole sky (atmosphere + clouds) as an octahedral image, then 4 blurrier levels (IBL)
+//   ProbeClear/Capture/Light/Sh   (Probes viewports) refresh a few light probes: scene drawn from 6 faces, lit, projected on SH
 //   Sky | ClearHdr           background into the HDR target (sky: precomputed atmosphere, empty-depth pixels only)
 //   Deferred                 fullscreen lighting from the G-buffer + shadows + atmosphere -> HDR
 //   CloudTrace/Resolve/Composite (volumetric clouds, sky viewports with the atmosphere on)
@@ -20,6 +24,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 
 #include "foh/log.h"
 #include "renderer_impl.h"
@@ -32,6 +37,7 @@ using Impl = Renderer::Impl;
 
 constexpr nvrhi::Format kHdrFormat = nvrhi::Format::RGBA16_FLOAT;
 constexpr nvrhi::Format kDepthFormat = nvrhi::Format::D32;
+constexpr u32 kTransmitCascades = 2; // cascades with a foliage transmission pass (shaders/common/lighting.slangh reads the same count)
 
 u64 shaderKey(const ShaderRef& vs, const ShaderRef& ps, u64 variant) {
     return HashCombine(HashCombine(vs.uid, ps.uid), variant);
@@ -156,6 +162,44 @@ struct OpaqueData {
     RgTexture material;
     RgTexture depth;
 };
+struct TransmitData {
+    RgBuffer skinned; // invalid when nothing is skinned
+    RgBuffer instances;
+    RgTexture atlas;  // the shadow atlas, read-only depth
+    RgTexture color;
+};
+struct GtaoData {
+    RgTexture depth;
+    RgTexture normal;
+    RgTexture noisy; // invalid for the main pass
+    RgTexture out;
+};
+struct EnvData {
+    RgTexture src; // invalid for the first level
+    RgTexture dst;
+};
+struct ProbeClearData {
+    RgTexture sh[4];
+};
+struct ProbeCaptureData {
+    RgBuffer skinned;
+    RgBuffer instances;
+    RgTexture albedo;
+    RgTexture normal;
+    RgTexture material;
+    RgTexture depth;
+};
+struct ProbeLightData {
+    RgTexture albedo, normal, material, depth;
+    RgTexture atlas;   // shadow atlas
+    RgTexture foliage; // invalid when off
+    RgTexture sh[4];   // the grid being refreshed: older captures feed the multi-bounce
+    RgTexture lit;
+};
+struct ProbeShData {
+    RgTexture lit;
+    RgTexture sh[4];
+};
 struct SkyData {
     RgTexture hdr;
     RgTexture depth; // invalid for the flat clear
@@ -166,6 +210,10 @@ struct DeferredData {
     RgTexture material;
     RgTexture depth;
     RgTexture atlas;
+    RgTexture gtao;    // the next four are invalid when their pass is off: stand-in textures are bound
+    RgTexture foliage;
+    RgTexture env[5];
+    RgTexture sh[4];
     RgTexture hdr;
 };
 struct CloudTraceData {
@@ -239,21 +287,25 @@ nvrhi::RasterCullMode cullOf(DrawClass cls) { return IsDoubleSided(cls) ? nvrhi:
 // Six clip planes from a view-projection matrix (Gribb-Hartmann; valid for the reverse-Z projection too, where near maps
 // to 1 and far to 0: the inside test 0 <= z <= w is the same).
 struct Frustum {
-    Vec4 planes[6];
+    // Plain floats and no vector-library calls in `sees`: it runs for every batch of every pass, and a Debug build pays
+    // dearly for each tiny inline function there.
+    f32 planes[6][4];
     explicit Frustum(const Mat4& m) {
         auto row = [&](int i) { return Vec4(m[0][i], m[1][i], m[2][i], m[3][i]); };
         const Vec4 r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
-        planes[0] = r3 + r0;
-        planes[1] = r3 - r0;
-        planes[2] = r3 + r1;
-        planes[3] = r3 - r1;
-        planes[4] = r2;
-        planes[5] = r3 - r2;
-        for (Vec4& p : planes) p /= std::max(glm::length(Vec3(p)), 1e-6f);
+        const Vec4 p[6] = {r3 + r0, r3 - r0, r3 + r1, r3 - r1, r2, r3 - r2};
+        for (int i = 0; i < 6; ++i) {
+            const f32 inv = 1.0f / std::max(glm::length(Vec3(p[i])), 1e-6f);
+            planes[i][0] = p[i].x * inv;
+            planes[i][1] = p[i].y * inv;
+            planes[i][2] = p[i].z * inv;
+            planes[i][3] = p[i].w * inv;
+        }
     }
     bool sees(const Vec4& sphere) const {
-        for (const Vec4& p : planes)
-            if (glm::dot(Vec3(p), Vec3(sphere)) + p.w < -sphere.w) return false;
+        const f32 x = sphere.x, y = sphere.y, z = sphere.z, w = -sphere.w;
+        for (int i = 0; i < 6; ++i)
+            if (planes[i][0] * x + planes[i][1] * y + planes[i][2] * z + planes[i][3] < w) return false;
         return true;
     }
 };
@@ -263,7 +315,7 @@ struct Frustum {
 // `table` is the bindless texture table for passes that sample materials (null otherwise).
 void drawBatches(Impl& s, const nvrhi::ViewportState& viewport, nvrhi::IFramebuffer* fb, nvrhi::IGraphicsPipeline* pso,
                  nvrhi::IBindingSet* set, nvrhi::IBindingSet* table, nvrhi::ICommandList* cmd, nvrhi::IBuffer* instances,
-                 nvrhi::IBuffer* skinned, const SceneGpu& scene, u32 begin, u32 end, const Mat4* viewProj = nullptr) {
+                 nvrhi::IBuffer* skinned, const SceneGpu& scene, u32 begin, u32 end, const Mat4* viewProj = nullptr, u32 skipFlags = 0) {
     if (begin >= end) return;
     const Frustum frustum(viewProj ? *viewProj : Mat4(1.0f));
     nvrhi::GraphicsState gs;
@@ -276,8 +328,9 @@ void drawBatches(Impl& s, const nvrhi::ViewportState& viewport, nvrhi::IFramebuf
     bool onSkinned = false;
     for (u32 i = begin; i < end; ++i) {
         const SceneGpu::Batch& b = scene.batches[i];
-        const MeshRange& r = s.gpu.meshes.range(b.mesh);
+        if (b.flags & skipFlags) continue;
         if (viewProj && b.sphere.w > 0.0f && !frustum.sees(b.sphere)) continue;
+        const MeshRange& r = s.gpu.meshes.range(b.mesh);
         const bool skin = b.skinBase >= 0 && skinned;
         if (b.skinBase >= 0 && !skinned) continue; // the pre-skinning pass did not run: nothing to draw
         if (skin != onSkinned) {
@@ -328,7 +381,7 @@ nvrhi::IBindingSet* materialBindings(RgPassContext& ctx, Impl& s, nvrhi::IBuffer
 
 // Which mesh pass a pipeline is for. One place decides shaders, layouts and cull mode per (pass, draw class), so the
 // pass bodies and the start-up warm-up cannot drift apart.
-enum class MeshPass { Depth, Shadow, GBuffer, Pick };
+enum class MeshPass { Depth, Shadow, GBuffer, ProbeGBuffer, Pick, Transmit };
 
 nvrhi::IGraphicsPipeline* classPipeline(Impl& s, MeshPass pass, DrawClass cls, nvrhi::IFramebuffer* fb) {
     const bool masked = IsMasked(cls);
@@ -353,6 +406,21 @@ nvrhi::IGraphicsPipeline* classPipeline(Impl& s, MeshPass pass, DrawClass cls, n
             const ShaderRef ps = s.shaders->get(masked ? "opaque.psOpaqueMasked" : "opaque.psOpaque", nvrhi::ShaderType::Pixel);
             if (!vs || !ps) return nullptr;
             return meshPipeline(s, fb, vs, ps, 2, false, cullOf(cls), true);
+        }
+        case MeshPass::ProbeGBuffer: {
+            // A probe capture has no depth pre-pass, so unlike the camera's G-buffer it writes depth itself.
+            const ShaderRef vs = s.shaders->get("opaque.vsOpaque", nvrhi::ShaderType::Vertex);
+            const ShaderRef ps = s.shaders->get(masked ? "opaque.psOpaqueMasked" : "opaque.psOpaque", nvrhi::ShaderType::Pixel);
+            if (!vs || !ps) return nullptr;
+            return meshPipeline(s, fb, vs, ps, 12, true, cullOf(cls), true);
+        }
+        case MeshPass::Transmit: {
+            // Only double-sided alpha-masked materials can be foliage; the pixel shader drops the ones that are not.
+            if (cls != DrawClass::MaskedDoubleSided) return nullptr;
+            const ShaderRef vs = s.shaders->get("shadow.vsShadowTransmit", nvrhi::ShaderType::Vertex);
+            const ShaderRef ps = s.shaders->get("shadow.psShadowTransmit", nvrhi::ShaderType::Pixel);
+            if (!vs || !ps) return nullptr;
+            return meshPipeline(s, fb, vs, ps, 11, false, nvrhi::RasterCullMode::None, true);
         }
         case MeshPass::Pick: {
             const ShaderRef vs = s.shaders->get("opaque.vsOpaque", nvrhi::ShaderType::Vertex);
@@ -436,7 +504,7 @@ void recordShadows(Impl& s, const ViewFrame& vf, const ShadowData& d, RgPassCont
             const u32 c = static_cast<u32>(cls);
             if (!pso[c]) continue;
             drawBatches(s, viewport, fb, pso[c], IsMasked(cls) ? materialSet : viewSet, IsMasked(cls) ? s.gpu.textures.table() : nullptr, cmd,
-                        instances, skinned, scene, scene.classBegin[c], scene.classBegin[c + 1], &vf.cascades.viewProj[cascade]);
+                        instances, skinned, scene, scene.classBegin[c], scene.classBegin[c + 1], &vf.cascades.viewProj[cascade], kBatchNoShadow);
         }
     }
 }
@@ -460,23 +528,6 @@ void recordOpaque(Impl& s, const ViewFrame& vf, const OpaqueData& d, RgPassConte
         drawBatches(s, fullViewport(vf), fb, pso, set, s.gpu.textures.table(), cmd, instances, skinned, scene, scene.classBegin[c], scene.classBegin[c + 1],
                     &vf.constants.viewProj);
     }
-}
-
-nvrhi::IBindingSet* deferredBindings(Impl& s, const ViewFrame& vf, const DeferredData& d, RgPassContext& ctx) {
-    ctx.cmd()->writeBuffer(vf.viewCb, &vf.constants, sizeof(ViewConstants));
-    nvrhi::BindingSetDesc bd;
-    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, vf.viewCb));
-    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(0, ctx.texture(d.albedo)));
-    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(1, ctx.texture(d.normal)));
-    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(2, ctx.texture(d.material)));
-    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(3, ctx.texture(d.depth), nvrhi::Format::R32_FLOAT));
-    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(4, ctx.texture(d.atlas), nvrhi::Format::R32_FLOAT));
-    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(5, s.atmosphere.transmittance()));
-    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(6, s.atmosphere.scattering()));
-    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(7, s.atmosphere.irradiance()));
-    bd.addItem(nvrhi::BindingSetItem::Sampler(0, s.gpu.shadowSampler));
-    bd.addItem(nvrhi::BindingSetItem::Sampler(1, s.atmosphere.sampler()));
-    return ctx.bindingSet(bd, s.gpu.layoutDeferred);
 }
 
 // The sky shades only the pixels the depth buffer says are empty, from the atmosphere tables.
@@ -579,6 +630,25 @@ void ensureWaterBuffers(Impl& s, Viewport& vp) {
     make(vp.cloudCb, sizeof(CloudConstants), " (cloud constants)");
 }
 
+// The probe grid's textures and the two volatile constant buffers its passes write (created on first use).
+bool ensureProbeResources(Impl& s, Viewport& vp) {
+    nvrhi::IDevice* dev = s.device->nvrhi();
+    if (!vp.probeCb) {
+        nvrhi::BufferDesc cb;
+        cb.byteSize = sizeof(ProbeConstants);
+        cb.isConstantBuffer = true;
+        cb.isVolatile = true;
+        cb.maxVersions = 16;
+        cb.debugName = vp.name + " (probe constants)";
+        vp.probeCb = dev->createBuffer(cb);
+        cb.byteSize = sizeof(ViewConstants);
+        cb.maxVersions = 128; // one write per probe face drawn
+        cb.debugName = vp.name + " (probe face constants)";
+        vp.probeViewCb = dev->createBuffer(cb);
+    }
+    return vp.probeCb && vp.probeViewCb && vp.probes.ensureTextures(dev);
+}
+
 nvrhi::IBindingSet* waterSurfaceBindings(Impl& s, const ViewFrame& vf, const WaterSurfaceData& d, RgPassContext& ctx) {
     ctx.cmd()->writeBuffer(vf.viewCb, &vf.constants, sizeof(ViewConstants));
     ctx.cmd()->writeBuffer(vf.waterCb, &vf.water, sizeof(WaterConstants));
@@ -636,6 +706,173 @@ void recordWaterSurface(Impl& s, const ViewFrame& vf, const WaterSurfaceData& d,
     };
     if (vf.waterRings > 1) draw(ringPso, s.water.ringIndices(), s.water.ringIndexCount(), vf.waterRings - 1);
     draw(centerPso, s.water.centerIndices(), s.water.centerIndexCount(), 1);
+}
+
+// ---- indirect light and small-scale shadowing -------------------------------------------------------------------
+
+// Everything the lighting shaders (deferred.slang, probe_light.slang) read through layoutDeferred. A null texture
+// is replaced by a stand-in: the view constants carry a flag per feature, so the shader never reads it.
+struct LightingInputs {
+    nvrhi::ITexture* albedo = nullptr;
+    nvrhi::ITexture* normal = nullptr;
+    nvrhi::ITexture* material = nullptr;
+    nvrhi::ITexture* depth = nullptr;
+    nvrhi::ITexture* atlas = nullptr;
+    nvrhi::ITexture* gtao = nullptr;
+    nvrhi::ITexture* foliage = nullptr;
+    nvrhi::ITexture* env[5] = {};
+    nvrhi::ITexture* sh[4] = {};
+};
+
+nvrhi::ITexture* orStandIn(RgPassContext& ctx, RgTexture handle, nvrhi::ITexture* standIn) {
+    return handle.valid() ? ctx.texture(handle) : standIn;
+}
+
+nvrhi::BindingSetDesc lightingBindingDesc(Impl& s, const ViewFrame& vf, const LightingInputs& in) {
+    nvrhi::BindingSetDesc bd;
+    nvrhi::ITexture* flat = s.gpu.dummy2D.Get();
+    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, vf.viewCb));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(0, in.albedo));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(1, in.normal));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(2, in.material));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(3, in.depth, nvrhi::Format::R32_FLOAT));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(4, in.atlas, nvrhi::Format::R32_FLOAT));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(5, s.atmosphere.transmittance()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(6, s.atmosphere.scattering()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(7, s.atmosphere.irradiance()));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(8, in.gtao ? in.gtao : flat));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(9, in.foliage ? in.foliage : flat));
+    for (u32 i = 0; i < 5; ++i) bd.addItem(nvrhi::BindingSetItem::Texture_SRV(10 + i, in.env[i] ? in.env[i] : flat));
+    for (u32 i = 0; i < 4; ++i) bd.addItem(nvrhi::BindingSetItem::Texture_SRV(15 + i, in.sh[i] ? in.sh[i] : s.gpu.dummyArray.Get()));
+    nvrhi::ITexture* bed = s.water.bed() ? s.water.bed() : flat;
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(19, bed, nvrhi::Format::R32_FLOAT));
+    bd.addItem(nvrhi::BindingSetItem::Sampler(0, s.gpu.shadowSampler));
+    bd.addItem(nvrhi::BindingSetItem::Sampler(1, s.atmosphere.sampler()));
+    bd.addItem(nvrhi::BindingSetItem::Sampler(2, s.gpu.probeSampler));
+    return bd;
+}
+
+nvrhi::IBindingSet* deferredBindings(Impl& s, const ViewFrame& vf, const DeferredData& d, RgPassContext& ctx) {
+    ctx.cmd()->writeBuffer(vf.viewCb, &vf.constants, sizeof(ViewConstants));
+    LightingInputs in;
+    in.albedo = ctx.texture(d.albedo);
+    in.normal = ctx.texture(d.normal);
+    in.material = ctx.texture(d.material);
+    in.depth = ctx.texture(d.depth);
+    in.atlas = ctx.texture(d.atlas);
+    in.gtao = orStandIn(ctx, d.gtao, nullptr);
+    in.foliage = orStandIn(ctx, d.foliage, nullptr);
+    for (u32 i = 0; i < 5; ++i) in.env[i] = orStandIn(ctx, d.env[i], nullptr);
+    for (u32 i = 0; i < 4; ++i) in.sh[i] = orStandIn(ctx, d.sh[i], nullptr);
+    return ctx.bindingSet(lightingBindingDesc(s, vf, in), s.gpu.layoutDeferred);
+}
+
+// The same cascades as the shadow pass, drawn again with a colour target: where a foliage leaf is the first thing the sun
+// hits, the pixel keeps the colour of the light that gets through it.
+void recordTransmit(Impl& s, const ViewFrame& vf, const TransmitData& d, RgPassContext& ctx) {
+    nvrhi::ICommandList* cmd = ctx.cmd();
+    cmd->clearTextureFloat(ctx.texture(d.color), nvrhi::AllSubresources, nvrhi::Color(0.0f));
+    if (!vf.shadowsOn || !vf.scene || vf.scene->batches.empty() || !d.instances.valid()) return;
+    const SceneGpu& scene = *vf.scene;
+    const u32 c = static_cast<u32>(DrawClass::MaskedDoubleSided);
+    if (scene.classBegin[c] >= scene.classBegin[c + 1]) return;
+
+    nvrhi::IFramebuffer* fb = ctx.framebuffer();
+    nvrhi::IGraphicsPipeline* pso = classPipeline(s, MeshPass::Transmit, DrawClass::MaskedDoubleSided, fb);
+    if (!pso) return;
+    nvrhi::IBuffer* instances = ctx.buffer(d.instances);
+    nvrhi::IBuffer* skinned = d.skinned.valid() ? ctx.buffer(d.skinned) : nullptr;
+    nvrhi::IBindingSet* set = materialBindings(ctx, s, vf.shadowCb);
+    const f32 tile = static_cast<f32>(vf.shadowTile);
+    // Only the near cascades: far canopy is lit by the plain shadow term, and this pass redraws every leaf.
+    for (u32 cascade = 0; cascade < kTransmitCascades; ++cascade) {
+        cmd->writeBuffer(vf.shadowCb, &vf.cascades.viewProj[cascade], sizeof(Mat4));
+        const f32 x = static_cast<f32>(cascade & 1) * tile;
+        const f32 y = static_cast<f32>(cascade >> 1) * tile;
+        const nvrhi::ViewportState viewport =
+            nvrhi::ViewportState().addViewportAndScissorRect(nvrhi::Viewport(x, x + tile, y, y + tile, 0.0f, 1.0f));
+        drawBatches(s, viewport, fb, pso, set, s.gpu.textures.table(), cmd, instances, skinned, scene, scene.classBegin[c], scene.classBegin[c + 1],
+                    &vf.cascades.viewProj[cascade], kBatchNoShadow);
+    }
+}
+
+nvrhi::IBindingSet* gtaoBindings(Impl& s, const ViewFrame& vf, const GtaoData& d, RgPassContext& ctx) {
+    ctx.cmd()->writeBuffer(vf.viewCb, &vf.constants, sizeof(ViewConstants));
+    nvrhi::BindingSetDesc bd;
+    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, vf.viewCb));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(0, ctx.texture(d.depth), nvrhi::Format::R32_FLOAT));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(1, ctx.texture(d.normal)));
+    // The main pass has no noisy input: any texture does for t2.
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(2, d.noisy.valid() ? ctx.texture(d.noisy) : s.gpu.dummy2D.Get()));
+    return ctx.bindingSet(bd, s.gpu.layoutGtao);
+}
+
+// One probe capture: the scene from the probe's position, 6 faces of kProbeFace^2 pixels per probe, side by side in one
+// atlas (face f of job j at tile (f, j)). The G-buffer pass of the camera is reused as it is, drawn with the face's
+// matrices; whatever is not covered keeps depth 0 and is treated as sky by the lighting.
+void recordProbeCapture(Impl& s, const ViewFrame& vf, const ProbeCaptureData& d, RgPassContext& ctx) {
+    nvrhi::ICommandList* cmd = ctx.cmd();
+    cmd->clearDepthStencilTexture(ctx.texture(d.depth), nvrhi::AllSubresources, true, 0.0f, false, 0);
+    if (vf.probeJobs.empty() || !vf.scene || vf.scene->batches.empty() || !d.instances.valid()) return;
+    const SceneGpu& scene = *vf.scene;
+    nvrhi::IFramebuffer* fb = ctx.framebuffer();
+    nvrhi::IBuffer* instances = ctx.buffer(d.instances);
+    nvrhi::IBuffer* skinned = d.skinned.valid() ? ctx.buffer(d.skinned) : nullptr;
+    nvrhi::IGraphicsPipeline* pso[kDrawClassCount];
+    for (DrawClass cls : kAllClasses) {
+        const u32 c = static_cast<u32>(cls);
+        pso[c] = scene.classBegin[c] < scene.classBegin[c + 1] ? classPipeline(s, MeshPass::ProbeGBuffer, cls, fb) : nullptr;
+    }
+    nvrhi::IBindingSet* set = materialBindings(ctx, s, vf.probeViewCb);
+    const f32 face = static_cast<f32>(kProbeFace);
+    for (u32 j = 0; j < vf.probeJobs.size(); ++j) {
+        Mat4 view[kProbeFaces], proj;
+        ProbeFaceViews(vf.probeJobs[j].position, view, proj);
+        for (u32 f = 0; f < kProbeFaces; ++f) {
+            ViewConstants c = vf.constants;
+            c.view = view[f];
+            c.proj = proj;
+            c.viewProj = proj * view[f];
+            c.invViewProj = glm::inverse(c.viewProj);
+            c.cameraPos = Vec4(vf.probeJobs[j].position, 1.0f);
+            cmd->writeBuffer(vf.probeViewCb, &c, sizeof(ViewConstants));
+            const f32 x = static_cast<f32>(f) * face, y = static_cast<f32>(j) * face;
+            const nvrhi::ViewportState viewport =
+                nvrhi::ViewportState().addViewportAndScissorRect(nvrhi::Viewport(x, x + face, y, y + face, 0.0f, 1.0f));
+            for (DrawClass cls : kAllClasses) {
+                const u32 k = static_cast<u32>(cls);
+                if (!pso[k]) continue;
+                drawBatches(s, viewport, fb, pso[k], set, s.gpu.textures.table(), cmd, instances, skinned, scene, scene.classBegin[k],
+                            scene.classBegin[k + 1], &c.viewProj, kBatchNoProbe);
+            }
+        }
+    }
+}
+
+nvrhi::IBindingSet* probeLightBindings(Impl& s, const ViewFrame& vf, const ProbeLightData& d, RgPassContext& ctx) {
+    ctx.cmd()->writeBuffer(vf.viewCb, &vf.constants, sizeof(ViewConstants));
+    ctx.cmd()->writeBuffer(vf.probeCb, &vf.probe, sizeof(ProbeConstants));
+    LightingInputs in;
+    in.albedo = ctx.texture(d.albedo);
+    in.normal = ctx.texture(d.normal);
+    in.material = ctx.texture(d.material);
+    in.depth = ctx.texture(d.depth);
+    in.atlas = ctx.texture(d.atlas);
+    in.foliage = orStandIn(ctx, d.foliage, nullptr);
+    for (u32 i = 0; i < 4; ++i) in.sh[i] = ctx.texture(d.sh[i]);
+    nvrhi::BindingSetDesc bd = lightingBindingDesc(s, vf, in);
+    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(1, vf.probeCb));
+    return ctx.bindingSet(bd, s.gpu.layoutProbeLight);
+}
+
+void recordProbeSh(Impl& s, const ViewFrame& vf, const ProbeShData& d, RgPassContext& ctx) {
+    ctx.cmd()->writeBuffer(vf.probeCb, &vf.probe, sizeof(ProbeConstants));
+    nvrhi::BindingSetDesc bd;
+    bd.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, vf.probeCb));
+    bd.addItem(nvrhi::BindingSetItem::Texture_SRV(0, ctx.texture(d.lit)));
+    for (u32 i = 0; i < 4; ++i) bd.addItem(nvrhi::BindingSetItem::Texture_UAV(i, ctx.texture(d.sh[i])));
+    RecordCompute(ctx, s.services(), {"probe_sh.csProbeSh", s.gpu.layoutProbeSh}, ctx.bindingSet(bd, s.gpu.layoutProbeSh),
+                  RgDispatch{static_cast<u32>(vf.probeJobs.size()), 1, 1});
 }
 
 // Entity ids instead of colors, same geometry and depth test as the G-buffer pass.
@@ -739,6 +976,7 @@ void Renderer::Impl::warmPipelines() {
     nvrhi::TextureHandle normal = target(nvrhi::Format::RG16_UNORM, false);
     nvrhi::TextureHandle material = target(nvrhi::Format::RGBA8_UNORM, false);
     nvrhi::TextureHandle ids = target(nvrhi::Format::RG32_UINT, false);
+    nvrhi::TextureHandle transmit = target(nvrhi::Format::RGBA8_UNORM, false);
 
     nvrhi::FramebufferHandle depthFb = dev->createFramebuffer(nvrhi::FramebufferDesc().setDepthAttachment(depth));
     nvrhi::FramebufferHandle gbufferFb = dev->createFramebuffer(nvrhi::FramebufferDesc()
@@ -747,11 +985,14 @@ void Renderer::Impl::warmPipelines() {
                                                                     .addColorAttachment(material)
                                                                     .setDepthAttachment(depth));
     nvrhi::FramebufferHandle pickFb = dev->createFramebuffer(nvrhi::FramebufferDesc().addColorAttachment(ids).setDepthAttachment(depth));
+    nvrhi::FramebufferHandle transmitFb = dev->createFramebuffer(nvrhi::FramebufferDesc().addColorAttachment(transmit).setDepthAttachment(depth));
 
     u32 created = 0;
     for (DrawClass cls : kAllClasses) {
         for (auto [pass, fb] : {std::pair{MeshPass::Depth, depthFb.Get()}, std::pair{MeshPass::Shadow, depthFb.Get()},
-                                std::pair{MeshPass::GBuffer, gbufferFb.Get()}, std::pair{MeshPass::Pick, pickFb.Get()}}) {
+                                std::pair{MeshPass::GBuffer, gbufferFb.Get()}, std::pair{MeshPass::ProbeGBuffer, gbufferFb.Get()},
+                                std::pair{MeshPass::Pick, pickFb.Get()},
+                                std::pair{MeshPass::Transmit, transmitFb.Get()}}) {
             if (classPipeline(*this, pass, cls, fb)) ++created;
         }
     }
@@ -816,7 +1057,68 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
     atmosphere.fillView(vf.constants);
     if (!settings.atmosphere || vf.constants.sunDirection.w < 0.5f || !HasFlag(vp.flags, ViewportFlags::Sky)) vf.constants.atmosphere1.y = 0.0f;
 
+    // Indirect light and small-scale shadowing: which passes run for this view, and the flags the shaders read.
+    const bool sceneLit = vf.scene && !vf.scene->instances.empty();
+    const bool atmosphereOn = vf.constants.atmosphere1.y > 0.5f;
+    vf.gtaoOn = sceneLit && settings.gtao;
+    vf.transmitOn = sceneLit && vf.shadowsOn && settings.canopyTransmission > 0.0f;
+    vf.envOn = sceneLit && atmosphereOn && settings.ibl;
+    vf.constants.ssao = Vec4(vf.gtaoOn ? 1.0f : 0.0f, settings.gtaoStrength, settings.contactShadows ? settings.contactShadowLength : 0.0f,
+                             settings.gtaoRadius);
+    vf.constants.canopy = Vec4(vf.transmitOn ? settings.canopyTransmission : 0.0f, vf.transmitOn ? 1.0f : 0.0f, 0.0f, 0.0f);
+    vf.constants.ibl = Vec4(vf.envOn ? 1.0f : 0.0f, settings.iblIntensity, 0.0f, settings.probeSpacing);
+    vf.probeJobs.clear();
+    vf.probesOn = false;
+    // Probes sit at a fixed height above the terrain, so they need its height field (the water's sea floor); a scene
+    // without one (previews, test scenes) keeps the sky model for its ambient light.
+    if (sceneLit && atmosphereOn && settings.probes && HasFlag(vp.flags, ViewportFlags::Probes) && water.hasBed() &&
+        ensureProbeResources(*this, vp)) {
+        vf.probesOn = true;
+        vf.probeCb = vp.probeCb.Get();
+        vf.probeViewCb = vp.probeViewCb.Get();
+        // The grid still follows the camera every frame; only the captures (the expensive part) are spread out.
+        vp.probes.update(view.position, settings.probeSpacing, frame, frame % settings.probeInterval == 0 ? settings.probesPerFrame : 0u,
+                         [&](f32 x, f32 z) { return water.groundAt(x, z); }, vf.probeJobs);
+        vf.probe = ProbeConstants{};
+        for (u32 j = 0; j < vf.probeJobs.size(); ++j) {
+            const ProbeJob& job = vf.probeJobs[j];
+            Mat4 faceView[kProbeFaces], faceProj;
+            ProbeFaceViews(job.position, faceView, faceProj);
+            for (u32 f = 0; f < kProbeFaces; ++f) vf.probe.invViewProj[j * kProbeFaces + f] = glm::inverse(faceProj * faceView[f]);
+            vf.probe.origin[j] = Vec4(job.position, 1.0f);
+            vf.probe.slot[j][0] = job.x;
+            vf.probe.slot[j][1] = job.z;
+            vf.probe.slot[j][2] = job.layer;
+            vf.probe.slot[j][3] = job.refresh ? 1u : 0u;
+        }
+        vf.probe.count[0] = static_cast<u32>(vf.probeJobs.size());
+        const Vec2 centre = vp.probes.center();
+        vf.constants.ibl.z = 1.0f;
+        vf.constants.probeA = Vec4(centre.x, centre.y, static_cast<f32>(kProbeGridDim), settings.probeIntensity);
+        vf.constants.probeB = Vec4(kProbeLayerHeight[0], kProbeLayerHeight[1], 0.0f, 0.0f);
+        vf.constants.bed = water.bedMapping();
+    }
+
+    // Volumetric clouds over the empty pixels (passes below): the constants and the temporal history are set up here,
+    // because the sky environment reads them before the lighting pass.
+    const bool cloudsOn = clouds.ready() && clouds.desc().enabled && HasFlag(vp.flags, ViewportFlags::Sky) &&
+                          vf.constants.atmosphere1.y > 0.5f;
+    if (cloudsOn) {
+        ensureCloudTargets(*this, vp, std::max(1u, (vp.width + 1) / 2), std::max(1u, (vp.height + 1) / 2));
+        // History from a frame that was not the previous one (viewport hidden, camera cut) is not trusted.
+        if (vp.cloudLastFrame + 1 != frame) vp.cloudHistoryValid = false;
+        clouds.fill(vf.clouds, time, frame, vp.cloudHistoryValid ? 0.12f : 1.0f);
+        vf.clouds.prevViewProj = vp.cloudPrevViewProj;
+        vf.cloudCb = vp.cloudCb.Get();
+    } else if (vf.envOn) {
+        // The sky environment still marches the (zeroed: off) cloud constants.
+        ensureWaterBuffers(*this, vp);
+        vf.cloudCb = vp.cloudCb.Get();
+        vf.clouds = CloudConstants{};
+    }
+
     RenderGraph& g = *vp.graph;
+    g.setGpuTimers(settings.gpuTimers && vp.id == gpuTimerViewport);
     g.reset(frame);
 
     const RgTexture output = g.importTexture(vp.output.Get(), nvrhi::ResourceStates::ShaderResource,
@@ -841,6 +1143,8 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
 
     // The transient handles are created by the first pass that needs them.
     RgTexture hdr, depth, atlas, albedo, normal, material;
+    RgTexture gtaoTex, foliageTex; // invalid unless their pass runs
+    RgTexture envTex[5], probeSh[4];
     RgBuffer instances;
     const size_t instanceCount = vf.scene ? vf.scene->instances.size() : 0;
 
@@ -932,6 +1236,24 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
             },
             [self, frameData](const ShadowData& d, RgPassContext& ctx) { recordShadows(*self, *frameData, d, ctx); });
 
+        if (vf.transmitOn) {
+            RgTextureDesc transmitDesc = atlasDesc;
+            transmitDesc.format = nvrhi::Format::RGBA8_UNORM;
+            transmitDesc.useClearValue = true; // declared up front: the clear below is then a fast one
+            transmitDesc.clearValue = nvrhi::Color(0.0f);
+            transmitDesc.name = "FoliageTransmission";
+            g.addPass<TransmitData>(
+                "FoliageTransmit",
+                [&](RgPassBuilder& b, TransmitData& d) {
+                    foliageTex = b.createTexture(transmitDesc);
+                    d.color = b.colorTarget(0, foliageTex);
+                    d.atlas = b.depthTarget(atlas, true);
+                    d.instances = b.read(instances, RgAccess::VertexRead);
+                    if (skinning) d.skinned = b.read(skinned, RgAccess::VertexRead);
+                },
+                [self, frameData](const TransmitData& d, RgPassContext& ctx) { recordTransmit(*self, *frameData, d, ctx); });
+        }
+
         RgTextureDesc gbDesc = hdrDesc;
         gbDesc.useClearValue = false; // every visible pixel is overwritten, sky pixels are never read
         gbDesc.format = nvrhi::Format::SRGBA8_UNORM;
@@ -956,6 +1278,142 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
                 if (skinning) d.skinned = b.read(skinned, RgAccess::VertexRead);
             },
             [self, frameData](const OpaqueData& d, RgPassContext& ctx) { recordOpaque(*self, *frameData, d, ctx); });
+    }
+
+    // Indirect light: ambient occlusion from the depth + normal buffers, the sky as an image to reflect, and a few light
+    // probes refreshed this frame. The lighting pass below reads all of it.
+    if (instanceCount > 0) {
+        if (vf.gtaoOn) {
+            RgTextureDesc aoDesc = hdrDesc;
+            aoDesc.useClearValue = false;
+            aoDesc.format = nvrhi::Format::R8_UNORM;
+            aoDesc.name = "GtaoRaw";
+            RgTexture raw;
+            AddFullscreenPass<GtaoData>(
+                g, services, "GtaoMain", {"gtao.psGtao", gpu.layoutGtao.Get()},
+                [&](RgPassBuilder& b, GtaoData& d) {
+                    d.depth = b.read(depth, RgAccess::SampledRead);
+                    d.normal = b.read(normal, RgAccess::SampledRead);
+                    raw = b.createTexture(aoDesc);
+                    d.out = b.colorTarget(0, raw);
+                },
+                [self, frameData](const GtaoData& d, RgPassContext& ctx) { return gtaoBindings(*self, *frameData, d, ctx); });
+            aoDesc.name = "GtaoBlurred";
+            AddFullscreenPass<GtaoData>(
+                g, services, "GtaoBlur", {"gtao.psGtaoBlur", gpu.layoutGtao.Get()},
+                [&](RgPassBuilder& b, GtaoData& d) {
+                    d.depth = b.read(depth, RgAccess::SampledRead);
+                    d.normal = b.read(normal, RgAccess::SampledRead);
+                    d.noisy = b.read(raw, RgAccess::SampledRead);
+                    gtaoTex = b.createTexture(aoDesc);
+                    d.out = b.colorTarget(0, gtaoTex);
+                },
+                [self, frameData](const GtaoData& d, RgPassContext& ctx) { return gtaoBindings(*self, *frameData, d, ctx); });
+        }
+
+        if (vf.envOn) {
+            // Level 0 is the sky itself (128^2 octahedral); every further level is half the size and about twice as blurry.
+            RgTextureDesc envDesc;
+            envDesc.width = envDesc.height = kEnvBaseSize;
+            envDesc.format = nvrhi::Format::R11G11B10_FLOAT;
+            envDesc.renderTarget = true;
+            envDesc.name = "SkyEnvironment";
+            AddFullscreenPass<CloudTraceData>(
+                g, services, "SkyEnv", {"sky_probe.psSkyEnv", clouds.traceLayout()},
+                [&](RgPassBuilder& b, CloudTraceData& d) {
+                    d.depth = b.read(depth, RgAccess::SampledRead); // bound but unused: the layout is the cloud trace's
+                    envTex[0] = b.createTexture(envDesc);
+                    d.out = b.colorTarget(0, envTex[0]);
+                },
+                [self, frameData](const CloudTraceData& d, RgPassContext& ctx) { return cloudTraceBindings(*self, *frameData, d, ctx); });
+            for (u32 level = 1; level < 5; ++level) {
+                envDesc.width = envDesc.height = kEnvBaseSize >> level;
+                AddFullscreenPass<EnvData>(
+                    g, services, "EnvDown", {"env.psEnvDown", post.bloomLayout()},
+                    [&](RgPassBuilder& b, EnvData& d) {
+                        d.src = b.read(envTex[level - 1], RgAccess::SampledRead);
+                        envTex[level] = b.createTexture(envDesc);
+                        d.dst = b.colorTarget(0, envTex[level]);
+                    },
+                    [self](const EnvData& d, RgPassContext& ctx) { return bloomBindings(*self, ctx.texture(d.src), ctx); });
+            }
+        }
+
+        if (vf.probesOn) {
+            for (u32 i = 0; i < 4; ++i)
+                probeSh[i] = g.importTexture(vp.probes.texture(i), nvrhi::ResourceStates::ShaderResource,
+                                             nvrhi::ResourceStates::ShaderResource, "LightProbeSH");
+            if (vp.probes.takeNeedsClear()) {
+                // New textures hold garbage: alpha 0 everywhere = no probe captured yet.
+                g.addPass<ProbeClearData>(
+                    "ProbeClear",
+                    [&](RgPassBuilder& b, ProbeClearData& d) {
+                        for (u32 i = 0; i < 4; ++i) d.sh[i] = b.write(probeSh[i], RgAccess::StorageWrite);
+                    },
+                    [](const ProbeClearData& d, RgPassContext& ctx) {
+                        for (u32 i = 0; i < 4; ++i)
+                            ctx.cmd()->clearTextureFloat(ctx.texture(d.sh[i]), nvrhi::AllSubresources, nvrhi::Color(0.0f));
+                    });
+            }
+            if (!vf.probeJobs.empty()) {
+                RgTextureDesc atlasGb = hdrDesc;
+                atlasGb.width = kProbeFace * kProbeFaces;
+                atlasGb.height = kProbeFace * kProbeMaxPerFrame;
+                atlasGb.useClearValue = false;
+                atlasGb.format = nvrhi::Format::SRGBA8_UNORM;
+                atlasGb.name = "ProbeGBufferAlbedo";
+                RgTextureDesc atlasNormal = atlasGb;
+                atlasNormal.format = nvrhi::Format::RG16_UNORM;
+                atlasNormal.name = "ProbeGBufferNormal";
+                RgTextureDesc atlasMaterial = atlasGb;
+                atlasMaterial.format = nvrhi::Format::RGBA8_UNORM;
+                atlasMaterial.name = "ProbeGBufferMaterial";
+                RgTextureDesc atlasDepthDesc = depthDesc;
+                atlasDepthDesc.width = atlasGb.width;
+                atlasDepthDesc.height = atlasGb.height;
+                atlasDepthDesc.name = "ProbeDepth";
+                RgTextureDesc litDesc = atlasGb;
+                litDesc.format = kHdrFormat;
+                litDesc.name = "ProbeLit";
+                RgTexture pAlbedo, pNormal, pMaterial, pDepth, pLit;
+                g.addPass<ProbeCaptureData>(
+                    "ProbeCapture",
+                    [&](RgPassBuilder& b, ProbeCaptureData& d) {
+                        pAlbedo = b.createTexture(atlasGb);
+                        pNormal = b.createTexture(atlasNormal);
+                        pMaterial = b.createTexture(atlasMaterial);
+                        pDepth = b.createTexture(atlasDepthDesc);
+                        d.albedo = b.colorTarget(0, pAlbedo);
+                        d.normal = b.colorTarget(1, pNormal);
+                        d.material = b.colorTarget(2, pMaterial);
+                        d.depth = b.depthTarget(pDepth);
+                        d.instances = b.read(instances, RgAccess::VertexRead);
+                        if (skinning) d.skinned = b.read(skinned, RgAccess::VertexRead);
+                    },
+                    [self, frameData](const ProbeCaptureData& d, RgPassContext& ctx) { recordProbeCapture(*self, *frameData, d, ctx); });
+                AddFullscreenPass<ProbeLightData>(
+                    g, services, "ProbeLight", {"probe_light.psProbeLight", gpu.layoutProbeLight.Get()},
+                    [&](RgPassBuilder& b, ProbeLightData& d) {
+                        d.albedo = b.read(pAlbedo, RgAccess::SampledRead);
+                        d.normal = b.read(pNormal, RgAccess::SampledRead);
+                        d.material = b.read(pMaterial, RgAccess::SampledRead);
+                        d.depth = b.read(pDepth, RgAccess::SampledRead);
+                        d.atlas = b.read(atlas, RgAccess::SampledRead);
+                        if (vf.transmitOn) d.foliage = b.read(foliageTex, RgAccess::SampledRead);
+                        for (u32 i = 0; i < 4; ++i) d.sh[i] = b.read(probeSh[i], RgAccess::SampledRead);
+                        pLit = b.createTexture(litDesc);
+                        d.lit = b.colorTarget(0, pLit);
+                    },
+                    [self, frameData](const ProbeLightData& d, RgPassContext& ctx) { return probeLightBindings(*self, *frameData, d, ctx); });
+                g.addPass<ProbeShData>(
+                    "ProbeSh",
+                    [&](RgPassBuilder& b, ProbeShData& d) {
+                        d.lit = b.read(pLit, RgAccess::SampledRead);
+                        for (u32 i = 0; i < 4; ++i) d.sh[i] = b.write(probeSh[i], RgAccess::StorageWrite);
+                    },
+                    [self, frameData](const ProbeShData& d, RgPassContext& ctx) { recordProbeSh(*self, *frameData, d, ctx); });
+            }
+        }
     }
 
     // Background. The sky shades the pixels with empty depth and the lighting pass shades the rest, so together they
@@ -991,6 +1449,14 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
                 d.material = b.read(material, RgAccess::SampledRead);
                 d.depth = b.read(depth, RgAccess::SampledRead);
                 d.atlas = b.read(atlas, RgAccess::SampledRead);
+                if (vf.gtaoOn) d.gtao = b.read(gtaoTex, RgAccess::SampledRead);
+                if (vf.transmitOn) d.foliage = b.read(foliageTex, RgAccess::SampledRead);
+                if (vf.envOn) {
+                    for (u32 i = 0; i < 5; ++i) d.env[i] = b.read(envTex[i], RgAccess::SampledRead);
+                }
+                if (vf.probesOn) {
+                    for (u32 i = 0; i < 4; ++i) d.sh[i] = b.read(probeSh[i], RgAccess::SampledRead);
+                }
                 d.hdr = b.colorTarget(0, hdr); // keeps the sky where the shader discards
             },
             [self, frameData](const DeferredData& d, RgPassContext& ctx) {
@@ -999,17 +1465,8 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
     }
 
     // Volumetric clouds over the empty pixels: trace (half res) -> resolve with the history -> composite.
-    const bool cloudsOn = clouds.ready() && clouds.desc().enabled && HasFlag(vp.flags, ViewportFlags::Sky) &&
-                          vf.constants.atmosphere1.y > 0.5f;
     if (cloudsOn) {
         const u32 cw = std::max(1u, (vp.width + 1) / 2), ch = std::max(1u, (vp.height + 1) / 2);
-        ensureCloudTargets(*this, vp, cw, ch);
-        // History from a frame that was not the previous one (viewport hidden, camera cut) is not trusted.
-        if (vp.cloudLastFrame + 1 != frame) vp.cloudHistoryValid = false;
-        clouds.fill(vf.clouds, time, frame, vp.cloudHistoryValid ? 0.12f : 1.0f);
-        vf.clouds.prevViewProj = vp.cloudPrevViewProj;
-        vf.cloudCb = vp.cloudCb.Get();
-
         const u32 write = vp.cloudWrite ^ 1;
         vp.cloudWrite = write;
         const RgTexture historyPrev = g.importTexture(vp.cloudHistory[write ^ 1].Get(), nvrhi::ResourceStates::ShaderResource,
@@ -1278,6 +1735,8 @@ void Renderer::Impl::buildViewportGraph(Viewport& vp) {
     vp.debug.physicalTextures = st.physicalTextures;
     vp.debug.transientTextures = st.transientTextures;
     vp.debug.barriers = st.barrierTransitions;
+    vp.debug.gpu.clear();
+    for (const RgPassTiming& t : g.gpuTimings()) vp.debug.gpu.push_back({t.name, t.ms});
     vp.debug.passes.clear();
     for (const RgPassInfo& p : g.passInfos()) vp.debug.passes.push_back({p.name, p.culled, p.group});
 

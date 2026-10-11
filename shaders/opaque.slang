@@ -200,6 +200,8 @@ GBufferOut shade(VSOut i, bool frontFace, bool masked)
     float3 mr = sampleTexture(m.metalRoughTex, i.uv).rgb;
     float ao = m.occlusionTex == m.metalRoughTex ? mr.r : sampleTexture(m.occlusionTex, i.uv).r;
     ao = lerp(1.0, ao, m.occlusionStrength);
+    // Foliage has no normal map, so the bitangent sign of its vertices carries a baked occlusion (1 = outside of the crown, dark inside).
+    if (foliage && (m.flags & kMaterialNormalMap) == 0) ao *= 0.3 + 0.7 * saturate(i.worldTangent.w * 0.5 + 0.5);
 
     GBufferOut o;
     o.albedo = float4(baseTexel.rgb * m.baseColor.rgb * i.color.rgb, 1.0);

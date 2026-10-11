@@ -210,6 +210,13 @@ struct RenderGraphConfig {
     u32 minPassesPerGroup = 4;    // below this a graph is recorded as ONE group (no job overhead)
     bool debugMarkers = true;     // one PIX/RenderDoc marker per pass
     u32 poolRetireFrames = 4;     // free pooled resources unused this many frames
+    bool gpuTimers = false;       // timestamp query around every live pass (results arrive a few frames later)
+};
+
+// GPU time of one pass, from a frame that finished a few frames ago (RenderGraphConfig::gpuTimers).
+struct RgPassTiming {
+    const char* name;
+    float ms;
 };
 
 // Per-pass info for the render graph debugger panel (valid after compile()).
@@ -293,6 +300,9 @@ public:
 
     // Debugger introspection (valid after compile()).
     std::span<const RgPassInfo> passInfos() const;
+    // Per pass of the most recent frame whose timers could be read; empty without RenderGraphConfig::gpuTimers.
+    std::span<const RgPassTiming> gpuTimings() const;
+    void setGpuTimers(bool on);
     const RgStats& stats() const;
     u64 frameIndex() const;
 

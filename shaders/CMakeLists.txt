@@ -28,7 +28,9 @@ set(_common_headers
     "${CMAKE_CURRENT_SOURCE_DIR}/common/clouds_march.slangh"
     "${CMAKE_CURRENT_SOURCE_DIR}/common/water.slangh"
     "${CMAKE_CURRENT_SOURCE_DIR}/common/noise.slangh"
-    "${CMAKE_CURRENT_SOURCE_DIR}/common/post.slangh")
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/post.slangh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/lighting.slangh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/probe.slangh")
 
 set(FOH_SHADER_OUTPUTS "")
 
@@ -69,6 +71,8 @@ if(FOH_SLANGC)
     foh_shader(shadow.slang vsShadow vertex)
     foh_shader(shadow.slang vsShadowMasked vertex)
     foh_shader(shadow.slang psShadowMasked fragment)
+    foh_shader(shadow.slang vsShadowTransmit vertex)
+    foh_shader(shadow.slang psShadowTransmit fragment)
     foh_shader(opaque.slang vsOpaque vertex)
     foh_shader(opaque.slang psOpaque fragment)
     foh_shader(opaque.slang psOpaqueMasked fragment)
@@ -76,6 +80,12 @@ if(FOH_SLANGC)
     foh_shader(opaque.slang psPickMasked fragment)
     foh_shader(skin.slang csSkin compute)
     foh_shader(deferred.slang psDeferred fragment)
+    # Indirect light and small-scale shadowing: GTAO, the sky environment (IBL), light probes.
+    foh_shader(gtao.slang psGtao fragment)
+    foh_shader(gtao.slang psGtaoBlur fragment)
+    foh_shader(env.slang psEnvDown fragment)
+    foh_shader(probe_light.slang psProbeLight fragment)
+    foh_shader(probe_sh.slang csProbeSh compute)
     foh_shader(sky.slang psSky fragment)
     # Precomputed atmosphere (Bruneton): LUT generation (on demand) and the cache dump.
     foreach(_entry csTransmittance csDirectIrradiance csIndirectIrradiance csSingleScattering csScatteringDensity csMultipleScattering)
@@ -96,6 +106,7 @@ if(FOH_SLANGC)
         foh_shader(water_sim.slang ${_entry} compute)
     endforeach()
     foh_shader(sky_probe.slang psSkyProbe fragment)
+    foh_shader(sky_probe.slang psSkyEnv fragment)
     foh_shader(water.slang vsWaterRing vertex)
     foh_shader(water.slang vsWaterCenter vertex)
     foh_shader(water.slang psWater fragment)

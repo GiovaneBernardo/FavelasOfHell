@@ -67,6 +67,11 @@ public:
     nvrhi::ITexture* displacement() const { return m_disp; }
     nvrhi::ITexture* slope() const { return m_slope[m_current]; }
     nvrhi::ITexture* bed() const { return m_bed; }
+    // The ground height field the terrain feeds (WaterBedDesc): CPU lookups for the light probes and the GPU mapping
+    // (xy = origin, zw = 1 / size). `groundAt` clamps to the edge of the field.
+    bool hasBed() const { return !m_bedData.empty(); }
+    f32 groundAt(f32 x, f32 z) const;
+    Vec4 bedMapping() const { return Vec4(m_bedOrigin.x, m_bedOrigin.y, 1.0f / m_bedSize.x, 1.0f / m_bedSize.y); }
     nvrhi::ISampler* waveSampler() const { return m_waveSampler; }
     nvrhi::IBuffer* ringIndices() const { return m_ringIb; }
     nvrhi::IBuffer* centerIndices() const { return m_centerIb; }
