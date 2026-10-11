@@ -22,6 +22,8 @@
 #include "foh/input.h"
 #include "foh/renderer/components.h"
 #include "foh/scene/prefab_request.h"
+#include "foh/scene/game_asset_request.h"
+#include "foh/game_asset.h"
 #include "foh/rhi/pipeline_cache.h"
 #include "foh/rhi/render_graph.h"
 #include "foh/png.h"
@@ -265,6 +267,8 @@ void Editor::initAssets() {
     actions.placeModel = [this](const std::string& rel) { placeAssetByPath(rel, 0, 0, false); };
     actions.openWorkshop = [this] { m_showWorkshop = true; };
     actions.editPrefab = [this](const std::string& rel) { openPrefabEditor(rel); };
+    actions.openForge = [this](const std::string& rel) { openForge(rel); };
+    actions.spawnGameAsset = [this](const std::string& rel) { spawnGameAsset(rel, 0, 0, false); };
     actions.useAsModel = [this](const std::string& rel, bool player) { useAsModel(rel, player); };
     m_browser.init(*m_assets, m_thumbs, m_prefs, m_assetLog, std::move(actions));
 
@@ -306,6 +310,37 @@ void Editor::initAssets() {
     prefabHost.place = [this](const std::string& rel) { placeAssetByPath(rel, 0, 0, false); };
     prefabHost.refreshBrowser = [this] { m_browser.refresh(); };
     m_prefabEditor.init(*m_assets, m_picker, *m_jobs, std::move(prefabHost));
+
+    AssetForgeHost forgeHost;
+    forgeHost.show = [this](const PrefabAsset& p) { showPrefabPreview(p); };
+    forgeHost.frame = [this](Vec3 c, float r) { framePreview(c, r); };
+    forgeHost.setPreviewVisible = [this](bool v) { m_viewports[m_previewViewport].open = v; };
+    forgeHost.previewWalk = [this](float speed) {
+        m_previewWalkSpeed = speed;
+        World& world = m_scenes[m_previewScene].app->world();
+        if (!m_previewRoot.isNull() && world.isAlive(m_previewRoot))
+            if (LocomotionControl* control = world.get<LocomotionControl>(m_previewRoot)) {
+                control->velocity = Vec3(0.0f, 0.0f, speed);
+                control->facing = speed > 0.0f ? Vec3(0.0f, 0.0f, 1.0f) : Vec3(0.0f);
+            }
+    };
+    forgeHost.refreshBrowser = [this] {
+        m_browser.refresh();
+        m_gameAssets.refresh();
+    };
+    forgeHost.spawn = [this](const std::string& rel) { spawnGameAsset(rel, 0, 0, false); };
+    forgeHost.selectForSpawnKey = [this](const std::string& rel) { setSpawnKeyVehicle(rel); };
+    forgeHost.importFile = [this](const fs::path& file) { return importFile(file, 0, 0, false, false); };
+    forgeHost.useAsPlayer = [this](const std::string& rel) { useAsModel(rel, true); };
+    forgeHost.log = [this](const std::string& message) { logAsset(message); };
+    m_forge.init(*m_assets, m_picker, *m_jobs, std::move(forgeHost));
+
+    GameAssetsHost gameHost;
+    gameHost.assetRoot = m_assets->sourceRoot();
+    gameHost.spawn = [this](const std::string& rel) { spawnGameAsset(rel, 0, 0, false); };
+    gameHost.edit = [this](const std::string& rel) { openForge(rel); };
+    gameHost.selectForSpawnKey = [this](const std::string& rel) { setSpawnKeyVehicle(rel); };
+    m_gameAssets.init(std::move(gameHost));
 }
 
 void Editor::openPrefabEditor(const std::string& relPath) {
@@ -317,6 +352,64 @@ void Editor::openPrefabEditor(const std::string& relPath) {
     ImGui::SetWindowFocus("Prefab Editor");
 }
 
+void Editor::openForge(const std::string& relPath) {
+    m_showForge = true;
+    if (!m_forge.open(relPath)) {
+        logAsset("Asset Forge: " + m_forge.lastError());
+        return;
+    }
+    m_focusPreviewAt = static_cast<int>(m_frameCount) + 4; // the view the Forge draws its handles on: its tab comes to the front once it exists
+    ImGui::SetWindowFocus("Asset Forge");
+}
+
+void Editor::setSpawnKeyVehicle(const std::string& relPath) {
+    if (SpawnSelection* s = m_scenes[0].app->world().resource<SpawnSelection>()) {
+        std::memset(s->vehicle, 0, sizeof(s->vehicle));
+        std::memcpy(s->vehicle, relPath.c_str(), std::min(relPath.size(), sizeof(s->vehicle) - 1));
+    }
+    m_gameAssets.setSpawnKeyVehicle(relPath);
+    logAsset("The B key now spawns '" + relPath + "' (click the Game view to play).");
+}
+
+void Editor::spawnGameAsset(const std::string& relPath, float x, float y, bool hasPosition) {
+    World& world = m_scenes[0].app->world();
+    if (relPath.size() >= sizeof(GameAssetRequest::path)) {
+        logAsset("Cannot spawn '" + relPath + "': the path is too long.");
+        return;
+    }
+    // In front of the Game camera: the one the player looks through.
+    Vec3 cameraPosition = m_viewports[0].camera.position;
+    Vec3 forward = m_viewports[0].camera.rotation() * Vec3(0, 0, -1);
+    {
+        const ComponentId with[] = {world.component<Camera>()};
+        std::vector<Entity> cameras;
+        findEntities(world, with, {}, cameras);
+        for (const Entity e : cameras) {
+            const Name* n = world.get<Name>(e);
+            const GlobalTransform* g = world.get<GlobalTransform>(e);
+            if (!g || (n && std::strcmp(n->text, "Player Camera") != 0 && cameras.size() > 1)) continue;
+            cameraPosition = g->position();
+            forward = -glm::normalize(g->axisZ());
+            break;
+        }
+    }
+    forward.y = 0.0f;
+    forward = glm::length(forward) > 1e-3f ? glm::normalize(forward) : Vec3(0, 0, -1);
+    Transform t;
+    if (hasPosition) {
+        size_t sceneIndex = 0;
+        t = dropPlacement(x, y, hasPosition, sceneIndex);
+    } else {
+        t.position = cameraPosition + forward * 9.0f;
+    }
+    const WorldSurface* surface = world.resource<WorldSurface>();
+    t.position.y = (surface && surface->terrain ? surface->groundHeight(t.position.x, t.position.z) : 0.0f) + 0.3f;
+    t.rotation = glm::angleAxis(std::atan2(forward.x, forward.z), Vec3(0.0f, 1.0f, 0.0f)); // the asset's +Z along the view
+    const std::string name = PathToUtf8(PathFromUtf8(relPath).stem());
+    world.spawn(t, Name::Make(name), MakeGameAssetRequest(relPath));
+    logAsset("Spawned '" + relPath + "'.");
+}
+
 void Editor::showPrefabPreview(const PrefabAsset& prefab) {
     World& world = m_scenes[m_previewScene].app->world();
     if (!m_previewRoot.isNull() && world.isAlive(m_previewRoot)) world.despawn(m_previewRoot); // children go with it
@@ -324,7 +417,11 @@ void Editor::showPrefabPreview(const PrefabAsset& prefab) {
     m_previewRoot = inst.root;
     assignLocomotionClips(world, inst.root);
     // The stage is small: a character walks in place there (the blend still follows its velocity).
-    if (LocomotionControl* control = world.get<LocomotionControl>(inst.root)) control->kinematic = false;
+    if (LocomotionControl* control = world.get<LocomotionControl>(inst.root)) {
+        control->kinematic = false;
+        control->velocity = Vec3(0.0f, 0.0f, m_previewWalkSpeed);
+        if (m_previewWalkSpeed > 0.0f) control->facing = Vec3(0.0f, 0.0f, 1.0f);
+    }
     for (const PrefabNode& node : prefab.nodes) {
         if (node.mesh.isValid()) m_assetBridge->loader().request(node.mesh);
         for (const AssetId& material : node.materials)
@@ -344,6 +441,10 @@ void Editor::framePreview(Vec3 center, float radius) {
 }
 
 void Editor::placeAssetByPath(const std::string& relPath, float x, float y, bool hasPosition) {
+    if (GameAssetKindFromPath(relPath) != GameAssetKind::None) {
+        spawnGameAsset(relPath, x, y, hasPosition);
+        return;
+    }
     if (PathFromUtf8(relPath).extension() == ".fvariant") {
         const AssetId variant = m_assets->findAuthored(relPath);
         if (!variant.isValid()) {
@@ -570,7 +671,8 @@ void Editor::applyAutoplay(GameInput& input) const {
         else if (name == "MOUSEY") input.state.mouseDeltaY = amount;
         else {
             const Key key = name == "W" ? Key::W : name == "A" ? Key::A : name == "S" ? Key::S : name == "D" ? Key::D : name == "C" ? Key::C
-                            : name == "V" ? Key::V : name == "SPACE" ? Key::Space : name == "SHIFT" ? Key::LShift : Key::Unknown;
+                            : name == "V" ? Key::V : name == "SPACE" ? Key::Space : name == "SHIFT" ? Key::LShift : name == "F" ? Key::F
+                            : name == "B" ? Key::B : name == "R" ? Key::R : Key::Unknown;
             if (key == Key::Unknown) continue;
             input.state.keys[static_cast<size_t>(key)] = true;
             if (frame == from) input.state.keysPressed[static_cast<size_t>(key)] = true;
@@ -674,6 +776,7 @@ void Editor::applyMaterialToSelection(const std::string& relPath) {
 }
 
 void Editor::handleImportResult(const ImportResult& result) {
+    m_forge.importFinished(result);
     // A material waits for every one of its textures; it is authored when the last one lands.
     for (size_t i = 0; i < m_pendingMaterials.size();) {
         PendingMaterial& pm = m_pendingMaterials[i];
@@ -929,6 +1032,7 @@ void Editor::shutdown() {
     m_workshop.shutdown();
     m_assetInspector.flush();
     m_prefabEditor.shutdown();
+    m_forge.shutdown();
     m_thumbs.shutdown();
     m_gameBuilder.reset();
     m_shaderBuilder.reset();
@@ -987,6 +1091,12 @@ int Editor::run() {
                        haveInitial ? &initial : nullptr);
         }
         if (rendered == 5 && !m_options.prefabEdit.empty()) openPrefabEditor(m_options.prefabEdit);
+        if (rendered == 5 && !m_options.forge.empty()) openForge(m_options.forge);
+        if (rendered >= 20 && rendered < 900 && !m_options.forgeQa.empty() && m_forge.isOpen() && m_forge.runSelfTest(m_options.forgeQa)) m_options.forgeQa.clear();
+        if (rendered == 25 && !m_options.spawnVehicle.empty()) {
+            if (GameAssetKindFromPath(m_options.spawnVehicle) == GameAssetKind::Vehicle) setSpawnKeyVehicle(m_options.spawnVehicle);
+            spawnGameAsset(m_options.spawnVehicle, 0, 0, false);
+        }
         if (rendered >= 30 && rendered < 200 && m_options.prefabQa && m_prefabEditor.isOpen() && m_prefabEditor.runSelfTest(1.8f)) m_options.prefabQa = false;
         if (rendered == 5 && !m_options.inspect.empty()) m_assetInspector.inspectPath(m_options.inspect);
         if (rendered == 8 && !m_options.inspect.empty()) ImGui::SetWindowFocus("Asset Inspector"); // QA: show it
@@ -1042,6 +1152,7 @@ bool Editor::frame(float dt) {
     m_theme.update(*m_window);
     m_workshop.update();
     m_prefabEditor.update();
+    m_forge.update();
     m_thumbs.beginFrame();
     m_platform.newFrame(dt);
     ImGui::NewFrame();
@@ -1227,6 +1338,8 @@ void Editor::drawMenuBar() {
         ImGui::MenuItem("Content Browser", nullptr, &m_showAssets);
         ImGui::MenuItem("Asset Inspector", nullptr, &m_showAssetInspector);
         ImGui::MenuItem("Prefab Editor", nullptr, &m_showPrefabEditor);
+        ImGui::MenuItem("Asset Forge", nullptr, &m_showForge);
+        ImGui::MenuItem("Game Assets", nullptr, &m_showGameAssets);
         ImGui::MenuItem("Assets Workshop", nullptr, &m_showWorkshop);
         ImGui::MenuItem("Terrain", nullptr, &m_showTerrain);
         ImGui::MenuItem("Roads", nullptr, &m_showRoads);
@@ -1272,6 +1385,7 @@ void Editor::buildDockLayout(unsigned int dockspaceId) {
     ImGui::DockBuilderDockWindow("Content Browser", bottomLeft);
     ImGui::DockBuilderDockWindow("Render Graph", bottomRight);
     ImGui::DockBuilderDockWindow("Stats", bottomRight);
+    ImGui::DockBuilderDockWindow("Game Assets", bottomRight);
     ImGui::DockBuilderDockWindow("Atmosphere", sideBottom);
     ImGui::DockBuilderFinish(dockspaceId);
 }
@@ -1284,6 +1398,10 @@ void Editor::buildUi(float dt) {
         m_dockLayoutBuilt = true;
     }
 
+    if (m_focusPreviewAt >= 0 && static_cast<int>(m_frameCount) >= m_focusPreviewAt) {
+        m_focusPreviewAt = -1;
+        ImGui::SetWindowFocus(m_viewports[m_previewViewport].title.c_str());
+    }
     if (!m_options.playerModel.empty() && m_frameCount == 10) useAsModel(m_options.playerModel, true);
     if (!m_options.preview.empty()) previewStep();
     if (!m_options.autoplay.empty() && m_frameCount == 5) ImGui::SetWindowFocus("Game"); // QA: show the game view
@@ -1302,8 +1420,11 @@ void Editor::buildUi(float dt) {
         }
         if (m_showAssetInspector) m_assetInspector.draw(&m_showAssetInspector);
         if (m_showPrefabEditor) m_prefabEditor.draw(&m_showPrefabEditor);
-        if (m_prefabEditorWasShown && !m_showPrefabEditor) m_viewports[m_previewViewport].open = false;
-        m_prefabEditorWasShown = m_showPrefabEditor;
+        if (m_showForge) m_forge.draw(&m_showForge);
+        if (m_showGameAssets) m_gameAssets.draw(&m_showGameAssets);
+        const bool previewWanted = m_showPrefabEditor || m_showForge; // both tools use the Prefab Preview view
+        if (m_prefabEditorWasShown && !previewWanted) m_viewports[m_previewViewport].open = false;
+        m_prefabEditorWasShown = previewWanted;
     }
     if (m_showWorkshop) m_workshop.draw(&m_showWorkshop, m_theme.scale());
     if (m_showTerrain) {
@@ -1405,6 +1526,7 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
                     m_renderer->requestPick(p.id, static_cast<u32>(std::clamp(fx, 0.0f, 0.999f) * static_cast<float>(m_renderer->viewportWidth(p.id))),
                                             static_cast<u32>(std::clamp(fy, 0.0f, 0.999f) * static_cast<float>(m_renderer->viewportHeight(p.id))));
                 } else if (type.category == FileCategory::Model || type.category == FileCategory::Prefab) placeAssetByPath(rel, mouse.x, mouse.y, true);
+                else if (type.category == FileCategory::GameAsset) spawnGameAsset(rel, mouse.x, mouse.y, true);
                 else logAsset("'" + rel + "' cannot be placed in a scene (only models can).");
             }
             ImGui::EndDragDropTarget();
@@ -1439,13 +1561,16 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
                 }
                 if (p.capturing) ImGui::SetNextFrameWantCaptureKeyboard(true);
                 ImGui::SetCursorScreenPos(ImVec2(origin.x + 8, origin.y + avail.y - 24.0f * m_theme.scale()));
-                ImGui::TextColored(ImVec4(1, 1, 1, 0.75f), p.capturing ? "Playing: WASD move, Shift run, Space jump, C crouch, V camera, Esc release"
+                ImGui::TextColored(ImVec4(1, 1, 1, 0.75f), p.capturing ? "Playing: WASD move, Shift run, Space jump, C crouch, V camera, F get in / out of a vehicle, B spawn a vehicle, Esc release"
                                                                        : "Click to play");
             }
         }
 
         const int panelIndex = static_cast<int>(&p - m_viewports.data());
         if (p.useEditorCamera) drawGizmo(p, origin, avail, panelIndex);
+        // The Asset Forge draws its handles (wheels, collider, skeleton...) over the Prefab Preview view.
+        const bool forgeOverlay = m_showForge && static_cast<size_t>(panelIndex) == m_previewViewport;
+        if (forgeOverlay) m_forge.drawOverlay(p.camera.world(), p.camera.fovY, p.camera.nearZ, p.camera.farZ, origin, avail, hovered);
         // The terrain brush owns the left mouse while it is active over the main world; otherwise a click selects.
         bool terrainTool = false;
         if (p.useEditorCamera && p.sceneIndex == 0 && m_showRoads && m_roadTool.editing() && m_roadTool.created()) {
@@ -1455,6 +1580,7 @@ void Editor::drawViewport(ViewportPanel& p, float dt) {
             terrainTool = m_terrainPanel.handleViewport(p.camera.world(), p.camera.fovY, origin, avail, hovered, p.capturing,
                                                         ImGuizmo::IsOver() || ImGuizmo::IsUsing(), dt);
         }
+        if (forgeOverlay && (ImGuizmo::IsOver() || ImGuizmo::IsUsing())) terrainTool = true; // the Forge owns the click
         if (!terrainTool) handlePicking(p, origin, avail, hovered);
 
         // Overlay controls (top-left of the image), on a translucent backdrop so they stay readable on a bright sky.

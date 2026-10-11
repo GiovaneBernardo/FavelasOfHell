@@ -31,6 +31,8 @@
 #include "imgui_renderer.h"
 #include "inspector.h"
 #include "prefab_editor.h"
+#include "asset_forge.h"
+#include "game_assets_panel.h"
 #include "theme.h"
 #include "thumbnails.h"
 #include "workshop/workshop.h"
@@ -62,6 +64,9 @@ struct EditorOptions {
     std::string prefabEdit;    // --prefab-edit <model>: opens the prefab editor on an imported model (QA)
     bool prefabQa = false;     // --prefab-qa: with --prefab-edit, fits/rotates/saves/places the model like a user would (QA)
     std::string inspect;       // --inspect <path>: shows a file in the asset inspector (QA)
+    std::string forge;         // --forge <path>: opens the Asset Forge on a model or a .fvehicle / .fprop / .fchar (QA)
+    std::string forgeQa;       // --forge-qa vehicle|character|prop: with --forge, does the setup like a user would and saves it (QA)
+    std::string spawnVehicle;  // --spawn <path>: spawns a game asset (.fvehicle / .fprop / .fchar) in front of the player at startup (QA)
     std::string playerModel;   // --player-model <path>: gives the game's player this model at startup (QA)
     std::string preview;       // --preview "clip name@0,0.5,1": the player shows that clip at those times, one screenshot each (QA)
     std::string shots;         // --shots "90,100,110": saves <screenshot stem>_<frame>.png at those frames (QA)
@@ -162,6 +167,11 @@ private:
     void createWaterScene();
     static ViewportFlags FlagsOf(const ViewportPanel& p);
     void openPrefabEditor(const std::string& relPath);
+    // The Asset Forge: makes a vehicle, character or prop out of a model.
+    void openForge(const std::string& relPath);
+    // Puts a game asset (.fvehicle / .fprop / .fchar) into the main world: where it was dropped, else in front of the Game camera.
+    void spawnGameAsset(const std::string& relPath, float x, float y, bool hasPosition);
+    void setSpawnKeyVehicle(const std::string& relPath);
     // Prefab editor: replaces what the preview scene shows with `prefab`.
     void showPrefabPreview(const PrefabAsset& prefab);
     void framePreview(Vec3 center, float radius);
@@ -226,6 +236,12 @@ private:
     AssetPicker m_picker;
     AssetInspector m_assetInspector;
     PrefabEditor m_prefabEditor;
+    AssetForge m_forge;
+    GameAssetsPanel m_gameAssets;
+    bool m_showForge = false;
+    bool m_showGameAssets = false;
+    int m_focusPreviewAt = -1; // frame at which the Prefab Preview tab is brought to the front (-1: none)
+    float m_previewWalkSpeed = 0.0f; // the character in the preview walks in place at this speed (the Forge judges a rig with it)
     bool m_showAssetInspector = true;
     bool m_showPrefabEditor = false;
     bool m_prefabEditorWasShown = false;

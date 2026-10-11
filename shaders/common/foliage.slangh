@@ -18,9 +18,22 @@ float3 leafGlowColor(float3 albedo, float translucency)
 // leaves that a card cannot paint; the shadow filter turns the pattern into partial shade with the odd sun fleck.
 // The pattern lives in the LEAF TEXTURE (blocks of 1/80 of the atlas, a few centimetres on a card), not in shadow-map
 // texels: the cascades follow the camera, so a screen-fixed pattern crawls over the leaves and flickers while moving.
+float foliageHash(float2 c)
+{
+    return frac(52.9829189 * frac(dot(c, float2(0.06711056, 0.00583715))));
+}
+
+float foliageNoise(float2 p)
+{
+    float2 i = floor(p), f = frac(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return lerp(lerp(foliageHash(i), foliageHash(i + float2(1, 0)), f.x),
+                lerp(foliageHash(i + float2(0, 1)), foliageHash(i + float2(1, 1)), f.x), f.y);
+}
+
+// Smooth blobs, not a grid of square holes: on a sidewalk a cell grid shows up as a regular polka-dot pattern.
 bool foliageGap(float2 uv)
 {
-    float2 cell = floor(uv * 80.0);
-    float n = frac(52.9829189 * frac(dot(cell, float2(0.06711056, 0.00583715))));
-    return n < 0.26;
+    float n = 0.65 * foliageNoise(uv * 22.0) + 0.35 * foliageNoise(uv * 57.0 + 7.3);
+    return n < 0.34;
 }

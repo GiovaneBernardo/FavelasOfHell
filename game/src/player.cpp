@@ -8,6 +8,7 @@
 #include "foh/scene/prefab_request.h"
 #include "foh/world/city.h"
 #include "foh/world/surface.h"
+#include "vehicle.h"
 
 namespace foh::game {
 
@@ -90,7 +91,7 @@ void PlayerLookSystem(Res<GameInput> input, ResMut<PlayerLook> look, Query<const
 // ---- movement ------------------------------------------------------------------------------------
 
 void PlayerMoveSystem(Res<Time> time, Res<GameInput> input, Res<PlayerLook> look, ResMut<PlayerView> view, Res<WorldSurface> surface, Local<std::vector<Box>> boxes,
-                      Query<Entity, Transform&, Player&, LocomotionControl&> players,
+                      Query<Entity, Transform&, Player&, LocomotionControl&, Without<InVehicle>> players,
                       Query<const LocomotionState&, With<Player>> animationState,
                       Query<const GlobalTransform&, const StaticBox&> solids) {
     const f32 dt = std::min(time->delta, kMaxDt);
@@ -260,16 +261,18 @@ void PlayerMoveSystem(Res<Time> time, Res<GameInput> input, Res<PlayerLook> look
 // ---- camera --------------------------------------------------------------------------------------
 
 void PlayerCameraSystem(Res<Time> time, Res<PlayerLook> look, ResMut<PlayerView> view, Res<WorldSurface> surface, Commands commands,
-                        Query<Entity, With<SlotModelPart>, Without<Hidden>> shownParts,
-                        Query<Entity, With<SlotModelPart>, With<Hidden>> hiddenParts,
+                        Query<Entity, const SlotModelPart&, Without<Hidden>> shownParts,
+                        Query<Entity, const SlotModelPart&, With<Hidden>> hiddenParts,
                         Query<Transform&, Camera&, const PlayerCamera&> cameras) {
     if (!view->valid) return;
     const f32 dt = std::min(time->delta, kMaxDt);
     const Quat rotation = glm::angleAxis(look->yaw, Vec3(0, 1, 0)) * glm::angleAxis(look->pitch, Vec3(1, 0, 0));
 
-    // First person hides the player's own body (the animation keeps running; the renderer just skips it).
-    if (look->firstPerson != view->hidden) {
-        view->hidden = look->firstPerson;
+    // First person hides the player's own body (the animation keeps running; the renderer just skips it); so does driving
+    // (there is no seated pose yet).
+    const bool hideBody = look->firstPerson || view->inVehicle;
+    if (hideBody != view->hidden) {
+        view->hidden = hideBody;
         if (view->entity != 0) {
             if (view->hidden) commands.entity(Entity{view->entity}).insert(Hidden{});
             else commands.entity(Entity{view->entity}).remove<Hidden>();
@@ -278,8 +281,9 @@ void PlayerCameraSystem(Res<Time> time, Res<PlayerLook> look, ResMut<PlayerView>
 
     // The parts of the model (static meshes of an unrigged model, skinned meshes) follow the same rule; checked every
     // frame so a model swapped while in first person comes up hidden too.
-    if (look->firstPerson) shownParts.each([&](Entity e) { commands.entity(e).insert(Hidden{}); });
-    else hiddenParts.each([&](Entity e) { commands.entity(e).remove<Hidden>(); });
+    const Entity self{view->entity};
+    if (hideBody) shownParts.each([&](Entity e, const SlotModelPart& part) { if (part.owner == self) commands.entity(e).insert(Hidden{}); });
+    else hiddenParts.each([&](Entity e, const SlotModelPart& part) { if (part.owner == self) commands.entity(e).remove<Hidden>(); });
 
     cameras.each([&](Transform& t, Camera& camera, const PlayerCamera& settings) {
         const f32 crouch = view->crouch01;

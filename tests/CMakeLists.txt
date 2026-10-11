@@ -24,7 +24,11 @@ add_executable(foh_tests
     test_city.cpp
     test_roads.cpp
     test_terrain.cpp
-    test_transform_propagation.cpp)
+    test_transform_propagation.cpp
+    test_game_assets.cpp
+    test_vehicle.cpp
+    # The vehicle dynamics are game code; the tests build them directly (they have no ECS dependency).
+    ${CMAKE_SOURCE_DIR}/game/src/vehicle_dynamics.cpp)
 # nvrhi: the render graph tests include the RHI tier (NVRHI types) directly.
 target_link_libraries(foh_tests PRIVATE foh::engine doctest::doctest nvrhi third_party::bc7decomp)
 set_target_properties(foh_tests PROPERTIES FOLDER "tests")
@@ -50,7 +54,7 @@ foh_target_defaults(foh_test_module)
 foh_configure_hot_reload_module(foh_test_module)
 
 add_dependencies(foh_tests foh_test_module)
-target_include_directories(foh_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_include_directories(foh_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_SOURCE_DIR}/game/src")
 target_compile_definitions(foh_tests PRIVATE FOH_TEST_MODULE_PATH="$<TARGET_FILE:foh_test_module>")
 
 add_test(NAME foh_tests COMMAND foh_tests)

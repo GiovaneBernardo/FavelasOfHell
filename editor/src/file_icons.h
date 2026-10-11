@@ -10,7 +10,7 @@
 
 namespace foh {
 
-enum class FileCategory : unsigned char { Folder, Model, Image, Material, Prefab, Audio, Script, Shader, Scene, Text, Archive, Other };
+enum class FileCategory : unsigned char { Folder, Model, Image, Material, Prefab, Audio, Script, Shader, Scene, Text, Archive, GameAsset, Other };
 
 struct FileTypeInfo {
     FileCategory category = FileCategory::Other;

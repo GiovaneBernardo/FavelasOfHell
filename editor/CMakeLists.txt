@@ -9,6 +9,7 @@ find_path(FOH_STB_INCLUDE_DIR stb_image.h REQUIRED)
 find_package(CURL CONFIG REQUIRED)
 find_package(miniz CONFIG REQUIRED)
 add_executable(foh_editor
+    src/asset_forge.cpp
     src/atmosphere_panel.cpp
     src/asset_inspector.cpp
     src/asset_picker.cpp
@@ -16,6 +17,10 @@ add_executable(foh_editor
     src/editor.cpp
     src/editor_prefs.cpp
     src/file_icons.cpp
+    src/forge_character.cpp
+    src/forge_prop.cpp
+    src/forge_vehicle.cpp
+    src/game_assets_panel.cpp
     src/imgui_platform.cpp
     src/imgui_renderer.cpp
     src/inspector.cpp

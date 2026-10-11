@@ -35,6 +35,10 @@ struct ContentBrowserActions {
     std::function<void()> openWorkshop;
     // Opens the prefab editor on a model or a prefab variant (path relative to the asset root).
     std::function<void(const std::string& relPath)> editPrefab;
+    // Opens the Asset Forge on a model (to make it a vehicle, prop or character) or on a .fvehicle / .fprop / .fchar.
+    std::function<void(const std::string& relPath)> openForge;
+    // Spawns the game asset (.fvehicle / .fprop / .fchar) in front of the Game camera.
+    std::function<void(const std::string& relPath)> spawnGameAsset;
     // Makes a model the one shown by the selected entity (PrefabSlot), or by the game's player (player = true).
     std::function<void(const std::string& relPath, bool player)> useAsModel;
 };

@@ -82,7 +82,8 @@ struct PlayerView {
     u64 entity = 0;      // Entity::id of the player
     bool valid = false;
     bool pivotValid = false;
-    bool hidden = false; // the player's body is hidden (first person)
+    bool hidden = false; // the player's body is hidden (first person, or driving)
+    bool inVehicle = false; // the player is driving: the vehicle camera takes over
 };
 
 void RegisterPlayer(App& app);
@@ -95,4 +96,4 @@ FOH_REFLECT(foh::game::Player, walkSpeed, runSpeed, crouchSpeed, jumpSpeed, grav
 FOH_REFLECT(foh::game::PlayerCamera, distance, shoulder, sensitivity, fovThirdPerson, fovFirstPerson, followRate);
 FOH_REFLECT(foh::game::StaticBox, flags);
 FOH_REFLECT(foh::game::PlayerLook, yaw, pitch, firstPerson);
-FOH_REFLECT(foh::game::PlayerView, position, pivot, crouch01, entity, valid, pivotValid, hidden);
+FOH_REFLECT(foh::game::PlayerView, position, pivot, crouch01, entity, valid, pivotValid, hidden, inVehicle);

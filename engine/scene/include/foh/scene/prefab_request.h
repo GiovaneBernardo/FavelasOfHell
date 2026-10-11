@@ -57,6 +57,7 @@ inline PrefabSlot MakePrefabSlot(std::string_view sourcePath) {
 // Tag on every entity a PrefabSlot created (nodes, skinned meshes): what a swap removes, and what first person hides.
 struct SlotModelPart {
     u32 flags = 0;
+    Entity owner{}; // the entity whose PrefabSlot created this part (first person hides only the player's own parts)
 };
 
 // Resource: where requests are resolved. Holds a pointer into host-owned memory (like RenderSceneLink).
@@ -72,4 +73,4 @@ FOH_API void RegisterPrefabRequests(App& app);
 
 FOH_REFLECT(foh::PrefabRequest, sourcePath, prefab);
 FOH_REFLECT(foh::PrefabSlot, sourcePath, applied);
-FOH_REFLECT(foh::SlotModelPart, flags);
+FOH_REFLECT(foh::SlotModelPart, flags, owner);

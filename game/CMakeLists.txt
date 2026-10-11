@@ -2,7 +2,9 @@
 # It links the shared engine DLL, so it never carries its own copy of engine state.
 add_library(foh_game MODULE
     src/game_module.cpp
-    src/player.cpp)
+    src/player.cpp
+    src/vehicle.cpp
+    src/vehicle_dynamics.cpp)
 
 target_link_libraries(foh_game PRIVATE foh::engine)
 # The module (and its PDB) is built into bin/modules/, NOT next to the executables.

@@ -28,6 +28,7 @@ constexpr ImU32 kScript = IM_COL32(232, 208, 72, 255);
 constexpr ImU32 kShader = IM_COL32(72, 200, 210, 255);
 constexpr ImU32 kText = IM_COL32(150, 158, 170, 255);
 constexpr ImU32 kArchive = IM_COL32(200, 150, 90, 255);
+constexpr ImU32 kGame = IM_COL32(255, 196, 64, 255);
 
 constexpr Row kRows[] = {
     {"gltf", FileCategory::Model, "glTF Model", kModel, true, false, true},
@@ -47,6 +48,9 @@ constexpr Row kRows[] = {
     {"fvariant", FileCategory::Prefab, "Prefab Variant", kPrefab, false, false, false},
     {"fprefab", FileCategory::Prefab, "Prefab", kPrefab, false, false, false},
     {"fscene", FileCategory::Scene, "Scene", kPrefab, false, false, false},
+    {"fvehicle", FileCategory::GameAsset, "Vehicle", kGame, false, false, false},
+    {"fprop", FileCategory::GameAsset, "Prop", kGame, false, false, false},
+    {"fchar", FileCategory::GameAsset, "Character", kGame, false, false, false},
     {"wav", FileCategory::Audio, "WAV Audio", kAudio, false, false, false},
     {"ogg", FileCategory::Audio, "OGG Audio", kAudio, false, false, false},
     {"mp3", FileCategory::Audio, "MP3 Audio", kAudio, false, false, false},

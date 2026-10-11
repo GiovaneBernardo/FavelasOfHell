@@ -7,6 +7,7 @@
 #include "foh/renderer/components.h"
 #include "foh/scene/prefab_request.h"
 #include "player.h"
+#include "vehicle.h"
 
 // Placeholder game content that exercises the engine end to end: a small test
 // "block" scene with a playable character (player.h: WASD, Space, C, V) and a
@@ -129,6 +130,7 @@ public:
         app.addSystem(Stage::Update, &HelloSystem).name("HelloSystem");
         app.addSystem(Stage::Update, &SpinSystem).name("SpinSystem");
         RegisterPlayer(app);
+        RegisterVehicles(app); // after the player: the driving camera overrides the player camera
     }
 };
 

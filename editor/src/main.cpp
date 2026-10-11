@@ -12,6 +12,9 @@
 //   --import file    import a model/texture at startup and place it, exactly like dropping it on the window
 //   --prefab-edit m  open the prefab editor on an imported model (path relative to assets/)
 //   --inspect p      show a file in the asset inspector (path relative to assets/)
+//   --forge p        open the Asset Forge on a model or a .fvehicle / .fprop / .fchar (path relative to assets/)
+//   --forge-qa k     with --forge: set the asset up like a user would (k = vehicle, character or prop) and save it
+//   --spawn p        spawn a game asset (.fvehicle / .fprop / .fchar) in front of the player at startup
 //   --window WxH     window size for smoke runs (default 1600x900)
 //   --terrain-sculpt  with --terrain: scripted brush strokes where the camera looks, from frame 60 (QA)
 //   --roads-test      with --terrain: lays and carves a few roads along Leblon beach (QA)
@@ -44,6 +47,12 @@ int main(int argc, char** argv) {
             options.prefabQa = true;
         } else if (!std::strcmp(argv[i], "--inspect") && i + 1 < argc) {
             options.inspect = argv[++i];
+        } else if (!std::strcmp(argv[i], "--forge") && i + 1 < argc) {
+            options.forge = argv[++i];
+        } else if (!std::strcmp(argv[i], "--forge-qa") && i + 1 < argc) {
+            options.forgeQa = argv[++i];
+        } else if (!std::strcmp(argv[i], "--spawn") && i + 1 < argc) {
+            options.spawnVehicle = argv[++i];
         } else if (!std::strcmp(argv[i], "--window") && i + 1 < argc) {
             unsigned w = 0, h = 0;
             if (std::sscanf(argv[++i], "%ux%u", &w, &h) == 2 && w >= 640 && h >= 360) {

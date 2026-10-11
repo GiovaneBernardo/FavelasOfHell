@@ -102,6 +102,13 @@ void AssetSceneBridge::assignLocomotionClips(World& world, Entity root) {
     pick(clips->crouchWalkRightClip, {"crouched sneaking right", "crouch strafe right", "crouched walking right", "crouch right"});
 }
 
+bool AssetSceneBridge::readAssetText(const std::string& relPath, std::string& out) const {
+    std::vector<u8> bytes;
+    if (!ReadFileBytes(m_db.sourceRoot() / PathFromUtf8(relPath), bytes)) return false;
+    out.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    return true;
+}
+
 void AssetSceneBridge::assetsChanged(std::span<const AssetId> changed) {
     for (const AssetId& id : changed) m_loader.assetChanged(id);
 }

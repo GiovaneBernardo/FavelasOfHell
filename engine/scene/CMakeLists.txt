@@ -5,6 +5,7 @@ foh_add_engine_module(scene
     SOURCES
         src/asset_loader.cpp
         src/asset_scene_bridge.cpp
+        src/game_asset_request.cpp
         src/prefab_instance.cpp
         src/prefab_request.cpp
     PUBLIC_DEPS foh::core foh::ecs foh::assets foh::renderer foh::animation)

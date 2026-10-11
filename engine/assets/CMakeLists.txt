@@ -8,6 +8,8 @@ foh_add_engine_module(assets
         src/asset_types.cpp
         src/asset_db.cpp
         src/animation_assets.cpp
+        src/game_asset.cpp
+        src/humanoid_rig.cpp
         src/import/animation_cook.cpp
         src/import/cook.cpp
         src/import/fbx_importer.cpp

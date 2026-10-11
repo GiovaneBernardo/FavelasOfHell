@@ -1,0 +1,80 @@
+foh-game-asset 1
+type vehicle
+name placeholder_sedan
+model vehicles/placeholder_sedan/placeholder_sedan.gltf
+mass 1276.4745
+centerOfMass 0 0.48902902 0.0876
+colliderCenter 0 0.7941603 -0.029999971
+colliderHalf 0.90258 0.64416033 2.19
+dragCoefficient 0.32
+frontalArea 2.1195092
+downforce 0
+frontFrequency 1.6
+rearFrequency 1.7
+dampingRatio 0.6
+travelUp 0.13132823
+travelDown 0.14774425
+antiRoll 0.35
+frontGrip 1.1
+rearGrip 1.15
+rollingResistance 0.012
+tractionControl 0.6
+maxTorque 306.35388
+idleRpm 900
+peakRpm 4200
+redlineRpm 6500
+gears 3.55 2.2 1.5 1.12 0.9 0.74
+reverseGear 3.4
+finalDrive 3.7
+drivelineEfficiency 0.88
+brakeTorque 2552.949
+brakeFrontBias 0.62
+handbrakeTorque 3191.1863
+maxSteerDegrees 34
+highSpeedSteer 0.3
+steerSpeed 3.2
+driverSeat 0.40524 0.7191603 0.21900001
+exitOffset 1.821 0 0
+cameraDistance 6.3510003
+cameraHeight 1.9883206
+cameraFov 1
+
+[wheel]
+name Front Left
+node Tire_FL|Rim_FL
+position 0.805 0.32832056 1.3499999
+radius 0.32832053
+width 0.232
+steered 1
+driven 0
+handbrake 0
+
+[wheel]
+name Front Right
+node Tire_FR|Rim_FR
+position -0.805 0.32832056 1.3499999
+radius 0.32832053
+width 0.232
+steered 1
+driven 0
+handbrake 0
+
+[wheel]
+name Rear Left
+node Tire_RL|Rim_RL
+position 0.805 0.32832056 -1.3499999
+radius 0.32832056
+width 0.232
+steered 0
+driven 1
+handbrake 1
+
+[wheel]
+name Rear Right
+node Tire_RR|Rim_RR
+position -0.805 0.32832056 -1.3499999
+radius 0.32832056
+width 0.232
+steered 0
+driven 1
+handbrake 1

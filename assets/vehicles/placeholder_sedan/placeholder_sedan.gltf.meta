@@ -1,0 +1,39 @@
+foh-meta 1
+guid b767e796be92075d3aef2961a8a8eb88
+format gltf
+importer 3
+content cc0bd894f592701f
+stamp 1e78c160868ec07c
+setting generatePrefab 1
+setting generateMips 1
+setting compressTextures 1
+setting maxTextureSize 0
+setting textureRole auto
+setting clipLoop auto
+setting clipRootMotion auto
+setting clipRootJoint auto
+setting clipRotationToleranceDeg 0.05
+setting clipTranslationTolerance 0.0005
+setting animationOnly 0
+setting clipSegments 
+sub	material	e3b23b80ec697423958e37878ff07138	live	-	Paint	Paint
+sub	material	e3f12ec4f0e2b2ef3c94d67645f924d5	live	-	Glass	Glass
+sub	material	82dd0b6d57ede0cd1f0f111ec9220559	live	-	Tire	Tire
+sub	material	09b89ceb9d3bf805ed10317d628a34b8	live	-	Headlight	Headlight
+sub	material	3b121d05daac568888a0aead630a66b3	live	-	Plastic	Plastic
+sub	material	5441bde9209a97a6c218d3c407323437	live	-	Taillight	Taillight
+sub	material	177655b4249f8192851c505c6e17febb	live	-	Rim	Rim
+sub	mesh	6b3cab43dd1f167f7573e850d6af9b47	live	-	Body	Body
+sub	mesh	7ba12d33cc8090170a7ea21ff4f99a89	live	-	Cabin	Cabin
+sub	mesh	589f266eca3163d989ca5b0dff3370af	live	-	Bumpers	Bumpers
+sub	mesh	906582a05f0706072e3a05dddf822c32	live	-	Headlights	Headlights
+sub	mesh	7bb4c1da80d8612a511d2209cc4bcc49	live	-	Taillights	Taillights
+sub	mesh	9a9936fb842205a3318c9147ff2adc22	live	-	Tire_FL	Tire_FL
+sub	mesh	64a6b7dd9279c6c9ed8b1f1db82bcf36	live	-	Rim_FL	Rim_FL
+sub	mesh	0a0b905ef2378a7bdb942d0cb80f61dc	live	-	Tire_FR	Tire_FR
+sub	mesh	53cdd468105002ebdd767173bfc28234	live	-	Rim_FR	Rim_FR
+sub	mesh	93cb405d6718e43262ca7462ca40ee9b	live	-	Tire_RL	Tire_RL
+sub	mesh	a1374257c839de331a08f42bb0e71866	live	-	Rim_RL	Rim_RL
+sub	mesh	35a43fddab1aee21a442455181693bf0	live	-	Tire_RR	Tire_RR
+sub	mesh	3ede416d74c7af460f16ad33a21fdf66	live	-	Rim_RR	Rim_RR
+sub	prefab	9111e01aab1ee298a2e26cf14a6d119d	live	09b89ceb9d3bf805ed10317d628a34b8,0a0b905ef2378a7bdb942d0cb80f61dc,177655b4249f8192851c505c6e17febb,35a43fddab1aee21a442455181693bf0,3b121d05daac568888a0aead630a66b3,3ede416d74c7af460f16ad33a21fdf66,53cdd468105002ebdd767173bfc28234,5441bde9209a97a6c218d3c407323437,589f266eca3163d989ca5b0dff3370af,64a6b7dd9279c6c9ed8b1f1db82bcf36,6b3cab43dd1f167f7573e850d6af9b47,7ba12d33cc8090170a7ea21ff4f99a89,7bb4c1da80d8612a511d2209cc4bcc49,82dd0b6d57ede0cd1f0f111ec9220559,906582a05f0706072e3a05dddf822c32,93cb405d6718e43262ca7462ca40ee9b,9a9936fb842205a3318c9147ff2adc22,a1374257c839de331a08f42bb0e71866,e3b23b80ec697423958e37878ff07138,e3f12ec4f0e2b2ef3c94d67645f924d5	prefab	placeholder_sedan

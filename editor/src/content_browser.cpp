@@ -446,7 +446,7 @@ void ContentBrowser::drawToolbar(float scale) {
     if (ImGui::BeginPopup("##filters")) {
         static const struct { FileCategory cat; const char* name; } kCats[] = {
             {FileCategory::Model, "Models"}, {FileCategory::Image, "Textures / images"}, {FileCategory::Material, "Materials"},
-            {FileCategory::Prefab, "Prefabs"}, {FileCategory::Scene, "Scenes"}, {FileCategory::Audio, "Audio"},
+            {FileCategory::Prefab, "Prefabs"}, {FileCategory::GameAsset, "Game assets"}, {FileCategory::Scene, "Scenes"}, {FileCategory::Audio, "Audio"},
             {FileCategory::Shader, "Shaders"}, {FileCategory::Script, "Source"}, {FileCategory::Text, "Text"},
             {FileCategory::Archive, "Archives"}, {FileCategory::Other, "Other"}};
         ImGui::SeparatorText("Show");
@@ -925,6 +925,8 @@ void ContentBrowser::open(const Entry& e) {
     }
     if (e.type.category == FileCategory::Material) {
         if (m_actions.applyMaterial) m_actions.applyMaterial(e.rel);
+    } else if (e.type.category == FileCategory::GameAsset) {
+        if (m_actions.openForge) m_actions.openForge(e.rel);
     } else if (e.type.modelPreview || e.type.category == FileCategory::Model || e.type.category == FileCategory::Prefab) {
         if (m_actions.placeModel) m_actions.placeModel(e.rel);
         refresh();
@@ -955,12 +957,16 @@ void ContentBrowser::entryContextMenu(const Entry& e) {
     } else if (e.type.category == FileCategory::Prefab) {
         if (ImGui::MenuItem("Place in scene") && m_actions.placeModel) m_actions.placeModel(e.rel);
         if (ImGui::MenuItem("Edit prefab...") && m_actions.editPrefab) m_actions.editPrefab(e.rel);
+    } else if (e.type.category == FileCategory::GameAsset) {
+        if (ImGui::MenuItem("Spawn in game") && m_actions.spawnGameAsset) m_actions.spawnGameAsset(e.rel);
+        if (ImGui::MenuItem("Edit in Asset Forge...") && m_actions.openForge) m_actions.openForge(e.rel);
     } else if (e.type.category == FileCategory::Model) {
         if (ImGui::MenuItem("Place in scene")) {
             if (m_actions.placeModel) m_actions.placeModel(e.rel);
             refresh();
         }
         if (ImGui::MenuItem("Edit prefab...") && m_actions.editPrefab) m_actions.editPrefab(e.rel);
+        if (ImGui::MenuItem("Make game asset (Asset Forge)...") && m_actions.openForge) m_actions.openForge(e.rel);
         ImGui::Separator();
         if (ImGui::MenuItem("Use as player model") && m_actions.useAsModel) m_actions.useAsModel(e.rel, true);
         if (ImGui::MenuItem("Use as model of selected entity") && m_actions.useAsModel) m_actions.useAsModel(e.rel, false);

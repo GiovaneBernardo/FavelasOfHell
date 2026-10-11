@@ -324,7 +324,7 @@ struct RenderSettings {
 
     // Sun light that gets through the first layer of leaves above a surface (a shaded forest floor is green and
     // dappled, not black). 0 = off; scales the light, which is tinted by the leaf colour.
-    f32 canopyTransmission = 0.6f;
+    f32 canopyTransmission = 0.3f;
 
     // Sky image-based lighting: the sky and clouds around the camera are reflected by every surface, rough ones blurrier.
     bool ibl = true;

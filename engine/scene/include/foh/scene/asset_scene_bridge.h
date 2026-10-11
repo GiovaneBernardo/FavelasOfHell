@@ -40,6 +40,9 @@ public:
     // downloads ("walking", "left strafe walking", "crouch idle", ...), and requests them. Missing ones stay empty.
     void assignLocomotionClips(World& world, Entity root);
 
+    // Reads a text file of the asset root (a game asset definition: .fvehicle, .fprop, .fchar). False when it is missing.
+    bool readAssetText(const std::string& relPath, std::string& out) const;
+
     // Once per frame, before the worlds update: hands loaded data to the renderer.
     void pump() { m_loader.pump(); }
 

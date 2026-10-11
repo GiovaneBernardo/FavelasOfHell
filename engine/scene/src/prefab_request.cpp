@@ -8,6 +8,7 @@
 #include "foh/log.h"
 #include "foh/renderer/components.h"
 #include "foh/scene/asset_scene_bridge.h"
+#include "foh/scene/game_asset_request.h"
 
 namespace foh {
 
@@ -76,7 +77,7 @@ void resolvePrefabSlots(World& world, Res<SceneBridgeLink> link, Query<Entity, c
             continue;
         }
         for (const Entity part : instance.entities)
-            if (part != e) world.insert(part, SlotModelPart{});
+            if (part != e) world.insert(part, SlotModelPart{0, e});
         if (PrefabSlot* again = world.get<PrefabSlot>(e)) std::memcpy(again->applied, path.c_str(), std::min(path.size() + 1, sizeof(again->applied)));
     }
 }
@@ -90,6 +91,7 @@ void RegisterPrefabRequests(App& app) {
     app.insertResource(SceneBridgeLink{});
     app.addSystem(Stage::PreUpdate, &resolvePrefabRequests).name("resolvePrefabRequests");
     app.addSystem(Stage::PreUpdate, &resolvePrefabSlots).name("resolvePrefabSlots");
+    RegisterGameAssets(app);
 }
 
 } // namespace foh
