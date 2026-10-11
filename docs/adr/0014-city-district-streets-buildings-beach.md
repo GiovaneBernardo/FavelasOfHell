@@ -100,6 +100,37 @@ Collision: `WorldSurface::city` gives the player `City::pushOutOfBuildings` (a c
 - Real street names are kept (they are geography); shops, brands and people are invented (the shop signs are blank colour
   bands). OSM data is ODbL: attribution is in `world/ATTRIBUTION.md` and must appear in the game's credits.
 
+## Revision 2026-10-11: streets first, then the ground and the buildings adapt
+
+The first version draped every street on whatever the terrain was and levelled the ground per building. Reviewing it in the game
+showed the cost: streets dived into canals, rode bumps, ran beside crater-like cuts, and buildings stood in the carriageway.
+The order is now reversed (`tools/district_roads.py`, called from `build_district.py`):
+
+1. **Cross sections fit the buildings.** Each street's asphalt and sidewalks are narrowed to what the real footprints leave it
+   (measured on a 1 m raster, left and right separately); footprints still overlapping asphalt are pushed out of it or dropped.
+2. **Bridges.** A street that crosses sea, lagoon or canal is cut at the water and the middle piece gets `kEdgeBridge`. The engine
+   builds a deck on its own straight grade between the two ends of the edge, with sidewalks, parapets and a slab under it;
+   footways and cycle paths on bridges get a parapet and underside too. The ground under a bridge is left alone.
+3. **Designed profile.** Every street gets a smoothed height profile from the baked ground (water crossings interpolated over),
+   shared at junctions and kept within 4 m of the ground it was designed over.
+4. **Stamped into the ground.** The profile is written into the patch, level across the street, blended back to the natural
+   ground over a distance that grows with the slope of the hill, so the terrain adapts to the street. The engine drapes the
+   asphalt on this ground and no longer has bumps to follow.
+5. **Buildings follow the street.** A building's ground floor is the street level in front of it (if that is within 4 m of the
+   ground under it; otherwise it stands against the slope). The ground is levelled around it by at most 3.5 m and never inside
+   a street's corridor.
+
+Other changes in this revision: "plain or hill" is decided from the erosion of the heightmap (low ground and gentle slope), which
+removed a 100 m deep crater on Cantagalo (a bug in how heights above 90 m were treated); paving is kept off steep ground; the
+Jardim de Alah canal has a flat 1.4 m bed, concrete walls and a paved quay (`RoadClass::Canal`, edges written by the build
+script); cycle paths are smoothed (Chaikin), stop at the kerb and cross the asphalt as flush red paint; streets get a gutter strip,
+manholes and storm drains; the paving, asphalt (patches, seams, cracks, oil) and sidewalk (limestone setts) textures are richer;
+three parked-car models in Rio's fleet colours along kerbs with room for them, hydrants, round signs, street-name plates at
+junction corners, ad panels and newsstands at bus stops.
+
+Known limits of this revision: the cars, signs and panels are low-poly procedural stand-ins; no traffic; the beach avenue and
+the promenade are still one flat design (no median, no trees in the cycle path); the Copernicus bias on the hills remains.
+
 ## Not done / known limits
 
 - No interiors, no enterable buildings, no balcony geometry (balconies are in the facade texture and its normal map).

@@ -118,3 +118,20 @@ def parse_height(tags):
         except ValueError:
             pass
     return None
+
+
+def resample(pts, step):
+    out = [pts[0]]
+    carry = 0.0
+    for a, b in zip(pts[:-1], pts[1:]):
+        seg = math.hypot(b[0] - a[0], b[1] - a[1])
+        d = step - carry
+        while d <= seg and seg > 1e-6:
+            f = d / seg
+            out.append((a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f))
+            d += step
+        carry = seg - (d - step)
+    if math.hypot(out[-1][0] - pts[-1][0], out[-1][1] - pts[-1][1]) > step * 0.3:
+        out.append(pts[-1])
+    return out
+

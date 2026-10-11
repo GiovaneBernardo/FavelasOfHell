@@ -11,6 +11,11 @@ namespace foh::city {
 
 namespace {
 
+Vec3 Hue(f32 h) { // saturated advertising colours
+    static const Vec3 k[7] = {Vec3(0.85f, 0.12f, 0.10f), Vec3(0.95f, 0.75f, 0.10f), Vec3(0.10f, 0.35f, 0.80f), Vec3(0.10f, 0.65f, 0.60f), Vec3(0.95f, 0.45f, 0.10f), Vec3(0.80f, 0.20f, 0.55f), Vec3(0.92f, 0.92f, 0.90f)};
+    return k[u32(h * 7.0f) % 7u];
+}
+
 u32 Tint(f32 r, f32 g, f32 b) {
     auto q = [](f32 v) { return u32(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
     return q(r) | (q(g) << 8) | (q(b) << 16) | 0xFF000000u;
@@ -124,11 +129,27 @@ void Points(Ctx& c) {
             c.put(Prop::TrafficPole, kMetal, pos, YawForX(toward));
             c.put(Prop::TrafficHead, kGlassDark, pos, YawForX(toward));
             break;
-        case PointKind::BusStop:
+        case PointKind::BusStop: {
             if (!street) break;
             c.put(Prop::ShelterFrame, kMetal, pos, YawForZ(toward));
             c.put(Prop::ShelterRoof, kPaintWhite, pos, YawForZ(toward));
+            const f32 h1 = noise::Rand01(i32(pi), 41, c.settings.seed), h2 = noise::Rand01(i32(pi), 42, c.settings.seed);
+            const Vec2 along(-toward.y, toward.x);
+            if (h1 < 0.8f) { // an ad panel beside the shelter, facing the street
+                const Vec2 q = p.p + along * 2.4f;
+                const Vec3 col = Hue(h2);
+                c.put(Prop::AdPanel, kMetal, Vec3(q.x, c.ground(q) + kSidewalkTop, q.y), YawForZ(toward));
+                c.put(Prop::AdFace, kPaintWhite, Vec3(q.x, c.ground(q) + kSidewalkTop, q.y), YawForZ(toward), 1.0f, Tint(col.r, col.g, col.b));
+            }
+            if (h1 > 0.78f) { // a newsstand
+                const Vec2 q = p.p - along * 4.0f - toward * 0.8f;
+                static const Vec3 kCol[3] = {Vec3(0.20f, 0.45f, 0.30f), Vec3(0.75f, 0.30f, 0.20f), Vec3(0.25f, 0.40f, 0.65f)};
+                const Vec3 col = kCol[u32(h2 * 3.0f) % 3u];
+                c.put(Prop::KioskBody, kPaintWhite, Vec3(q.x, c.ground(q) + kSidewalkTop, q.y), YawForZ(toward), 0.8f, Tint(col.r, col.g, col.b));
+                c.put(Prop::KioskRoof, kPaintRed, Vec3(q.x, c.ground(q) + kSidewalkTop, q.y), YawForZ(toward), 0.8f);
+            }
             break;
+        }
         case PointKind::Bench:
             c.put(Prop::Bench, kWood, pos, YawForZ(street ? toward : Vec2(0, 1)));
             break;
@@ -168,6 +189,34 @@ void AlongStreets(Ctx& c) {
                 const f32 yaw = YawForX(-right * f32(side));
                 c.put(Prop::LampPole, kMetal, pos3, yaw);
                 c.put(Prop::LampHead, kLampHead, pos3, yaw);
+            }
+        }
+        // Hydrants, round signs and the odd ad panel on the sidewalk side, deterministic by street.
+        if (road && std::max(e.sidewalkL, e.sidewalkR) >= 1.5f && !(e.flags & kEdgeBridge)) {
+            int k = 0;
+            for (f32 s = g.tA + 10.0f + f32(ei % 11); s < g.length - g.tB - 10.0f; s += 38.0f, ++k) {
+                const f32 h = noise::Rand01(i32(ei), k, seed + 301);
+                Vec2 pos, dir;
+                c.at(e, g, s, pos, dir);
+                const int side = (noise::Rand01(i32(ei), k, seed + 302) < 0.5f) ? 1 : -1;
+                const f32 w = side > 0 ? e.sidewalkR : e.sidewalkL;
+                if (w < 1.5f) continue;
+                const Vec2 right = RightOf(dir);
+                const Vec2 p = pos + right * (f32(side) * (hw + 0.45f));
+                if (!c.mine(p)) continue;
+                const Vec3 pos3(p.x, c.ground(p) + kSidewalkTop, p.y);
+                if (h < 0.30f) {
+                    c.put(Prop::Hydrant, kPaintRed, pos3, 0.0f);
+                } else if (h < 0.55f) { // a round sign facing the traffic of that side
+                    const Vec2 face = side > 0 ? -dir : dir;
+                    c.put(Prop::SignPost, kMetal, pos3, 0.0f);
+                    c.put(Prop::SignDiscRed, kPaintRed, pos3, YawForZ(face));
+                    c.put(Prop::SignDiscBlue, kPaintBlue, pos3, YawForZ(face));
+                } else if (h < 0.63f && u8(e.cls) <= u8(RoadClass::Tertiary)) { // an ad panel facing the street
+                    const Vec3 col = Hue(noise::Rand01(i32(ei), k, seed + 303));
+                    c.put(Prop::AdPanel, kMetal, pos3, YawForZ(-right * f32(side)));
+                    c.put(Prop::AdFace, kPaintWhite, pos3, YawForZ(-right * f32(side)), 1.0f, Tint(col.r, col.g, col.b));
+                }
             }
         }
         // Overhead cables: concrete poles every ~36 m along one side of the quieter streets, three wires between them.
@@ -251,6 +300,110 @@ void AlongStreets(Ctx& c) {
     }
 }
 
+// Parked cars along the kerb of streets with room for a parked row, in Rio's fleet colours (a few yellow taxis).
+void ParkedCars(Ctx& c) {
+    const CityData& d = *c.index.data;
+    const auto it = c.index.edgesByChunk.find(ChunkKey(c.cx, c.cz));
+    if (it == c.index.edgesByChunk.end()) return;
+    const u32 seed = c.settings.seed;
+    struct Paint {
+        Vec3 c;
+        f32 w;
+    };
+    static const Paint kPaint[] = {{Vec3(0.86f, 0.86f, 0.84f), 26}, {Vec3(0.60f, 0.61f, 0.63f), 20}, {Vec3(0.05f, 0.05f, 0.06f), 17}, {Vec3(0.28f, 0.29f, 0.31f), 12}, {Vec3(0.55f, 0.06f, 0.06f), 6},
+                                   {Vec3(0.09f, 0.16f, 0.42f), 6}, {Vec3(0.68f, 0.60f, 0.47f), 5}, {Vec3(0.05f, 0.22f, 0.13f), 3}, {Vec3(0.92f, 0.70f, 0.04f), 5}};
+    f32 total = 0.0f;
+    for (const Paint& p : kPaint) total += p.w;
+    const Prop bodies[3] = {Prop::CarHatchBody, Prop::CarSedanBody, Prop::CarSuvBody};
+    const Prop glasses[3] = {Prop::CarHatchGlass, Prop::CarSedanGlass, Prop::CarSuvGlass};
+    const Prop wheels[3] = {Prop::CarHatchWheels, Prop::CarSedanWheels, Prop::CarSuvWheels};
+    // Zebra crossings keep clear.
+    std::vector<Vec2> crossings;
+    {
+        const i32 x0 = ChunkOf(f32(c.cx) * kChunk - 20.0f), z0 = ChunkOf(f32(c.cz) * kChunk - 20.0f);
+        for (i32 cz = z0; cz <= c.cz + 1; ++cz)
+            for (i32 cx = x0; cx <= c.cx + 1; ++cx) {
+                const auto pit = c.index.pointsByChunk.find(ChunkKey(cx, cz));
+                if (pit == c.index.pointsByChunk.end()) continue;
+                for (const u32 pi : pit->second)
+                    if (d.points[pi].kind == PointKind::Crossing || d.points[pi].kind == PointKind::BusStop) crossings.push_back(d.points[pi].p);
+            }
+    }
+    for (const u32 ei : it->second) {
+        const CityEdge& e = d.edges[ei];
+        const EdgeGeo& g = c.index.edgeGeo[ei];
+        if (!g.valid || u8(e.cls) < u8(RoadClass::Secondary) || u8(e.cls) > u8(RoadClass::Living) || (e.flags & (kEdgeBridge | kEdgePromenade))) continue;
+        const bool oneway = (e.flags & kEdgeOneway) != 0;
+        const f32 hw = e.width * 0.5f;
+        const int lanes = std::max<int>(e.lanes, oneway ? 1 : 2);
+        const f32 room = e.width - f32(lanes) * 3.0f; // what is left of the carriageway for parked rows
+        if (room < 1.95f) continue;
+        const bool both = room >= 4.4f && !oneway;
+        for (int side = -1; side <= 1; side += 2) {
+            if (!both && side != ((ei % 2) ? 1 : -1)) continue;
+            const f32 sw = side > 0 ? e.sidewalkR : e.sidewalkL;
+            if (sw < 0.3f && u8(e.cls) < u8(RoadClass::Residential)) continue;
+            int k = 0;
+            for (f32 s = g.tA + 8.5f; s < g.length - g.tB - 8.5f; ++k) {
+                const f32 jitter = noise::Rand01(i32(ei) * 7 + side, k, seed + 211);
+                const f32 step = 5.4f + jitter * 1.2f;
+                const f32 s0 = s;
+                s += step;
+                if (noise::Rand01(i32(ei) * 3 + side, k, seed + 212) < 0.14f) continue; // an empty space
+                Vec2 pos, dir;
+                c.at(e, g, s0, pos, dir);
+                const Vec2 right = RightOf(dir);
+                const Vec2 p = pos + right * (f32(side) * (hw - 1.02f));
+                if (!c.mine(p)) continue;
+                bool blocked = false;
+                for (const Vec2& q : crossings)
+                    if (glm::length(q - p) < 7.0f) blocked = true;
+                if (blocked) continue;
+                // not on a steep street: the cars cannot pitch
+                const f32 yA = c.ground(p - dir * 2.2f), yB = c.ground(p + dir * 2.2f);
+                if (std::abs(yB - yA) > 0.30f) continue;
+                f32 pick = noise::Rand01(i32(ei) * 5 + side, k, seed + 213) * total;
+                Vec3 col = kPaint[0].c;
+                for (const Paint& pt : kPaint) {
+                    if (pick < pt.w) {
+                        col = pt.c;
+                        break;
+                    }
+                    pick -= pt.w;
+                }
+                const u32 variant = u32(noise::Rand01(i32(ei) * 11 + side, k, seed + 214) * 3.0f) % 3u;
+                const bool facing = oneway || side > 0; // right-hand traffic: the right kerb faces along the street
+                const Vec2 face = facing ? dir : -dir;
+                const f32 yaw = YawForX(face) + (noise::Rand01(i32(ei), k * 3 + side, seed + 215) - 0.5f) * 0.05f;
+                const Vec3 pos3(p.x, (yA + yB) * 0.5f + 0.05f, p.y);
+                c.put(bodies[variant], kCarPaint, pos3, yaw, 1.0f, Tint(col.r, col.g, col.b));
+                c.put(glasses[variant], kGlassDark, pos3, yaw);
+                c.put(wheels[variant], kRubber, pos3, yaw);
+            }
+        }
+    }
+}
+
+// A pole with the street-name plates at one corner of each junction.
+void JunctionSigns(Ctx& c) {
+    const auto it = c.index.junctionsByChunk.find(ChunkKey(c.cx, c.cz));
+    if (it == c.index.junctionsByChunk.end()) return;
+    for (const u32 ji : it->second) {
+        const Junction& j = c.index.junctions[ji];
+        if (j.pavedOnly || j.sidewalks.empty()) continue;
+        const std::vector<Vec2>& patch = j.sidewalks[size_t(noise::Rand01(i32(ji), 5, c.settings.seed) * f32(j.sidewalks.size())) % j.sidewalks.size()];
+        if (patch.size() < 4) continue;
+        const size_t arcN = patch.size() - 3;
+        const Vec2 corner = patch[arcN + 1], arcMid = patch[arcN / 2];
+        const Vec2 p = corner + glm::normalize(arcMid - corner) * 0.7f;
+        if (!c.mine(p)) continue;
+        const Vec3 pos3(p.x, c.ground(p) + kSidewalkTop, p.y);
+        const f32 yaw = YawForX(glm::normalize(arcMid - corner));
+        c.put(Prop::SignPost, kMetal, pos3, 0.0f);
+        c.put(Prop::SignPlate, kPaintBlue, pos3, yaw);
+    }
+}
+
 // Beach umbrellas: clusters on the sand between the promenade and the water.
 void Umbrellas(Ctx& c) {
     const CityData& d = *c.index.data;
@@ -294,6 +447,8 @@ void BuildPropChunk(const CityIndex& index, const Terrain& terrain, const CitySe
     Ctx c{index, terrain, settings, cx, cz, out};
     Points(c);
     AlongStreets(c);
+    ParkedCars(c);
+    JunctionSigns(c);
     Umbrellas(c);
 }
 

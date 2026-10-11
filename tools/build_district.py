@@ -36,6 +36,7 @@ from PIL import Image, ImageDraw
 from scipy import ndimage
 
 import district_osm as osm
+import district_roads as dr
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, ".."))
@@ -225,20 +226,7 @@ def drop_parallel_footways(edges):
     return keep
 
 
-def resample(pts, step):
-    out = [pts[0]]
-    carry = 0.0
-    for a, b in zip(pts[:-1], pts[1:]):
-        seg = math.hypot(b[0] - a[0], b[1] - a[1])
-        d = step - carry
-        while d <= seg and seg > 1e-6:
-            f = d / seg
-            out.append((a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f))
-            d += step
-        carry = seg - (d - step)
-    if math.hypot(out[-1][0] - pts[-1][0], out[-1][1] - pts[-1][1]) > step * 0.3:
-        out.append(pts[-1])
-    return out
+resample = osm.resample
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -435,21 +423,32 @@ def build_ground(grid, dem_h, areas, edges, buildings, nodes, preview_dir):
     # Copernicus is a surface model: the plain of Leblon / Ipanema reads 10-15 m because of the buildings (real street level is
     # 2-5 m). A large erosion (62 m window) finds the ground between the blocks; the remaining bias is removed on the plain and
     # fades out on the hills, where the heightmap is kept as it is.
-    ero = ndimage.minimum_filter(np.where(land & (dem_h > 0.5), dem_h, 99.0).astype(np.float32), size=41)
-    e_s = ndimage.gaussian_filter(ero, 12.0)
-    no_dem = e_s > 90.0  # land by the coastline but sea in the heightmap (the Arpoador rock): raised from the shore
-    # Plain or hill? The slope of the heavily smoothed surface: a plain is flat whatever stands on it, a hill is not.
+    valid = land & (dem_h > 0.5)
+    ero = ndimage.minimum_filter(np.where(valid, dem_h, 1e4).astype(np.float32), size=41)
+    # Where the window found no ground (the beach reads <= 0.5 m in the heightmap) the nearest ground stands in, so the erosion is
+    # defined everywhere and its slope means something along the shore too.
+    ok = ero < 5000.0
+    d_ok, (iy, ix) = ndimage.distance_transform_edt(~ok, return_indices=True)
+    ero_f = ero[iy, ix]
+    e_s = ndimage.gaussian_filter(ero_f, 12.0)
+    no_dem = (d_ok * grid.cell > 40.0) & land  # land by the coastline but sea in the heightmap (the Arpoador rock): raised from the shore
+    # Plain or hill? The slope of the ground the 120 m erosion finds (the surface model's bias steps at the shore and at the lagoon
+    # would read as a hill otherwise), and low land near the shore is plain whatever its surroundings do.
     land_f = land.astype(np.float32)
-    big = ndimage.gaussian_filter(np.where(land, dem_h, 0.0).astype(np.float32), 30.0) / np.maximum(ndimage.gaussian_filter(land_f, 30.0), 1e-3)
-    gz_, gx_ = np.gradient(big, grid.cell)
-    slope_s = np.hypot(gx_, gz_)
-    plain = np.where(land, 1.0 - smoothstep(0.035, 0.11, slope_s), 1.0)
+    ero_big = ndimage.minimum_filter(np.where(valid, dem_h, 1e4).astype(np.float32), size=61)
+    ero_big = np.where(ero_big < 5000.0, ero_big, ero_f)
+    low = ndimage.gaussian_filter(ero_big, 14.0)
+    gzl, gxl = np.gradient(low, grid.cell)
+    plain = (1.0 - smoothstep(0.05, 0.12, np.hypot(gxl, gzl))) * (1.0 - smoothstep(18.0, 30.0, low))  # a flat hilltop is not the plain
+    coast_s = np.where(sea, 0.0, dist_coast)
+    plain = np.maximum(plain, (1.0 - smoothstep(30.0, 60.0, low)) * (1.0 - smoothstep(120.0, 220.0, coast_s)))
+    plain = np.where(land, plain, 1.0)
     plain = np.where(no_dem, 1.0, plain)
     # The ground on the plain from the erosion (smooth); on the hills the surface model smoothed over ~16 m with the building
     # bias fading out as the ground rises. The two agree where one hands over to the other, so there is no cliff at the foot.
     dsm = ndimage.gaussian_filter(np.where(land, dem_h, 0.0).astype(np.float32), 8.0) / np.maximum(ndimage.gaussian_filter(land_f, 8.0), 1e-3)
     ground_plain = e_s - 9.5 * (1.0 - smoothstep(14.0, 50.0, e_s))
-    ground_hill = dsm - 9.5 * (1.0 - smoothstep(10.0, 50.0, dsm))
+    ground_hill = dsm  # no bias removed on the hills: the forest around them has it too, so the built-up slope joins it without a step
     ground = plain * ground_plain + (1.0 - plain) * ground_hill
     city_h = np.where(no_dem, np.clip(3.0 + 0.12 * np.maximum(s, 0.0), 3.0, 18.0), np.maximum(ground, 2.6))
     city_h = ndimage.gaussian_filter(city_h.astype(np.float32), 4.0)
@@ -463,7 +462,8 @@ def build_ground(grid, dem_h, areas, edges, buildings, nodes, preview_dir):
 
     # ---- the beach: a berm that rises from the water line, flattening into the promenade ----
     berm = 3.15 * (1.0 - np.exp(-np.maximum(s, 0.0) / 17.0))
-    land_h = city_h + (np.minimum(city_h, berm) - city_h) * plain_s
+    berm_cap = berm + 200.0 * smoothstep(100.0, 250.0, np.maximum(s, 0.0))  # the cap is the shore strip's: inland the ground is its own
+    land_h = city_h + (np.minimum(city_h, berm_cap) - city_h) * plain_s
     # Sea: gentle bed with real Ipanema's slope (about -5 m 120 m out), merging into the heightmap's bed further out.
     bed = -16.0 * (1.0 - np.exp(-np.maximum(-s, 0.0) / 190.0))
     sea_blend = smoothstep(300.0, 700.0, -s)
@@ -474,9 +474,8 @@ def build_ground(grid, dem_h, areas, edges, buildings, nodes, preview_dir):
     H = np.where(lagoon, -3.5 * (1.0 - np.exp(-dist_lagoon_in / 14.0)) - 0.15, H)
     quay = 1.5 * smoothstep(0.0, 5.0, dist_lagoon_land)  # the land climbs from the water line to its level in 5 m
     H = np.where(land & (dist_lagoon_land < 5.0), np.minimum(H, 0.35 + quay), H)
-    # Canals: a trench with steep banks.
-    dist_canal = ndimage.distance_transform_edt(~canal) * grid.cell
-    H = np.where(canal, -2.6, np.where(dist_canal < 2.0, np.minimum(H, 0.2 + 1.8 * smoothstep(0.0, 2.0, dist_canal)), H))
+    # Canals: a flat concrete bed 1.4 m under the water (the walls are geometry the engine builds along the canal edges).
+    H = np.where(canal, -1.4, H)
 
     # ---- weight: where the patch replaces the heightmap ----
     W = flat.astype(np.float32)
@@ -487,116 +486,6 @@ def build_ground(grid, dem_h, areas, edges, buildings, nodes, preview_dir):
 
     return {"H": H.astype(np.float32), "W": W.astype(np.float32), "sea": sea, "lagoon": lagoon, "canal": canal, "land": land, "beach_poly": beach_poly,
             "s": s, "flat": flat, "dem": dem_h, "city_h": city_h, "coast": coast_line}
-
-
-def pads_and_roads(grid, G, buildings, edges, nodes, preview_dir):
-    """Levels the ground under hillside buildings and along hillside roads (writes into G['H'], G['W'])."""
-    H, W, dem = G["H"], G["W"], G["dem"]
-    nx, nz = grid.nx, grid.nz
-    num = np.zeros_like(H)
-    den = np.zeros_like(H)
-    padw = np.zeros_like(H)
-
-    def sample_at(arr, x, z):
-        i = int(np.clip((x - grid.x0) / grid.cell, 0, nx - 1))
-        j = int(np.clip((z - grid.z0) / grid.cell, 0, nz - 1))
-        return float(arr[j, i])
-
-    # ---- roads on hills: a grade-limited profile, level across ----
-    stamped = 0
-    best_d = np.full(H.shape, 1e9, np.float32)
-    road_h = np.zeros_like(H)
-    for e in edges:
-        if e["cls"] > 6 and e["cls"] != 7:
-            continue
-        samples = resample(e["pts"], 2.0)
-        if len(samples) < 2:
-            continue
-        hs = np.array([sample_at(H, p[0], p[1]) for p in samples], np.float32)
-        hs = ndimage.uniform_filter1d(hs, 13, mode="nearest")
-        hs = ndimage.uniform_filter1d(hs, 13, mode="nearest")
-        grade = 0.16 * 2.0
-        for i in range(1, len(hs)):
-            hs[i] = np.clip(hs[i], hs[i - 1] - grade, hs[i - 1] + grade)
-        for i in range(len(hs) - 2, -1, -1):
-            hs[i] = np.clip(hs[i], hs[i + 1] - grade, hs[i + 1] + grade)
-        core = e["width"] * 0.5 + max(e["sw"]) + 0.8
-        reach = core + 5.0
-        r_cells = int(math.ceil(reach / grid.cell)) + 1
-        for p, h in zip(samples, hs):
-            ci = int((p[0] - grid.x0) / grid.cell)
-            cj = int((p[1] - grid.z0) / grid.cell)
-            i0, i1 = max(0, ci - r_cells), min(nx, ci + r_cells + 1)
-            j0, j1 = max(0, cj - r_cells), min(nz, cj + r_cells + 1)
-            if i0 >= i1 or j0 >= j1:
-                continue
-            xx = grid.x0 + (np.arange(i0, i1) + 0.5) * grid.cell - p[0]
-            zz = grid.z0 + (np.arange(j0, j1) + 0.5) * grid.cell - p[1]
-            dd = np.sqrt(zz[:, None] ** 2 + xx[None, :] ** 2)
-            sub = best_d[j0:j1, i0:i1]
-            m = (dd < sub) & (dd < reach)
-            sub[m] = dd[m]
-            road_h[j0:j1, i0:i1][m] = h
-            stamped += 1
-    if stamped:
-        # full weight over the core, then a fade over 5 m (the distance array keeps no per road core: 4.8 m covers asphalt and sidewalks)
-        core_d = 4.8
-        wr = np.where(best_d < 1e8, 1.0 - smoothstep(core_d, core_d + 5.0, best_d), 0.0)
-        num += road_h * wr
-        den += wr
-        padw = np.maximum(padw, wr)
-
-    # ---- buildings ----
-    pads = 0
-    W0 = W.copy()
-    land_f = G["land"].astype(np.float32)
-    dem_s = ndimage.gaussian_filter(np.where(G["land"], dem, 0.0), 4.0) / np.maximum(ndimage.gaussian_filter(land_f, 4.0), 1e-3)
-    for b in buildings:
-        outer = b["rings"][0]
-        xs_ = [p[0] for p in outer]
-        zs_ = [p[1] for p in outer]
-        pad = 2.0
-        i0 = max(0, int((min(xs_) - pad - 6.0 - grid.x0) / grid.cell))
-        i1 = min(nx, int((max(xs_) + pad + 6.0 - grid.x0) / grid.cell) + 2)
-        j0 = max(0, int((min(zs_) - pad - 6.0 - grid.z0) / grid.cell))
-        j1 = min(nz, int((max(zs_) + pad + 6.0 - grid.z0) / grid.cell) + 2)
-        if i0 >= i1 or j0 >= j1:
-            b["baseZ"] = 0.0
-            continue
-        sub = Image.new("L", (i1 - i0, j1 - j0), 0)
-        d = ImageDraw.Draw(sub)
-        d.polygon([((p[0] - grid.x0) / grid.cell - i0, (p[1] - grid.z0) / grid.cell - j0) for p in outer], fill=255)
-        mask = np.asarray(sub) > 0
-        if not mask.any():
-            c = (sum(xs_) / len(xs_), sum(zs_) / len(zs_))
-            b["baseZ"] = sample_at(H, *c) + 0.25
-            continue
-        Hs = H[j0:j1, i0:i1]
-        gh = Hs[mask]
-        # Where the patch does not own the ground (W < 0.9) the terrain is the heightmap with its detail, which the model H
-        # does not describe: read the smoothed heightmap there, and always level the ground under the building.
-        on_hill = float(W0[j0:j1, i0:i1][mask].mean()) < 0.9
-        if on_hill:
-            gh = dem_s[j0:j1, i0:i1][mask]
-        elif float(gh.max() - gh.min()) < 1.5:
-            b["baseZ"] = round(float(np.percentile(gh, 35.0)) + 0.3, 2)  # a ground floor 30 cm above the street
-            continue
-        # A hillside building: ground floor at a low percentile of the ground under it, ground levelled to it.
-        base = float(np.percentile(gh, 35.0))
-        b["baseZ"] = round(base, 2)
-        dist = ndimage.distance_transform_edt(~ndimage.binary_dilation(mask, iterations=int(pad / grid.cell))) * grid.cell
-        wp = 1.0 - smoothstep(0.0, 5.0, dist)
-        num[j0:j1, i0:i1] += wp * base
-        den[j0:j1, i0:i1] += wp
-        padw[j0:j1, i0:i1] = np.maximum(padw[j0:j1, i0:i1], wp)
-        pads += 1
-    if pads or stamped:
-        lvl = np.where(den > 1e-4, num / np.maximum(den, 1e-4), H)
-        H = np.where(padw > 0, lvl, H)
-        G["H"] = H
-        G["W"] = np.maximum(W, padw)
-    print("levelled %d hillside buildings and %d road samples" % (pads, stamped))
-    return padw
 
 
 def build_surface(grid, G, areas, buildings, edges, padw):
@@ -640,7 +529,12 @@ def build_surface(grid, G, areas, buildings, edges, padw):
     sand = np.isin(labels, shore) | (G["beach_poly"] & ~pave)
     urban_default = flat & land & near_urban & ~sand & ~lawn
     wild_lawn = flat & land & ~near_urban & ~sand & ~lawn  # flat open land far from any street: grass, not paving
-    paved = (pave | urban_default | (padw > 0.5) | pitch) & ~sand & ~(lawn & ~pave)
+    # Paving stays off steep ground (a cut bank beside a street is earth or rock, not a slab).
+    hf = G["dem"] + (G["H"] - G["dem"]) * G["W"]
+    gz_, gx_ = np.gradient(ndimage.gaussian_filter(hf, 1.0), grid.cell)
+    steep = np.hypot(gx_, gz_) > 0.45
+    paved = (pave | ((urban_default | (padw > 0.5) | pitch) & ~steep)) & ~sand & ~(lawn & ~pave)
+    paved = paved | G["canal"]
     lawn_f = (lawn | wild_lawn) & ~paved & ~sand
     out = np.zeros((nz, nx, 4), np.float32)
     out[..., 0] = ndimage.gaussian_filter(paved.astype(np.float32), 0.8)
@@ -667,6 +561,8 @@ def process_areas(elements):
             continue
         if t.get("waterway") in ("canal", "river") and e["type"] == "way":
             wid = 14.0 if t.get("waterway") == "canal" else 8.0
+            if "Jardim de Alah" in t.get("name", ""):
+                wid = 17.0
             try:
                 wid = float(t["width"])
             except (KeyError, ValueError):
@@ -844,14 +740,38 @@ def main():
 
     classify_edges(edges, names, sea_side)
     edges = drop_parallel_footways(edges)
+    for e in edges:
+        if e["cls"] >= 7 and e["cls"] <= 9:
+            e["pts"] = dr.smooth_path(e["pts"])
 
     buildings = process_buildings(osm.load("buildings"), rng)
     assign_default_heights(buildings, rng)
     print("%d buildings, %d edges" % (len(buildings), len(edges)))
 
-    padw = pads_and_roads(grid, G, buildings, edges, nodes, args.preview_dir)
+    # The streets are designed first; buildings and ground adapt to them (district_roads.py).
+    grid1 = Grid(GX0, GZ0, GX1, GZ1, 1.0)
+    dr.fit_cross_sections(grid1, edges, buildings)
+    buildings = dr.fix_buildings(grid1, edges, buildings)
+    edges = dr.split_bridges(grid, G, nodes, edges)
+    designed = dr.design_roads(grid, G, nodes, edges)
+    core, road_h, _ = dr.stamp_roads(grid, G, designed)
+    land_f = G["land"].astype(np.float32)
+    dem_s = ndimage.gaussian_filter(np.where(G["land"], dem_h, 0.0), 4.0) / np.maximum(ndimage.gaussian_filter(land_f, 4.0), 1e-3)
+    inner = dr.place_buildings(grid, G, buildings, core, road_h, dem_s)
+    padw = (core | inner).astype(np.float32)
     surface = build_surface(grid, G, areas, buildings, edges, padw)
 
+    # Canals go to the engine as edges of their own class (11): it builds the walls and the quay along them.
+    for a in areas:
+        if a["kind"] == "canal" and len(a["pts"]) >= 2:
+            pts = osm.resample(a["pts"], 6.0)
+            if len(pts) < 2:
+                continue
+            nodes.append(a["pts"][0])
+            na = len(nodes) - 1
+            nodes.append(a["pts"][-1])
+            nb = len(nodes) - 1
+            edges.append({"a": na, "b": nb, "pts": pts if pts[-1] == a["pts"][-1] else pts + [a["pts"][-1]], "cls": 11, "lanes": 0, "flags": 0, "width": float(a["width"]), "sw": (0.0, 0.0), "name": 0, "tags": {}})
     points = process_points(osm.load("points"))
     write_city(args.out_city, nodes, edges, names, buildings, areas, points)
     write_patch(args.out_ground, grid, G, surface)

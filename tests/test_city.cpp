@@ -150,6 +150,40 @@ TEST_CASE("The district file loads and the chunk generators produce sane geometr
     std::filesystem::remove(path);
 }
 
+TEST_CASE("A bridge builds a deck, parapets and a slab; a canal builds walls; a cycle path meets a street at its kerb") {
+    const std::filesystem::path path = WriteDistrict("foh_test_bridge.fohcity");
+    CityData data;
+    REQUIRE(data.load(path));
+    Terrain terrain;
+    terrain.setParams({});
+    CitySettings settings;
+    const CityChunkReport plain = BuildCityChunkReport(data, terrain, settings, 0, 0, 0);
+    // Flag the first street as a bridge and add a canal and a cycle path that ends at the crossing.
+    data.edges[0].flags |= kEdgeBridge;
+    CityEdge canal = data.edges[1];
+    canal.cls = RoadClass::Canal;
+    canal.flags = 0;
+    canal.width = 12.0f;
+    canal.pts = {Vec2(-60.0f, 40.0f), Vec2(60.0f, 40.0f)};
+    data.edges.push_back(canal);
+    CityEdge bike = data.edges[2];
+    bike.cls = RoadClass::Cycleway;
+    bike.flags = 0;
+    bike.width = 2.5f;
+    bike.sidewalkL = bike.sidewalkR = 0.0f;
+    bike.pts = {Vec2(0.0f, 0.0f), Vec2(-40.0f, 30.0f)};
+    bike.a = 4;
+    bike.b = 0;
+    data.edges.push_back(bike);
+    const CityChunkReport with = BuildCityChunkReport(data, terrain, settings, 0, 0, 0);
+    CHECK(with.finite);
+    CHECK(with.indicesValid);
+    CHECK(with.triangles > plain.triangles); // the canal's walls and the path add geometry
+    // The slab hangs under the deck: the lowest vertex is below what the street alone reaches.
+    CHECK(with.minY < plain.minY - 0.5f);
+    std::filesystem::remove(path);
+}
+
 TEST_CASE("Buildings that share a wall do not draw it, and a lower neighbour leaves a party wall above it") {
     const std::filesystem::path path = WriteDistrict("foh_test_district2.fohcity");
     CityData data;

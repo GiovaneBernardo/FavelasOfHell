@@ -5,6 +5,7 @@
 
 #include "city_internal.h"
 #include "foh/log.h"
+#include "foh/world/noise.h"
 
 namespace foh::city {
 
@@ -232,6 +233,14 @@ void BuildRoadIndex(CityIndex& index) {
         index.junctions.push_back(std::move(j));
     }
 
+    index.nodeRoadHw.assign(d.nodes.size(), 0.0f);
+    for (size_t ei = 0; ei < d.edges.size(); ++ei) {
+        const CityEdge& e = d.edges[ei];
+        if (!IsRoad(e.cls) || e.cls == RoadClass::Pedestrian || (e.flags & kEdgeBridge)) continue;
+        index.nodeRoadHw[e.a] = std::max(index.nodeRoadHw[e.a], e.width * 0.5f);
+        index.nodeRoadHw[e.b] = std::max(index.nodeRoadHw[e.b], e.width * 0.5f);
+    }
+
     // Chunk lists.
     index.edgesByChunk.clear();
     index.junctionsByChunk.clear();
@@ -426,29 +435,81 @@ void AddJunction(Ctx& c, const Junction& j) {
     }
 }
 
+// A bridge: a deck on its own straight grade between the ends of the edge (the ground under it is a canal, so it must not be followed),
+// with a slab under the carriageway and a parapet on both sides.
+struct Deck {
+    bool bridge = false;
+    f32 y0 = 0.0f, y1 = 0.0f, length = 1.0f;
+    f32 at(f32 s) const { return y0 + (y1 - y0) * std::clamp(s / length, 0.0f, 1.0f); }
+};
+
+// A canal: vertical concrete walls from the bed up to a quay level with the ground around it, a paved ledge along each side. The
+// ground patch holds the flat bed (1.4 m under the water); the quay hides the strip where the 2 m ground grid cannot make a wall.
+void AddCanal(Ctx& c, const CityEdge& e, const EdgeGeo& g) {
+    if (c.far) return;
+    std::vector<Sample> ss;
+    Sampling(e, g, 0.0f, g.length, ss);
+    if (ss.size() < 2) return;
+    const f32 hw = e.width * 0.5f, ledge = 3.2f, bed = -1.45f;
+    const Vec3 up(0, 1, 0);
+    MeshData& wall = c.mesh(kFoundation);
+    MeshData& top = c.mesh(kSidewalk);
+    // The quay follows the ground a little way from the canal, level across.
+    auto quayY = [&](const Sample& s, f32 sg) { return std::max(c.ground(s.pos + s.right * (sg * (hw + ledge + 1.2f))), 0.9f) + 0.02f; };
+    for (int side = -1; side <= 1; side += 2) {
+        const f32 sg = f32(side);
+        const Vec3 outward(ss.back().right.x * sg, 0.0f, ss.back().right.y * sg);
+        {
+            std::vector<f32> oc = {sg * hw, sg * hw};
+            Ribbon(c, wall, ss, oc, 0.0f, 1.0f / 2.0f, 0.0f, [&](const Sample& s, size_t col) { return col ? quayY(s, sg) : bed; }, [&](const Sample& s, size_t, Vec2) { return Vec3(-s.right.x * sg, 0.0f, -s.right.y * sg); }, -outward);
+        }
+        {
+            std::vector<f32> oc = {sg * hw, sg * (hw + ledge)};
+            Ribbon(c, top, ss, oc, 1.0f / 2.0f, 1.0f / 2.0f, 0.0f, [&](const Sample& s, size_t) { return quayY(s, sg); }, [&](const Sample&, size_t, Vec2) { return up; }, up);
+        }
+        {
+            std::vector<f32> oc = {sg * (hw + ledge), sg * (hw + ledge)};
+            Ribbon(c, wall, ss, oc, 0.0f, 1.0f / 2.0f, 0.0f, [&](const Sample& s, size_t col) { return col ? quayY(s, sg) - 1.8f : quayY(s, sg); }, [&](const Sample& s, size_t, Vec2) { return Vec3(s.right.x * sg, 0.0f, s.right.y * sg); }, outward);
+        }
+    }
+}
+
 void AddEdge(Ctx& c, u32 ei) {
     const CityEdge& e = c.index.data->edges[ei];
     const EdgeGeo& g = c.index.edgeGeo[ei];
     if (!g.valid) return;
+    if (e.cls == RoadClass::Canal) {
+        AddCanal(c, e, g);
+        return;
+    }
     const f32 hw = e.width * 0.5f;
     const Vec3 up(0, 1, 0);
     std::vector<Sample> ss;
 
+    Deck deck;
+    deck.bridge = (e.flags & kEdgeBridge) != 0 && e.cls != RoadClass::Steps;
+    deck.length = g.length;
+    if (deck.bridge) {
+        deck.y0 = c.ground(e.pts.front()) + kAsphaltLift;
+        deck.y1 = c.ground(e.pts.back()) + kAsphaltLift;
+    }
+    // The surface of the street at a sample: a bridge follows its deck, anything else the ground baked level across the street.
+    auto roadY = [&](const Sample& s) { return deck.bridge ? deck.at(s.s) : c.ground(s.pos) + kAsphaltLift; };
     auto groundY = [&](const Sample& s, f32 o) { return c.ground(s.pos + s.right * o); };
 
     if (IsRoad(e.cls) && e.cls != RoadClass::Pedestrian) {
         // Asphalt.
         Sampling(e, g, g.tA, g.length - g.tB, ss);
         std::vector<f32> cols = {-hw, 0.0f, hw};
-        Ribbon(c, c.mesh(kAsphalt), ss, cols, 1.0f / 5.0f, 1.0f / 5.0f, 0.0f, [&](const Sample& s, size_t col) { return groundY(s, cols[col]) + kAsphaltLift; },
-               [&](const Sample&, size_t, Vec2 p) { return c.normal(p); }, up);
+        Ribbon(c, c.mesh(kAsphalt), ss, cols, 1.0f / 5.0f, 1.0f / 5.0f, 0.0f, [&](const Sample& s, size_t) { return roadY(s); },
+               [&](const Sample&, size_t, Vec2 p) { return deck.bridge ? up : c.normal(p); }, up);
 
         if (c.far) return;
         // Markings.
         auto line = [&](f32 offset, f32 width, bool dashed, f32 phase, bool yellow = false) {
             std::vector<f32> oc = {offset - width * 0.5f, offset + width * 0.5f};
-            Ribbon(c, c.mesh(yellow ? kMarkingY : kMarking), ss, oc, 1.0f, dashed ? 1.0f / 9.0f : 0.0f, 0.0f, [&](const Sample& s, size_t col) { return groundY(s, oc[col]) + kAsphaltLift + kMarkLift; },
-                   [&](const Sample&, size_t, Vec2 p) { return c.normal(p); }, up, phase);
+            Ribbon(c, c.mesh(yellow ? kMarkingY : kMarking), ss, oc, 1.0f, dashed ? 1.0f / 9.0f : 0.0f, 0.0f, [&](const Sample& s, size_t) { return roadY(s) + kMarkLift; },
+                   [&](const Sample&, size_t, Vec2 p) { return deck.bridge ? up : c.normal(p); }, up, phase);
         };
         const bool oneway = (e.flags & kEdgeOneway) != 0;
         if (u8(e.cls) <= u8(RoadClass::Secondary)) {
@@ -469,44 +530,140 @@ void AddEdge(Ctx& c, u32 ei) {
         // Sidewalks, one per side. Side +1 is the right.
         for (int side = -1; side <= 1; side += 2) {
             const f32 w = side > 0 ? e.sidewalkR : e.sidewalkL;
-            if (w < 0.05f) continue;
+            if (w < 0.05f && !deck.bridge) continue;
             const f32 sg = f32(side);
             const f32 s0 = side > 0 ? g.rA : g.lA, s1 = g.length - (side > 0 ? g.rB : g.lB);
             Sampling(e, g, s0, s1, ss);
             if (ss.size() < 2) continue;
             const u32 slot = w > 6.5f ? kPromenade : kSidewalk;
             MeshData& m = c.mesh(slot);
-            auto edgeY = [&](const Sample& s) { return groundY(s, sg * hw) + kAsphaltLift; };
-            // Curb face.
-            {
-                std::vector<f32> oc = {sg * hw, sg * hw};
-                Ribbon(c, m, ss, oc, 0.0f, 1.0f / 2.0f, 0.0f, [&](const Sample& s, size_t col) { return edgeY(s) + (col ? kCurb : 0.0f); }, [&](const Sample& s, size_t, Vec2) { return Vec3(-s.right.x * sg, 0.0f, -s.right.y * sg); },
-                       Vec3(-sg * ss.back().right.x, 0.0f, -sg * ss.back().right.y));
+            auto edgeY = [&](const Sample& s) { return roadY(s); };
+            const Vec3 outward(ss.back().right.x * sg, 0.0f, ss.back().right.y * sg);
+            if (w >= 0.05f && !deck.bridge) {
+                // The gutter: a concrete strip along the foot of the kerb, between the asphalt and the curb.
+                std::vector<f32> oc = {sg * (hw - 0.34f), sg * hw};
+                Ribbon(c, c.mesh(kGutter), ss, oc, 1.0f / 0.34f, 1.0f, 0.0f, [&](const Sample& s, size_t) { return edgeY(s) + 0.006f; }, [&](const Sample&, size_t, Vec2) { return up; }, up);
             }
-            // Top.
-            {
-                std::vector<f32> oc = {sg * hw, sg * (hw + w)};
-                Ribbon(c, m, ss, oc, 1.0f / 2.0f, 1.0f / 2.0f, 0.0f, [&](const Sample& s, size_t) { return edgeY(s) + kCurb; }, [&](const Sample&, size_t, Vec2) { return up; }, up);
+            if (w >= 0.05f) {
+                // Curb face.
+                {
+                    std::vector<f32> oc = {sg * hw, sg * hw};
+                    Ribbon(c, m, ss, oc, 0.0f, 1.0f / 2.0f, 0.0f, [&](const Sample& s, size_t col) { return edgeY(s) + (col ? kCurb : 0.0f); }, [&](const Sample& s, size_t, Vec2) { return Vec3(-s.right.x * sg, 0.0f, -s.right.y * sg); }, -outward);
+                }
+                // Top.
+                {
+                    std::vector<f32> oc = {sg * hw, sg * (hw + w)};
+                    Ribbon(c, m, ss, oc, 1.0f / 2.0f, 1.0f / 2.0f, 0.0f, [&](const Sample& s, size_t) { return edgeY(s) + kCurb; }, [&](const Sample&, size_t, Vec2) { return up; }, up);
+                }
             }
-            // Outer face down to the ground behind.
-            {
+            if (!deck.bridge) {
+                // Outer face down to the ground behind.
                 std::vector<f32> oc = {sg * (hw + w), sg * (hw + w)};
                 Ribbon(c, m, ss, oc, 0.0f, 1.0f / 2.0f, 0.0f,
                        [&](const Sample& s, size_t col) { return col == 0 ? edgeY(s) + kCurb : std::min(groundY(s, sg * (hw + w + 0.3f)) - 0.12f, edgeY(s) + kCurb - 0.05f); },
-                       [&](const Sample& s, size_t, Vec2) { return Vec3(s.right.x * sg, 0.0f, s.right.y * sg); }, Vec3(ss.back().right.x * sg, 0.0f, ss.back().right.y * sg));
+                       [&](const Sample& s, size_t, Vec2) { return Vec3(s.right.x * sg, 0.0f, s.right.y * sg); }, outward);
+            } else {
+                // Parapet and the side of the slab.
+                MeshData& cm = c.mesh(kFoundation);
+                const f32 t = hw + w;
+                const f32 top = kCurb + 1.0f, slab = 0.85f;
+                {
+                    std::vector<f32> oc = {sg * (t + 0.15f), sg * (t + 0.15f)};
+                    Ribbon(c, cm, ss, oc, 0.0f, 1.0f / 2.0f, 0.0f, [&](const Sample& s, size_t col) { return edgeY(s) + (col ? top : -slab); }, [&](const Sample& s, size_t, Vec2) { return Vec3(s.right.x * sg, 0.0f, s.right.y * sg); }, outward);
+                }
+                {
+                    std::vector<f32> oc = {sg * (t - 0.15f), sg * (t - 0.15f)};
+                    Ribbon(c, cm, ss, oc, 0.0f, 1.0f / 2.0f, 0.0f, [&](const Sample& s, size_t col) { return edgeY(s) + (col ? top : kCurb); }, [&](const Sample& s, size_t, Vec2) { return Vec3(-s.right.x * sg, 0.0f, -s.right.y * sg); }, -outward);
+                }
+                {
+                    std::vector<f32> oc = {sg * (t - 0.15f), sg * (t + 0.15f)};
+                    Ribbon(c, cm, ss, oc, 1.0f / 2.0f, 1.0f / 2.0f, 0.0f, [&](const Sample& s, size_t) { return edgeY(s) + top; }, [&](const Sample&, size_t, Vec2) { return up; }, up);
+                }
             }
+        }
+        if (!deck.bridge && u8(e.cls) <= u8(RoadClass::Residential) && g.length > 24.0f) {
+            // Manhole covers in the lanes and storm drains at the kerb.
+            const u32 hseed = ei * 2654435761u;
+            auto decal = [&](u32 slot, Vec2 centre, Vec2 along, f32 halfL, f32 halfW) {
+                if (!c.owns(centre, centre)) return;
+                const Vec2 sideV = RightOf(along);
+                const Vec2 q[4] = {centre - along * halfL - sideV * halfW, centre + along * halfL - sideV * halfW, centre + along * halfL + sideV * halfW, centre - along * halfL + sideV * halfW};
+                MeshData& m = c.mesh(slot);
+                u32 v[4];
+                const Vec2 uv[4] = {Vec2(0, 0), Vec2(1, 0), Vec2(1, 1), Vec2(0, 1)};
+                for (int k = 0; k < 4; ++k) v[k] = m.vert(Vec3(q[k].x, c.ground(centre) + kAsphaltLift + 0.014f, q[k].y), up, uv[k], Vec4(1, 0, 0, 1));
+                m.quad(v[0], v[1], v[2], v[3], up);
+            };
+            int k = 0;
+            for (f32 s = g.tA + 8.0f + 12.0f * noise::Rand01(i32(hseed & 0xFFFF), 1, 5); s < g.length - g.tB - 8.0f; s += 24.0f + 18.0f * noise::Rand01(i32(hseed & 0xFFFF), k, 6), ++k) {
+                const Along a = At(e, g, s);
+                const Vec2 right = RightOf(a.dir);
+                const f32 lane = (noise::Rand01(i32(hseed & 0xFFFF), k, 7) - 0.5f) * (hw * 0.9f);
+                decal(kManhole, a.pos + right * lane, a.dir, 0.375f, 0.375f);
+            }
+            k = 0;
+            for (int side = -1; side <= 1; side += 2) {
+                if ((side > 0 ? e.sidewalkR : e.sidewalkL) < 0.3f) continue;
+                for (f32 s = g.tA + 6.0f + 9.0f * noise::Rand01(i32(hseed & 0xFFFF) + side, 2, 8); s < g.length - g.tB - 6.0f; s += 30.0f + 12.0f * noise::Rand01(i32(hseed & 0xFFFF) + side, k++, 9)) {
+                    const Along a = At(e, g, s);
+                    decal(kDrain, a.pos + RightOf(a.dir) * (f32(side) * (hw - 0.36f)), a.dir, 0.5f, 0.2f);
+                }
+            }
+        }
+        if (deck.bridge) {
+            // The underside of the slab, over the full width.
+            const f32 tl = hw + e.sidewalkL + 0.15f, tr = hw + e.sidewalkR + 0.15f;
+            Sampling(e, g, g.tA, g.length - g.tB, ss);
+            std::vector<f32> oc = {-tl, tr};
+            Ribbon(c, c.mesh(kFoundation), ss, oc, 1.0f / 3.0f, 1.0f / 3.0f, 0.0f, [&](const Sample& s, size_t) { return roadY(s) - 0.85f; }, [&](const Sample&, size_t, Vec2) { return Vec3(0, -1, 0); }, Vec3(0, -1, 0));
         }
         return;
     }
 
     if (c.far) return;
-    // Pedestrian streets, cycle paths, footpaths and steps: one ribbon laid over the ground.
+    // Pedestrian streets, cycle paths, footpaths and steps: one ribbon laid over the ground (level across, or on the deck of a bridge).
+    // A path that meets a street stops at its kerb (it lies on the sidewalk's top, 15 cm above the asphalt); a cycle path goes on across
+    // the asphalt as paint, flush with it.
+    const bool pathLike = e.cls == RoadClass::Cycleway || e.cls == RoadClass::Footway;
     const f32 lift = e.cls == RoadClass::Pedestrian ? kAsphaltLift + 0.02f : (e.cls == RoadClass::Cycleway ? kPathLift + 0.005f : kPathLift);
     const u32 slot = e.cls == RoadClass::Cycleway ? kCycle : (e.cls == RoadClass::Pedestrian && e.width > 4.5f && (e.flags & kEdgePromenade) ? kPromenade : kSidewalk);
-    const f32 s0 = e.cls == RoadClass::Pedestrian ? g.tA : 0.0f, s1 = g.length - (e.cls == RoadClass::Pedestrian ? g.tB : 0.0f);
+    f32 s0 = e.cls == RoadClass::Pedestrian ? g.tA : 0.0f, s1 = g.length - (e.cls == RoadClass::Pedestrian ? g.tB : 0.0f);
+    f32 crossA = 0.0f, crossB = 0.0f;
+    if (pathLike && !deck.bridge) {
+        crossA = std::min(c.index.nodeRoadHw[e.a], g.length * 0.4f);
+        crossB = std::min(c.index.nodeRoadHw[e.b], g.length * 0.4f);
+        s0 = crossA;
+        s1 = g.length - crossB;
+    }
     Sampling(e, g, s0, s1, ss);
     std::vector<f32> cols = {-hw, 0.0f, hw};
-    Ribbon(c, c.mesh(slot), ss, cols, 1.0f / 2.0f, 1.0f / 2.0f, 0.0f, [&](const Sample& s, size_t col) { return groundY(s, cols[col]) + lift; }, [&](const Sample&, size_t, Vec2 p) { return c.normal(p); }, up);
+    const bool level = deck.bridge || e.cls == RoadClass::Cycleway || e.cls == RoadClass::Pedestrian;
+    auto pathY = [&](const Sample& s, size_t col) { return deck.bridge ? deck.at(s.s) + (lift - kAsphaltLift) : (level ? c.ground(s.pos) + lift : groundY(s, cols[col]) + lift); };
+    Ribbon(c, c.mesh(slot), ss, cols, 1.0f / 2.0f, 1.0f / 2.0f, 0.0f, pathY, [&](const Sample&, size_t, Vec2 p) { return deck.bridge ? up : c.normal(p); }, up);
+    if (e.cls == RoadClass::Cycleway && !deck.bridge) {
+        std::vector<Sample> cs;
+        auto crossing = [&](f32 a, f32 b) {
+            Sampling(e, g, a, b, cs);
+            Ribbon(c, c.mesh(kCycle), cs, cols, 1.0f / 2.0f, 1.0f / 2.0f, 0.0f, [&](const Sample& s, size_t) { return c.ground(s.pos) + kAsphaltLift + 0.014f; }, [&](const Sample&, size_t, Vec2 p) { return c.normal(p); }, up);
+        };
+        if (crossA > 0.1f) crossing(0.0f, crossA);
+        if (crossB > 0.1f) crossing(g.length - crossB, g.length);
+    }
+    if (deck.bridge && ss.size() >= 2) {
+        MeshData& cm = c.mesh(kFoundation);
+        for (int side = -1; side <= 1; side += 2) {
+            const f32 sg = f32(side);
+            const Vec3 outward(ss.back().right.x * sg, 0.0f, ss.back().right.y * sg);
+            std::vector<f32> oo = {sg * (hw + 0.1f), sg * (hw + 0.1f)};
+            Ribbon(c, cm, ss, oo, 0.0f, 1.0f / 2.0f, 0.0f, [&](const Sample& s, size_t col) { return pathY(s, 0) + (col ? 0.95f : -0.55f); }, [&](const Sample& s, size_t, Vec2) { return Vec3(s.right.x * sg, 0.0f, s.right.y * sg); }, outward);
+            std::vector<f32> oi = {sg * (hw - 0.1f), sg * (hw - 0.1f)};
+            Ribbon(c, cm, ss, oi, 0.0f, 1.0f / 2.0f, 0.0f, [&](const Sample& s, size_t col) { return pathY(s, 0) + (col ? 0.95f : 0.0f); }, [&](const Sample& s, size_t, Vec2) { return Vec3(-s.right.x * sg, 0.0f, -s.right.y * sg); }, -outward);
+            std::vector<f32> ot = {sg * (hw - 0.1f), sg * (hw + 0.1f)};
+            Ribbon(c, cm, ss, ot, 1.0f / 2.0f, 1.0f / 2.0f, 0.0f, [&](const Sample& s, size_t) { return pathY(s, 0) + 0.95f; }, [&](const Sample&, size_t, Vec2) { return up; }, up);
+        }
+        std::vector<f32> ob = {-hw - 0.1f, hw + 0.1f};
+        Ribbon(c, cm, ss, ob, 1.0f / 3.0f, 1.0f / 3.0f, 0.0f, [&](const Sample& s, size_t) { return pathY(s, 0) - 0.55f; }, [&](const Sample&, size_t, Vec2) { return Vec3(0, -1, 0); }, Vec3(0, -1, 0));
+    }
 }
 
 void AddCrossings(Ctx& c) {

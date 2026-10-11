@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cmath>
+#include <deque>
 #include <unordered_map>
 #include <vector>
 
@@ -72,6 +73,12 @@ enum Slot : u32 {
     kWood,
     kPlastic,
     kWire,
+    kCarPaint,
+    kRubber,
+    kPaintBlue,
+    kGutter,
+    kManhole,
+    kDrain,
     kSlotCount
 };
 inline constexpr u32 kFacadeStyles = 3, kPalettes = 5, kShopVariants = 4;
@@ -79,7 +86,9 @@ inline AssetId MaterialId(u32 slot) { return AssetId{kHi, 0x1000ull + slot}; }
 inline AssetId TextureId(u32 k) { return AssetId{kHi, 0x2000ull + k}; }
 
 // Props are shared meshes drawn as instances: each is a list of (mesh part, material).
-enum class Prop : u32 { LampPole, LampHead, TrafficPole, TrafficHead, ShelterFrame, ShelterRoof, Bench, Bin, PostoTower, PostoRoof, UmbrellaPole, UmbrellaCanopy, KioskBody, KioskRoof, NetPost, NetBand, UtilityPole, Count };
+enum class Prop : u32 { LampPole, LampHead, TrafficPole, TrafficHead, ShelterFrame, ShelterRoof, Bench, Bin, PostoTower, PostoRoof, UmbrellaPole, UmbrellaCanopy, KioskBody, KioskRoof, NetPost, NetBand, UtilityPole,
+                        CarHatchBody, CarHatchGlass, CarHatchWheels, CarSedanBody, CarSedanGlass, CarSedanWheels, CarSuvBody, CarSuvGlass, CarSuvWheels,
+                        Hydrant, SignPost, SignPlate, SignDiscRed, SignDiscBlue, Bollard, AdPanel, AdFace, Count };
 inline AssetId PropMesh(Prop p) { return AssetId{kHi, 0x3000ull + static_cast<u64>(p)}; }
 inline AssetId ChunkMesh(u32 serial) { return AssetId{kHi, 0x10000ull + serial}; }
 
@@ -90,7 +99,7 @@ struct PropBatch {
 };
 
 struct ChunkParts {
-    std::vector<std::pair<u32, MeshData>> parts; // (material slot, mesh)
+    std::deque<std::pair<u32, MeshData>> parts; // (material slot, mesh); a deque so a reference to one mesh survives adding another
     std::vector<PropBatch> props;
     f32 ms = 0.0f;
     u32 buildings = 0;
@@ -140,6 +149,7 @@ struct CityIndex {
     };
     std::unordered_map<u64, std::vector<RoadSample>> roadGrid;
     std::vector<u32> beachAreas; // indices of the beach polygons
+    std::vector<f32> nodeRoadHw; // per node: the widest half carriageway of the streets meeting there (0 = none): paths stop at its kerb
 
     static u64 GridKey(i32 x, i32 z) { return ChunkKey(x, z); }
     static i32 GridOf(f32 v) { return i32(std::floor(v / kGrid)); }

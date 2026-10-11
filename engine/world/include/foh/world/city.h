@@ -35,7 +35,7 @@
 
 namespace foh {
 
-enum class RoadClass : u8 { Trunk, Primary, Secondary, Tertiary, Residential, Living, Service, Pedestrian, Cycleway, Footway, Steps };
+enum class RoadClass : u8 { Trunk, Primary, Secondary, Tertiary, Residential, Living, Service, Pedestrian, Cycleway, Footway, Steps, Canal };
 
 // The edge flags written by build_district.py.
 inline constexpr u8 kEdgeOneway = 1, kEdgeLit = 2, kEdgeBridge = 4, kEdgePromenade = 8;

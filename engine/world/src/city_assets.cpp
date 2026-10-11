@@ -3,6 +3,7 @@
 // every texture is one repeat of a real-world size (a facade texture is one storey of one bay), so an artist-made set of the
 // same sizes replaces them without touching the generators.
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 #include "city_internal.h"
@@ -151,6 +152,7 @@ enum Tex : u32 {
     tBlankC = tShopMR + 4,            // + palette
     tBlankN = tBlankC + 5,
     tRoofTileC, tRoofTileN, tSlabC, tSlabN, tFoundC, tFoundN,
+    tGutterC, tGutterN, tManholeC, tDrainC,
     tCount
 };
 
@@ -361,33 +363,115 @@ Texel Blank(f32 x, f32 y, Vec3 pal, u32 seed) {
 
 // ---- roads ---------------------------------------------------------------------------------------------------------
 
-Texel Asphalt(f32 u, f32 v) { // 5 m
+// Voronoi cells that repeat every `period` cells: the distance to the nearest and second nearest feature point and the nearest cell's id.
+struct Cell {
+    f32 d1, d2;
+    int ix, iy;
+};
+Cell Voronoi(f32 x, f32 y, int period, u32 seed) {
+    const int cx = int(std::floor(x)), cy = int(std::floor(y));
+    Cell c{9.0f, 9.0f, 0, 0};
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            const int nx = cx + dx, ny = cy + dy;
+            const int wx = ((nx % period) + period) % period, wy = ((ny % period) + period) % period;
+            const f32 fx = f32(nx) + 0.15f + 0.7f * noise::Rand01(wx, wy, seed), fy = f32(ny) + 0.15f + 0.7f * noise::Rand01(wx, wy, seed + 1);
+            const f32 d = std::sqrt((fx - x) * (fx - x) + (fy - y) * (fy - y));
+            if (d < c.d1) {
+                c.d2 = c.d1;
+                c.d1 = d;
+                c.ix = wx;
+                c.iy = wy;
+            } else if (d < c.d2) {
+                c.d2 = d;
+            }
+        }
+    return c;
+}
+
+Texel Asphalt(f32 u, f32 v) { // 5 m: worn road with patched repairs, seams, cracks and oil
     Texel t;
     const f32 grain = noise::Rand01(int(u * 512.0f), int(v * 512.0f), 71);
     const f32 big = PFbm(u, v, 4, 72, 5);
-    const f32 s = 0.20f + 0.07f * big + 0.05f * grain;
-    t.c = Vec3(s, s, s * 1.02f);
-    if (noise::Rand01(int(u * 512.0f), int(v * 512.0f), 73) > 0.985f) t.c += Vec3(0.12f); // aggregate
-    const f32 crack = PNoise(u * 12.0f, v * 12.0f, 12, 12, 74);
-    t.c *= 1.0f - 0.35f * Step(0.80f, 0.86f, crack) * Step(0.4f, 0.8f, PFbm(u, v, 3, 75, 3));
-    t.rough = 0.88f - 0.1f * big;
-    t.h = 0.004f * (grain - 0.5f);
+    f32 s = 0.15f + 0.055f * big + 0.04f * grain;
+    // Repaired patches: rectangles (about 1.2 x 2 m) a little darker or lighter than the road, with a seam of tar around them.
+    const f32 gx = u * 4.0f, gy = v * 2.5f;
+    const int ci = int(std::floor(gx)), cj = int(std::floor(gy));
+    const f32 patchR = noise::Rand01(ci, cj, 76);
+    f32 seam = 0.0f;
+    if (patchR < 0.20f) {
+        const f32 fx = gx - std::floor(gx), fy = gy - std::floor(gy);
+        const f32 edge = std::min(std::min(fx, 1.0f - fx) * 1.25f, std::min(fy, 1.0f - fy) * 2.0f); // metres to the patch border
+        s *= patchR < 0.10f ? 0.78f : 1.22f;
+        seam = 1.0f - Step(0.0f, 0.035f, std::abs(edge - 0.10f) + 0.0f);
+    }
+    // Cracks: the ridges of a coarse cell pattern, only where a second noise allows them.
+    const Cell cr = Voronoi(u * 5.0f, v * 5.0f, 5, 74);
+    const f32 ridge = 1.0f - Step(0.0f, 0.028f, cr.d2 - cr.d1);
+    const f32 crack = ridge * Step(0.60f, 0.72f, PFbm(u, v, 3, 75, 3));
+    // Oil and rubber: soft dark blobs.
+    const f32 oil = Step(0.64f, 0.78f, PFbm(u, v, 6, 77, 3));
+    t.c = Vec3(s, s, s * 1.03f);
+    if (noise::Rand01(int(u * 512.0f), int(v * 512.0f), 73) > 0.975f) t.c += Vec3(0.10f); // aggregate
+    t.c *= 1.0f - 0.55f * Sat(seam) - 0.60f * crack - 0.35f * oil;
+    t.rough = 0.90f - 0.12f * big - 0.45f * oil;
+    t.h = 0.004f * (grain - 0.5f) - 0.012f * crack - 0.006f * seam;
     return t;
 }
 
-Texel Sidewalk(f32 u, f32 v) { // 2 m: 1 m slabs with joints
+Texel Sidewalk(f32 u, f32 v) { // 2 m: small limestone setts (calcada) with dark joints, a few basalt stones, soot and wear
     Texel t;
-    const f32 su = std::fmod(u * 2.0f, 1.0f), sv = std::fmod(v * 2.0f, 1.0f);
-    const f32 slab = noise::Rand01(int(u * 2.0f), int(v * 2.0f), 81);
+    constexpr int kCells = 30;
+    const Cell c = Voronoi(u * f32(kCells), v * f32(kCells), kCells, 81);
+    const f32 pick = noise::Rand01(c.ix, c.iy, 83);
+    f32 tone = 0.60f + 0.20f * noise::Rand01(c.ix, c.iy, 84);
+    if (pick > 0.93f) tone = 0.17f + 0.08f * noise::Rand01(c.ix, c.iy, 85); // basalt
+    else if (pick < 0.07f) tone = 0.42f + 0.1f * noise::Rand01(c.ix, c.iy, 86);
     const f32 mott = PFbm(u, v, 4, 82, 5);
-    const f32 s = 0.52f + 0.10f * mott + 0.05f * slab - 0.03f * noise::Rand01(int(u * 400.0f), int(v * 400.0f), 83);
-    t.c = Vec3(s, s * 0.98f, s * 0.94f);
-    const bool joint = su < 0.012f || su > 0.988f || sv < 0.012f || sv > 0.988f;
-    if (joint) {
-        t.c *= 0.55f;
-        t.h = -0.012f;
-    }
+    const f32 soot = Step(0.55f, 0.85f, PFbm(u, v, 5, 87, 4));
+    f32 k = tone * (0.88f + 0.22f * mott) * (1.0f - 0.22f * soot);
+    const f32 joint = 1.0f - Step(0.04f, 0.16f, c.d2 - c.d1); // 1 on the joint between two stones
+    k *= 1.0f - 0.60f * joint;
+    t.c = Vec3(k, k * 0.98f, k * 0.93f);
+    t.rough = 0.86f - 0.1f * (1.0f - joint) * Step(0.4f, 0.8f, tone);
+    t.h = -0.007f * joint + 0.003f * (1.0f - Step(0.0f, 0.5f, c.d1));
+    return t;
+}
+
+Texel Gutter(f32 u, f32 v) { // 1 m: the concrete strip between the asphalt and the kerb, with dirt and the odd leaf
+    Texel t;
+    const f32 mott = PFbm(u, v, 4, 141, 5);
+    const f32 dirt = Step(0.50f, 0.85f, PFbm(u * 2.0f, v, 4, 142, 3));
+    f32 s = 0.46f + 0.10f * mott;
+    s *= 1.0f - 0.40f * dirt;
+    if (std::fmod(v * 2.0f, 1.0f) < 0.015f) s *= 0.6f; // a joint every half metre
+    t.c = Vec3(s, s * 0.97f, s * 0.92f);
     t.rough = 0.88f;
+    t.h = std::fmod(v * 2.0f, 1.0f) < 0.015f ? -0.008f : 0.0f;
+    return t;
+}
+
+Texel Manhole(f32 u, f32 v) { // 0.75 m round lid with a ribbed pattern; alpha cuts the circle out of a square
+    Texel t;
+    const f32 x = (u - 0.5f) * 2.0f, y = (v - 0.5f) * 2.0f, r = std::sqrt(x * x + y * y);
+    t.alpha = r < 0.96f ? 1.0f : 0.0f;
+    const f32 rim = Step(0.80f, 0.86f, r);
+    const f32 rib = (std::fmod((x + y) * 5.0f + 100.0f, 1.0f) < 0.45f) ? 1.0f : 0.8f;
+    const f32 s = (0.16f + 0.05f * noise::Rand01(int(u * 64.0f), int(v * 64.0f), 151)) * (rim > 0.5f ? 1.35f : rib);
+    t.c = Vec3(s * 1.0f, s * 0.97f, s * 0.92f);
+    t.rough = 0.55f;
+    return t;
+}
+
+Texel Drain(f32 u, f32 v) { // a storm drain grate, 1 m by 0.4 m (u along the kerb)
+    Texel t;
+    const f32 x = u, y = v;
+    const bool frame = x < 0.05f || x > 0.95f || y < 0.10f || y > 0.90f;
+    const bool bar = std::fmod(x * 14.0f, 1.0f) < 0.45f;
+    t.alpha = 1.0f;
+    const f32 s = frame ? 0.30f : (bar ? 0.26f : 0.03f);
+    t.c = Vec3(s, s, s * 1.02f);
+    t.rough = 0.5f;
     return t;
 }
 
@@ -411,7 +495,7 @@ Texel Promenade(f32 u, f32 v) { // 4 m across, 4 m along: black and white waves,
 
 Texel Cycle(f32 u, f32 v) { // 4 m, red asphalt
     Texel t = Asphalt(u, v);
-    t.c = Vec3(0.46f, 0.16f, 0.12f) * (0.75f + 1.1f * t.c.r);
+    t.c = Vec3(0.50f, 0.23f, 0.18f) * (0.78f + 0.95f * t.c.r);
     return t;
 }
 
@@ -529,7 +613,127 @@ struct Solid {
 
 void UploadMesh(Renderer& r, Prop p, const Solid& s) {
     const MeshIndexRange whole{0, u32(s.m.idx.size())};
-    r.uploadMeshAsset(PropMesh(p), MeshGeometry{s.m.p, s.m.n, s.m.uv, s.m.t, s.m.idx}, std::span(&whole, 1));
+    if (!r.uploadMeshAsset(PropMesh(p), MeshGeometry{s.m.p, s.m.n, s.m.uv, s.m.t, s.m.idx}, std::span(&whole, 1))) FOH_ERROR("city: prop mesh {} was rejected ({} vertices, {} indices)", u32(p), s.m.p.size(), s.m.idx.size());
+}
+
+// ---- cars: lofted bodies (a ring of six points per station along the length), dark glass and trim, wheels ----------------------
+
+struct Station {
+    f32 x, w, yb, yt; // along the car, half width, bottom, top
+};
+
+// Smooth-shaded loft through the stations (+x is the front); both ends are capped.
+void Loft(Solid& s, const std::vector<Station>& st, f32 tumble = 0.88f) {
+    const size_t n = st.size();
+    std::vector<std::array<Vec3, 6>> rings(n);
+    for (size_t i = 0; i < n; ++i) {
+        const Station& q = st[i];
+        const f32 ym = q.yb + (q.yt - q.yb) * 0.62f;
+        rings[i] = {Vec3(q.x, q.yb, -q.w), Vec3(q.x, q.yb, q.w), Vec3(q.x, ym, q.w), Vec3(q.x, q.yt, q.w * tumble), Vec3(q.x, q.yt, -q.w * tumble), Vec3(q.x, ym, -q.w)};
+    }
+    std::vector<std::array<u32, 6>> ids(n);
+    for (size_t i = 0; i < n; ++i) {
+        Vec3 centre(0.0f);
+        for (const Vec3& p : rings[i]) centre += p / 6.0f;
+        for (int j = 0; j < 6; ++j) {
+            const Vec3 tx = rings[std::min(i + 1, n - 1)][size_t(j)] - rings[i > 0 ? i - 1 : 0][size_t(j)];
+            const Vec3 tr = rings[i][size_t((j + 1) % 6)] - rings[i][size_t((j + 5) % 6)];
+            Vec3 nr = glm::cross(tr, tx);
+            nr = glm::length(nr) > 1e-6f ? glm::normalize(nr) : Vec3(0, 1, 0);
+            if (glm::dot(nr, rings[i][size_t(j)] - centre) < 0.0f) nr = -nr;
+            ids[i][size_t(j)] = s.m.vert(rings[i][size_t(j)], nr, Vec2(rings[i][size_t(j)].x * 0.4f, f32(j) * 0.25f));
+        }
+    }
+    for (size_t i = 0; i + 1 < n; ++i)
+        for (int j = 0; j < 6; ++j) {
+            const int k = (j + 1) % 6;
+            const Vec3 mid = (rings[i][size_t(j)] + rings[i][size_t(k)] + rings[i + 1][size_t(j)] + rings[i + 1][size_t(k)]) * 0.25f;
+            const Vec3 centre = (rings[i][0] + rings[i][3] + rings[i + 1][0] + rings[i + 1][3]) * 0.25f;
+            s.m.quad(ids[i][size_t(j)], ids[i][size_t(k)], ids[i + 1][size_t(k)], ids[i + 1][size_t(j)], mid - centre);
+        }
+    for (int end = 0; end < 2; ++end) {
+        const size_t i = end ? n - 1 : 0;
+        const Vec3 nr(end ? 1.0f : -1.0f, 0.0f, 0.0f);
+        Vec3 centre(0.0f);
+        for (const Vec3& p : rings[i]) centre += p / 6.0f;
+        const u32 c = s.m.vert(centre, nr, Vec2(0.5f));
+        std::array<u32, 6> cap;
+        for (int j = 0; j < 6; ++j) cap[size_t(j)] = s.m.vert(rings[i][size_t(j)], nr, Vec2(0.5f));
+        for (int j = 0; j < 6; ++j) s.m.tri(c, cap[size_t(j)], cap[size_t((j + 1) % 6)], nr);
+    }
+}
+
+// A wheel with its axis along z.
+void WheelZ(Solid& s, Vec3 centre, f32 r, f32 width, int seg = 14) {
+    std::vector<u32> a, b;
+    for (int i = 0; i <= seg; ++i) {
+        const f32 ang = 6.2831853f * f32(i) / f32(seg);
+        const Vec3 n(std::cos(ang), std::sin(ang), 0.0f);
+        a.push_back(s.m.vert(centre + n * r + Vec3(0, 0, -width * 0.5f), n, Vec2(f32(i) / f32(seg), 0)));
+        b.push_back(s.m.vert(centre + n * r + Vec3(0, 0, width * 0.5f), n, Vec2(f32(i) / f32(seg), 1)));
+    }
+    for (int i = 0; i < seg; ++i) {
+        const Vec3 mid((std::cos(6.2831853f * (f32(i) + 0.5f) / f32(seg))), std::sin(6.2831853f * (f32(i) + 0.5f) / f32(seg)), 0.0f);
+        s.m.quad(a[size_t(i)], a[size_t(i) + 1], b[size_t(i) + 1], b[size_t(i)], mid);
+    }
+    for (int side = -1; side <= 1; side += 2) {
+        const Vec3 nr(0, 0, f32(side));
+        const u32 c = s.m.vert(centre + Vec3(0, 0, side * width * 0.5f), nr, Vec2(0.5f));
+        std::vector<u32> rim;
+        for (int i = 0; i <= seg; ++i) {
+            const f32 ang = 6.2831853f * f32(i) / f32(seg);
+            rim.push_back(s.m.vert(centre + Vec3(std::cos(ang) * r, std::sin(ang) * r, side * width * 0.5f), nr, Vec2(0.5f)));
+        }
+        for (int i = 0; i < seg; ++i) s.m.tri(c, rim[size_t(i)], rim[size_t(i) + 1], nr);
+    }
+}
+
+struct CarSpec {
+    std::vector<Station> body, cabin;
+    f32 wheelbase, wheelR, track, halfLen, belt;
+};
+
+CarSpec CarVariant(int v) {
+    CarSpec c;
+    if (v == 0) { // hatchback
+        c.body = {{-1.95f, 0.70f, 0.40f, 0.80f}, {-1.88f, 0.80f, 0.30f, 0.92f}, {-1.20f, 0.84f, 0.28f, 0.95f}, {-0.70f, 0.85f, 0.28f, 0.92f}, {0.90f, 0.85f, 0.28f, 0.90f}, {1.55f, 0.84f, 0.28f, 0.82f}, {1.88f, 0.78f, 0.30f, 0.68f}, {1.95f, 0.66f, 0.38f, 0.60f}};
+        c.cabin = {{-1.30f, 0.72f, 0.92f, 0.98f}, {-1.12f, 0.73f, 0.92f, 1.40f}, {-0.95f, 0.70f, 0.92f, 1.47f}, {0.30f, 0.70f, 0.92f, 1.47f}, {0.58f, 0.73f, 0.92f, 1.40f}, {1.00f, 0.74f, 0.92f, 0.95f}};
+        c.wheelbase = 2.45f; c.wheelR = 0.31f; c.track = 0.78f; c.halfLen = 1.95f; c.belt = 0.92f;
+    } else if (v == 1) { // sedan
+        c.body = {{-2.25f, 0.72f, 0.42f, 0.78f}, {-2.18f, 0.82f, 0.30f, 0.90f}, {-1.70f, 0.86f, 0.28f, 0.96f}, {-1.00f, 0.87f, 0.28f, 0.94f}, {1.00f, 0.87f, 0.28f, 0.92f}, {1.75f, 0.86f, 0.28f, 0.84f}, {2.18f, 0.80f, 0.30f, 0.70f}, {2.25f, 0.68f, 0.38f, 0.62f}};
+        c.cabin = {{-1.35f, 0.74f, 0.93f, 0.97f}, {-0.95f, 0.74f, 0.93f, 1.38f}, {-0.55f, 0.70f, 0.93f, 1.45f}, {0.45f, 0.70f, 0.93f, 1.45f}, {0.85f, 0.74f, 0.93f, 1.38f}, {1.20f, 0.75f, 0.93f, 0.95f}};
+        c.wheelbase = 2.70f; c.wheelR = 0.32f; c.track = 0.80f; c.halfLen = 2.25f; c.belt = 0.93f;
+    } else { // SUV
+        c.body = {{-2.20f, 0.76f, 0.45f, 0.95f}, {-2.12f, 0.86f, 0.36f, 1.05f}, {-1.60f, 0.88f, 0.34f, 1.08f}, {-0.50f, 0.89f, 0.34f, 1.08f}, {1.00f, 0.89f, 0.34f, 1.04f}, {1.80f, 0.87f, 0.34f, 0.98f}, {2.15f, 0.82f, 0.36f, 0.82f}, {2.22f, 0.70f, 0.44f, 0.74f}};
+        c.cabin = {{-1.95f, 0.78f, 1.06f, 1.12f}, {-1.90f, 0.78f, 1.06f, 1.62f}, {-1.70f, 0.74f, 1.06f, 1.72f}, {0.50f, 0.74f, 1.06f, 1.72f}, {0.95f, 0.78f, 1.06f, 1.55f}, {1.30f, 0.80f, 1.06f, 1.08f}};
+        c.wheelbase = 2.75f; c.wheelR = 0.38f; c.track = 0.82f; c.halfLen = 2.22f; c.belt = 1.06f;
+    }
+    return c;
+}
+
+void BuildCar(Renderer& r, int v, Prop bodyProp, Prop glassProp, Prop wheelProp) {
+    const CarSpec c = CarVariant(v);
+    Solid body;
+    Loft(body, c.body);
+    // The roof: a slim paint plate over the cabin (the glass is the loft below it).
+    const f32 roofX0 = c.cabin[2].x - 0.02f, roofX1 = c.cabin[3].x + 0.02f, roofY = c.cabin[2].yt;
+    body.box(Vec3((roofX0 + roofX1) * 0.5f, roofY - 0.02f, 0.0f), Vec3((roofX1 - roofX0) * 0.5f, 0.045f, c.cabin[2].w * 0.88f));
+    Solid glass;
+    Loft(glass, c.cabin, 0.9f);
+    // Pillars in paint colour are left out on purpose: the loft reads as one dark greenhouse; the trim goes in the dark mesh.
+    glass.box(Vec3(c.halfLen - 0.04f, 0.50f, 0.0f), Vec3(0.07f, 0.12f, 0.62f));  // front bumper
+    glass.box(Vec3(-c.halfLen + 0.04f, 0.46f, 0.0f), Vec3(0.07f, 0.12f, 0.62f)); // rear bumper
+    glass.box(Vec3(c.halfLen - 0.02f, 0.72f, 0.0f), Vec3(0.04f, 0.07f, 0.42f));  // grille
+    for (f32 sz : {-1.0f, 1.0f}) {
+        glass.box(Vec3(c.halfLen - 0.10f, 0.78f, sz * 0.60f), Vec3(0.06f, 0.05f, 0.14f));  // headlight
+        glass.box(Vec3(-c.halfLen + 0.07f, 0.80f, sz * 0.62f), Vec3(0.05f, 0.05f, 0.14f)); // tail light
+    }
+    UploadMesh(r, bodyProp, body);
+    UploadMesh(r, glassProp, glass);
+    Solid wheels;
+    for (f32 sx : {-0.5f, 0.5f})
+        for (f32 sz : {-1.0f, 1.0f}) WheelZ(wheels, Vec3(sx * c.wheelbase, c.wheelR, sz * c.track), c.wheelR, 0.22f);
+    UploadMesh(r, wheelProp, wheels);
 }
 
 } // namespace
@@ -578,6 +782,13 @@ void UploadCityContent(Renderer& r) {
     roadTex(tRoofTileC, tRoofTileN, 256, 1.2f, RoofTile);
     roadTex(tSlabC, tSlabN, 256, 4.0f, Slab);
     roadTex(tFoundC, tFoundN, 256, 2.0f, Foundation);
+    roadTex(tGutterC, tGutterN, 128, 1.0f, Gutter);
+    {
+        const Maps m = Bake(128, 0.75f, 0.75f, Manhole, false, false);
+        Upload(r, tManholeC, m, m.albedo, TextureFormat::Rgba8Srgb);
+        const Maps d = Bake(128, 1.0f, 0.4f, Drain, false, false);
+        Upload(r, tDrainC, d, d.albedo, TextureFormat::Rgba8Srgb);
+    }
 
     // ---- materials ----
     auto mat = [&](u32 slot, u32 color, u32 normal, f32 rough, f32 metal = 0.0f, u32 mr = ~0u) {
@@ -617,6 +828,17 @@ void UploadCityContent(Renderer& r) {
     mat(kRoofTile, tRoofTileC, tRoofTileN, 0.8f);
     mat(kRoofSlab, tSlabC, tSlabN, 0.85f);
     mat(kFoundation, tFoundC, tFoundN, 0.9f);
+    mat(kGutter, tGutterC, tGutterN, 0.88f);
+    for (const auto& [slot, tex] : {std::pair<u32, u32>{kManhole, tManholeC}, std::pair<u32, u32>{kDrain, tDrainC}}) {
+        MaterialParams p;
+        p.baseColorTexture = TextureId(tex);
+        p.alphaMask = true;
+        p.alphaCutoff = 0.5f;
+        p.doubleSided = true;
+        p.roughness = 0.55f;
+        p.metallic = 0.3f;
+        r.setMaterial(MaterialId(slot), p);
+    }
     auto flat = [&](u32 slot, Vec3 c, f32 rough, f32 metal) {
         MaterialParams p;
         p.baseColor = Vec4(c, 1.0f);
@@ -633,6 +855,9 @@ void UploadCityContent(Renderer& r) {
     flat(kWood, Vec3(0.40f, 0.26f, 0.15f), 0.75f, 0.0f);
     flat(kPlastic, Vec3(0.12f, 0.30f, 0.16f), 0.6f, 0.0f);
     flat(kWire, Vec3(0.03f, 0.03f, 0.035f), 0.5f, 0.2f);
+    flat(kCarPaint, Vec3(1.0f, 1.0f, 1.0f), 0.32f, 0.18f);
+    flat(kRubber, Vec3(0.025f, 0.025f, 0.03f), 0.85f, 0.0f);
+    flat(kPaintBlue, Vec3(0.05f, 0.20f, 0.52f), 0.5f, 0.0f);
 
     // ---- prop meshes ----
     { // street lamp: a tapered pole with an arm over the street (the head is a separate mesh so it can be lit differently)
@@ -707,6 +932,48 @@ void UploadCityContent(Renderer& r) {
         Solid band;
         band.box(Vec3(0, 0, 0), Vec3(4.0f, 0.04f, 0.012f));
         UploadMesh(r, Prop::NetBand, band);
+    }
+    BuildCar(r, 0, Prop::CarHatchBody, Prop::CarHatchGlass, Prop::CarHatchWheels);
+    BuildCar(r, 1, Prop::CarSedanBody, Prop::CarSedanGlass, Prop::CarSedanWheels);
+    BuildCar(r, 2, Prop::CarSuvBody, Prop::CarSuvGlass, Prop::CarSuvWheels);
+    { // fire hydrant
+        Solid h;
+        h.cylinder(Vec3(0, 0, 0), 0.13f, 0.66f, 10);
+        h.cylinder(Vec3(0, 0.62f, 0), 0.165f, 0.12f, 10);
+        h.box(Vec3(0.17f, 0.42f, 0), Vec3(0.09f, 0.055f, 0.055f));
+        h.box(Vec3(-0.17f, 0.42f, 0), Vec3(0.09f, 0.055f, 0.055f));
+        h.box(Vec3(0, 0.37f, 0.17f), Vec3(0.06f, 0.06f, 0.09f));
+        UploadMesh(r, Prop::Hydrant, h);
+    }
+    { // street sign pole with a name plate (two blue plates, one each way) and the two kinds of round sign
+        Solid post;
+        post.cylinder(Vec3(0, 0, 0), 0.035f, 2.6f, 8);
+        UploadMesh(r, Prop::SignPost, post);
+        Solid plate;
+        plate.box(Vec3(0, 2.42f, 0), Vec3(0.46f, 0.10f, 0.012f));
+        plate.box(Vec3(0, 2.42f, 0), Vec3(0.012f, 0.10f, 0.46f));
+        UploadMesh(r, Prop::SignPlate, plate);
+        Solid red;
+        WheelZ(red, Vec3(0, 2.25f, -0.008f), 0.31f, 0.012f, 16);
+        UploadMesh(r, Prop::SignDiscRed, red);
+        Solid blue;
+        WheelZ(blue, Vec3(0, 2.25f, 0.004f), 0.255f, 0.014f, 16);
+        UploadMesh(r, Prop::SignDiscBlue, blue);
+    }
+    {
+        Solid b;
+        b.cylinder(Vec3(0, 0, 0), 0.075f, 0.85f, 10);
+        UploadMesh(r, Prop::Bollard, b);
+    }
+    { // an illuminated advertising panel on a post (the street-furniture panels of a Brazilian city), two faces
+        Solid post;
+        post.box(Vec3(0, 1.1f, 0), Vec3(0.55f, 1.1f, 0.10f));
+        post.box(Vec3(0, 2.25f, 0), Vec3(0.60f, 0.05f, 0.14f));
+        UploadMesh(r, Prop::AdPanel, post);
+        Solid face;
+        face.box(Vec3(0, 1.15f, 0.105f), Vec3(0.48f, 0.82f, 0.008f));
+        face.box(Vec3(0, 1.15f, -0.105f), Vec3(0.48f, 0.82f, 0.008f));
+        UploadMesh(r, Prop::AdFace, face);
     }
     { // utility pole: a concrete pole with a cross arm and insulators (the wires are chunk geometry)
         Solid pole;
