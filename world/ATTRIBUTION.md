@@ -7,3 +7,9 @@
   (the model has none). Built by `tools/build_rio_heightmap.py` from `tools/fetch_rio_dem.py`. This is a placeholder until a
   higher resolution terrain model replaces it.
 - Ground, bark, road and pavement textures (not stored here: `python tools/fetch_ambientcg.py`) are CC0 from ambientCG.com.
+- `district_leblon.fohcity` and `leblon_ground.fohp` (derived, git-ignored; `python tools/fetch_osm_district.py` then
+  `python tools/build_district.py`) contain map data (c) **OpenStreetMap contributors**, available under the **Open Database
+  License (ODbL) 1.0** (https://www.openstreetmap.org/copyright): street geometry and classes, building footprints, heights and
+  levels, parks, the coastline and surveyed points. The derived files are a "produced work" built from that database; the
+  game's credits must say "Map data (c) OpenStreetMap contributors (ODbL)". The beach and ground in `leblon_ground.fohp` also
+  derive from the Copernicus DEM above.

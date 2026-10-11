@@ -11,10 +11,15 @@
 #include "foh/world/vegetation.h"
 
 namespace foh {
+class City;
+}
+
+namespace foh {
 
 struct WorldSurface {
     const Terrain* terrain = nullptr;
     const Vegetation* vegetation = nullptr;
+    const City* city = nullptr; // buildings to bump into (ADR 0014), null without a district
 
     // Height of the walkable ground at (x, z): the terrain, or 0 without one.
     f32 groundHeight(f32 x, f32 z) const { return terrain ? terrain->height(x, z) : 0.0f; }

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "foh/platform.h"
+#include "foh/world/ground_patch.h"
 #include "foh/types.h"
 
 namespace foh {
@@ -31,6 +32,11 @@ public:
     // Metres from (x, z) to the nearest edge of the grid (negative outside).
     f32 edgeDistance(f32 x, f32 z) const;
 
+    // The same heightmap with a finer ground patch over part of it (null patch = none). The terrain blends the patch in.
+    static std::shared_ptr<const DemHeightmap> withPatch(const std::shared_ptr<const DemHeightmap>& dem, std::shared_ptr<const GroundPatch> patch);
+    const GroundPatch* patch() const { return m_patch.get(); }
+    std::shared_ptr<const GroundPatch> patchShared() const { return m_patch; }
+
     // Bicubic (Catmull-Rom) height in metres, clamped at the border: smooth normals from a coarse grid.
     f32 sample(f32 x, f32 z) const;
 
@@ -38,6 +44,7 @@ private:
     u32 m_width = 0, m_height = 0;
     f32 m_cell = 15.0f, m_originX = 0.0f, m_originZ = 0.0f, m_unit = 1.0f / 16.0f;
     std::vector<i16> m_data;
+    std::shared_ptr<const GroundPatch> m_patch;
 };
 
 } // namespace foh

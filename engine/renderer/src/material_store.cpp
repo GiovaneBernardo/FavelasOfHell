@@ -72,6 +72,11 @@ void MaterialStore::resolve(u32 index, const TextureStore& textures) {
         }
         g.terrainTile = p.terrainTileSize;
         g.occlusionStrength = 0.0f;
+        if (p.terrainMask.isValid() && textures.resident(p.terrainMask)) {
+            g.flags |= kMaterialFlagTerrainMask;
+            g.pad1 = textures.slotOf(p.terrainMask, TextureStore::kWhiteSlot);
+            g.baseColor = p.terrainMaskRect;
+        }
         m_classes[index] = DrawClass::Opaque;
         m_dirty = true;
         return;
@@ -129,6 +134,7 @@ void MaterialStore::texturesChanged(const std::vector<AssetId>& ids, const Textu
             bool layer = false;
             if (p.terrain)
                 for (u32 l = 0; l < 4; ++l) layer = layer || t == p.terrainAlbedo[l] || t == p.terrainNormal[l];
+            if (p.terrain && t == p.terrainMask) layer = true;
             if (layer || t == p.baseColorTexture || t == p.normalTexture || t == p.metalRoughTexture || t == p.occlusionTexture ||
                 t == p.emissiveTexture) {
                 resolve(i, textures);

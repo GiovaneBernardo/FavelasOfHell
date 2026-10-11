@@ -21,6 +21,7 @@ add_executable(foh_tests
     test_prefab_instance.cpp
     test_texture_cook.cpp
     test_async_import.cpp
+    test_city.cpp
     test_roads.cpp
     test_terrain.cpp
     test_transform_propagation.cpp)

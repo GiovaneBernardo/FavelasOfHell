@@ -6,6 +6,7 @@
 
 #include "foh/log.h"
 #include "foh/scene/prefab_request.h"
+#include "foh/world/city.h"
 #include "foh/world/surface.h"
 
 namespace foh::game {
@@ -196,6 +197,15 @@ void PlayerMoveSystem(Res<Time> time, Res<GameInput> input, Res<PlayerLook> look
         if (surface->vegetation) {
             const Vec2 before(t.position.x, t.position.z);
             const Vec2 after = surface->vegetation->pushOutOfTrunks(before, p.radius);
+            if (glm::dot(after - before, after - before) > 1e-10f) {
+                t.position.x = after.x;
+                t.position.z = after.y;
+                normal += glm::normalize(after - before);
+            }
+        }
+        if (surface->city) { // buildings are solid (ADR 0014)
+            const Vec2 before(t.position.x, t.position.z);
+            const Vec2 after = surface->city->pushOutOfBuildings(before, p.radius);
             if (glm::dot(after - before, after - before) > 1e-10f) {
                 t.position.x = after.x;
                 t.position.z = after.y;

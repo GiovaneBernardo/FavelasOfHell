@@ -111,6 +111,10 @@ f32 TerrainBaseHeight(const TerrainGenParams& p, const DemHeightmap* dem, f32 x,
         h += amp * (2.8f * Fbm(x / 70.0f, z / 70.0f, s + 10, 3) + 1.3f * Fbm(x / 19.0f, z / 19.0f, s + 11, 3) + 0.35f * Fbm(x / 4.5f, z / 4.5f, s + 13, 2) +
                     0.08f * Fbm(x / 1.3f, z / 1.3f, s + 14, 2));
     const f32 floorRel = p.floorHeight - p.seaLevel;
+    if (const GroundPatch* patch = dem->patch()) {
+        const f32 w = patch->weight(x, z);
+        if (w > 0.0f) h = h + (patch->height(x, z) - h) * w; // the district's ground: beach, flat city, platforms (ADR 0014)
+    }
     return p.seaLevel + floorRel + (h - floorRel) * Smoothstep(0.0f, std::max(p.demEdgeFade, 1.0f), edge);
 }
 
@@ -199,6 +203,15 @@ bool Terrain::loadHeightmap(const std::filesystem::path& file) {
     std::shared_ptr<const DemHeightmap> dem = DemHeightmap::load(file);
     if (!dem) return false;
     setHeightmap(std::move(dem));
+    return true;
+}
+
+bool Terrain::loadGroundPatch(const std::filesystem::path& file) {
+    auto dem = heightmap();
+    if (!dem) return false;
+    auto patch = GroundPatch::load(file);
+    if (!patch) return false;
+    setHeightmap(DemHeightmap::withPatch(dem, std::move(patch)));
     return true;
 }
 

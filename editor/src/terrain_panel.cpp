@@ -31,6 +31,7 @@ void TerrainPanel::ensureCreated(Renderer& renderer, JobSystem& jobs, World& wor
     m_vegetation = std::make_unique<Vegetation>(renderer, world, &jobs);
     // The real-world base (the placeholder DEM from tools/build_rio_heightmap.py); without the file the terrain is procedural.
     m_terrain->loadHeightmap(file.parent_path() / "rio_dem.fohdem");
+    m_terrain->loadGroundPatch(file.parent_path() / "leblon_ground.fohp"); // the district's beach, flat city and platforms (ADR 0014)
     if (std::filesystem::exists(file) && m_terrain->load(file)) {
         FOH_INFO("terrain: loaded {}", file.string());
     } else {
@@ -44,6 +45,12 @@ namespace {
 const AssetId kTerrainMaterial{0x7E44A1A0ull, 0xFFFFFFFFFFFFFF00ull};
 }
 
+void TerrainPanel::setSurfaceMask(const AssetId& id, const Vec4& rect) {
+    m_maskId = id;
+    m_maskRect = rect;
+    m_materialDirty = true;
+}
+
 void TerrainPanel::applyMaterial() {
     MaterialParams p;
     p.terrain = true;
@@ -52,6 +59,8 @@ void TerrainPanel::applyMaterial() {
         p.terrainAlbedo[l] = m_layers[l].albedo;
         p.terrainNormal[l] = m_layers[l].normal;
     }
+    p.terrainMask = m_maskId;
+    p.terrainMaskRect = m_maskRect;
     m_renderer->setMaterial(kTerrainMaterial, p);
     m_tiles->setMaterial(kTerrainMaterial, m_color);
     m_materialDirty = false;

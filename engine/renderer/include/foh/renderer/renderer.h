@@ -81,6 +81,10 @@ struct MaterialParams {
     bool terrain = false;
     f32 terrainTileSize = 6.0f; // metres covered by one repeat of the layer textures
     AssetId terrainAlbedo[4], terrainNormal[4];
+    // Surface mask (ADR 0014): an RGBA8 texture laid over the world rectangle terrainMaskRect = (minX, minZ, 1/sizeX, 1/sizeZ):
+    // R paving, G sand, B lawn. Where a channel is set it overrides the slope/height rules (a city at 3 m is not beach).
+    AssetId terrainMask;
+    Vec4 terrainMaskRect{0.0f};
 };
 
 // CPU geometry of an imported mesh. All spans index the same vertices; normals and uvs

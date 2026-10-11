@@ -44,6 +44,9 @@ public:
     // Saves and releases everything (node meshes and entities); call while the renderer and the world are alive.
     void shutdown();
 
+    // The district's paving / sand / lawn mask (City::uploadSurfaceMask): the ground material reads it.
+    void setSurfaceMask(const AssetId& id, const Vec4& rect);
+
     Terrain* terrain() { return m_terrain.get(); }
     TerrainRenderer* streamer() { return m_tiles.get(); }
     Vegetation* vegetation() { return m_vegetation.get(); }
@@ -83,6 +86,8 @@ private:
     std::string m_barkNormalPath = "workshop/ambientCG/Bark006_2K-JPG/Bark006_2K-JPG_NormalGL.jpg";
     AssetId m_barkColor, m_barkNormal;
     bool m_askedBarkColor = false, m_askedBarkNormal = false, m_barkApplied = false;
+    AssetId m_maskId;
+    Vec4 m_maskRect{0.0f};
     float m_tileSize = 6.0f;
     bool m_materialDirty = true;
     bool m_texturesDone = false;

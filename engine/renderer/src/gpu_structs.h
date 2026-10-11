@@ -90,6 +90,7 @@ inline constexpr u32 kMaterialFlagNormalMap = 1u << 2;
 inline constexpr u32 kMaterialFlagTerrain = 1u << 3;
 inline constexpr u32 kMaterialFlagLayerNormal0 = 1u << 4;  // bits 4..7: layer i has a resident normal map
 inline constexpr u32 kMaterialFlagFoliage = 1u << 12;
+inline constexpr u32 kMaterialFlagTerrainMask = 1u << 13; // terrain: pad1 = mask texture slot, baseColor = mask rectangle
 inline constexpr u32 kMaterialFlagLayerAlbedo0 = 1u << 8;  // bits 8..11: layer i has a resident albedo texture
 
 } // namespace foh

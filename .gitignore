@@ -20,3 +20,7 @@ compile_commands.json
 
 # Downloaded source data for the world tools (tools/fetch_rio_dem.py); the derived world/rio_dem.fohdem is committed
 /data/
+
+# The district is derived from OpenStreetMap + the heightmap (tools/fetch_osm_district.py, tools/build_district.py); the patch is 21 MB
+/world/district_*.fohcity
+/world/*_ground.fohp

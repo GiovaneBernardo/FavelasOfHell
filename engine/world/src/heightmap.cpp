@@ -39,6 +39,13 @@ std::shared_ptr<const DemHeightmap> DemHeightmap::load(const std::filesystem::pa
     return dem;
 }
 
+std::shared_ptr<const DemHeightmap> DemHeightmap::withPatch(const std::shared_ptr<const DemHeightmap>& dem, std::shared_ptr<const GroundPatch> patch) {
+    if (!dem) return nullptr;
+    auto copy = std::shared_ptr<DemHeightmap>(new DemHeightmap(*dem));
+    copy->m_patch = std::move(patch);
+    return copy;
+}
+
 f32 DemHeightmap::edgeDistance(f32 x, f32 z) const {
     return std::min(std::min(x - minX(), maxX() - x), std::min(z - minZ(), maxZ() - z));
 }

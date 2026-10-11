@@ -107,6 +107,8 @@ public:
     void setHeightmap(std::shared_ptr<const DemHeightmap> dem);
     bool loadHeightmap(const std::filesystem::path& file); // false (nothing changes) when the file is missing or invalid
     std::shared_ptr<const DemHeightmap> heightmap() const;
+    // Lays a finer ground patch (ground_patch.h) over the heightmap. False when the file is missing or there is no heightmap.
+    bool loadGroundPatch(const std::filesystem::path& file);
     const TerrainGenParams& params() const { return m_params; }
     // Replaces the generator parameters (the sculpt layer is kept). Everything is marked changed.
     void setParams(const TerrainGenParams& params);

@@ -37,6 +37,7 @@ static const uint kMaterialDoubleSided = 1u << 1;
 static const uint kMaterialNormalMap = 1u << 2;
 static const uint kMaterialTerrain = 1u << 3;
 static const uint kMaterialFoliage = 1u << 12;
+static const uint kMaterialTerrainMask = 1u << 13; // terrain: pad1 = mask texture slot, baseColor = (minX, minZ, 1/sizeX, 1/sizeZ)
 static const uint kMaterialLayerNormal0 = 1u << 4;  // bits 4..7: layer i has a resident normal map
 static const uint kMaterialLayerAlbedo0 = 1u << 8;  // bits 8..11: layer i has a resident albedo texture
 

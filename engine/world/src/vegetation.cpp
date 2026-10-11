@@ -202,7 +202,8 @@ struct Vegetation::Impl {
                 f32 up;
                 const f32 h = HeightAndUp(terrain, x, z, up);
                 if (h < 1.6f || h > 520.0f || up < 0.64f) continue;
-                const f32 clear = ClearingFactor(s.clearings, x, z);
+                f32 clear = ClearingFactor(s.clearings, x, z);
+                if (s.mask) clear *= s.mask->density(x, z);
                 if (clear <= 0.0f) continue;
                 const f32 forest = (0.30f + 0.70f * Smoothstep(-0.25f, 0.35f, noise::Fbm(x / 160.0f, z / 160.0f, seed + 3, 3))) * Smoothstep(0.64f, 0.80f, up) *
                                    (1.0f - Smoothstep(430.0f, 520.0f, h)) * Smoothstep(3.0f, 16.0f, h) * clear;
@@ -223,11 +224,27 @@ struct Vegetation::Impl {
                     f32 up;
                     const f32 h = HeightAndUp(terrain, x, z, up);
                     if (h < 1.4f || h > 20.0f || up < 0.86f) continue; // the beach front and low ground
-                    const f32 chance = 0.16f * Smoothstep(1.4f, 4.0f, h) * (1.0f - Smoothstep(10.0f, 20.0f, h)) * ClearingFactor(s.clearings, x, z) *
+                    const f32 chance = 0.16f * Smoothstep(1.4f, 4.0f, h) * (1.0f - Smoothstep(10.0f, 20.0f, h)) * ClearingFactor(s.clearings, x, z) * (s.mask ? s.mask->density(x, z) : 1.0f) *
                                        (0.4f + 0.6f * Smoothstep(-0.2f, 0.4f, noise::Fbm(x / 70.0f, z / 70.0f, seed + 23, 2)));
                     if (Rand01(gi, gj, seed + 24) > chance) continue;
                     add(Vec3(x, h - 0.1f, z), Rand01(gi, gj, seed + 25) * 6.2831853f, 0.85f + 0.4f * Rand01(gi, gj, seed + 26), 0xFFFFFFFFu, static_cast<u8>(kTreeVariants));
                 }
+        }
+    }
+
+    // Plants that were placed on purpose: street trees, park trees, beach palms.
+    static void explicitPlants(const Task& t, TileResult& out) {
+        if (!t.settings.plants || !t.settings.trees) return;
+        const auto it = t.settings.plants->byTile.find(TileKey(t.x, t.z));
+        if (it == t.settings.plants->byTile.end()) return;
+        for (const VegetationPlant& p : it->second) {
+            f32 up;
+            const f32 h = HeightAndUp(*t.terrain, p.x, p.z, up);
+            if (h < 0.9f) continue; // under the sea (a survey tree on a rock or a wrong point)
+            const u8 kind = std::min<u8>(p.kind, static_cast<u8>(kTreeVariants));
+            out.trees.push_back({Vec3(p.x, h - (kind == kTreeVariants ? 0.1f : 0.15f), p.z), p.scale, p.yaw, p.tint, kind, t.trunkRadius[kind] * p.scale * 1.05f});
+            out.minY = std::min(out.minY, h);
+            out.maxY = std::max(out.maxY, h);
         }
     }
 
@@ -248,7 +265,7 @@ struct Vegetation::Impl {
                 if (h < 2.4f || h > 380.0f || up < 0.78f) continue;
                 const f32 patch = 0.55f + 0.45f * Smoothstep(-0.3f, 0.4f, noise::Fbm(x / 13.0f, z / 13.0f, seed + 3, 2));
                 const f32 dry = 1.0f - 0.65f * Smoothstep(0.55f, 0.8f, noise::Fbm(x / 41.0f, z / 41.0f, seed + 5, 2) * 0.5f + 0.5f); // bare patches
-                const f32 chance = patch * dry * Smoothstep(0.78f, 0.9f, up) * Smoothstep(2.4f, 5.0f, h) * ClearingFactor(s.clearings, x, z);
+                const f32 chance = patch * dry * Smoothstep(0.78f, 0.9f, up) * Smoothstep(2.4f, 5.0f, h) * ClearingFactor(s.clearings, x, z) * (s.mask ? s.mask->density(x, z) : 1.0f);
                 if (Rand01(gi, gj, seed + 4) > chance) continue;
                 const f32 v = Rand01(gi, gj, seed + 8);
                 out.tufts.push_back(MakeStaticInstance(Vec3(x, h - 0.04f, z), Rand01(gi, gj, seed + 6) * 6.2831853f, 0.65f + 0.85f * Rand01(gi, gj, seed + 7),
@@ -270,7 +287,10 @@ struct Vegetation::Impl {
         r.grass = t->grass;
         r.generation = t->generation;
         if (t->grass) grassTile(*t, r);
-        else treeTile(*t, r);
+        else {
+            treeTile(*t, r);
+            explicitPlants(*t, r);
+        }
         std::lock_guard lock(t->impl->mutex);
         t->impl->done.push_back(std::move(r));
     }

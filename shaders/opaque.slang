@@ -139,6 +139,21 @@ GBufferOut shadeTerrain(VSOut i, GpuMaterial m)
     float grass = saturate(1.0 - rock - sand - soil);
     float4 w = float4(grass, soil, rock, sand);
     w /= max(dot(w, 1.0), 1e-4);
+    // Surface mask (the district): paving, sand and lawn override the natural rules.
+    float pave = 0.0;
+    if ((m.flags & kMaterialTerrainMask) != 0) {
+        float2 muv = (wp.xz - m.baseColor.xy) * m.baseColor.zw;
+        if (all(muv > 0.0) && all(muv < 1.0)) {
+            float3 mk = sampleTexture(m.pad1, muv).rgb;
+            float dither = (valueNoise(wp.xz * 1.7) - 0.5) * 0.35 + (valueNoise(wp.xz * 0.35) - 0.5) * 0.25;
+            mk = saturate((mk - 0.5 + dither) * 4.0 + 0.5) * smoothstep(0.02, 0.2, mk);
+            pave = mk.x;
+            float sandM = mk.y * (1.0 - pave), lawnM = mk.z * (1.0 - pave) * (1.0 - sandM);
+            float keep = 1.0 - pave - sandM - lawnM;
+            w = w * keep + float4(lawnM, 0.0, 0.0, sandM);
+            w /= max(dot(w, 1.0), 1e-4);
+        }
+    }
 
     float3 tri = pow(abs(n), 4.0);
     tri /= max(tri.x + tri.y + tri.z, 1e-4);
@@ -155,8 +170,15 @@ GBufferOut shadeTerrain(VSOut i, GpuMaterial m)
         roughness += kLayerRoughness[l] * wl;
     }
     // Large-scale variation, wet sand at the waterline and the darker green of forest on the lower slopes.
+    // Paving: weathered concrete, mottled and stained.
+    if (pave > 0.001) {
+        float mott = valueNoise(wp.xz * 0.8) * 0.5 + valueNoise(wp.xz * 3.1) * 0.3 + valueNoise(wp.xz * 11.0) * 0.2;
+        float3 concrete = lerp(float3(0.27, 0.26, 0.25), float3(0.40, 0.38, 0.36), mott);
+        albedo = lerp(albedo, concrete, pave);
+        roughness = lerp(roughness, 0.9, pave);
+    }
     albedo *= 0.82 + 0.36 * n3;
-    albedo *= lerp(1.0, 0.55, w.w * (1.0 - smoothstep(0.0, 1.6, h)));
+    albedo *= lerp(1.0, 0.55, w.w * (1.0 - smoothstep(0.0, 1.6, h)) * (1.0 - pave));
     albedo *= lerp(1.0, float3(0.72, 0.84, 0.66), w.x * smoothstep(8.0, 40.0, h) * (1.0 - smoothstep(380.0, 520.0, h)));
 
     // Far forest: real trees exist only near the camera, so beyond them the grass slopes get a canopy look (mottled dark

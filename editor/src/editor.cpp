@@ -193,8 +193,10 @@ bool Editor::init() {
         wp.camera.pitch = v.pitch;
     }
 
-    if (m_options.terrain) {
-        m_showTerrain = true;
+    if (m_options.terrain || m_options.city) {
+        m_showTerrain = !m_options.city;
+        m_showCity = m_options.city;
+        if (m_options.city) m_options.terrain = true;
         ensureTerrain();
         if (!m_options.autoplay.empty()) m_showTerrain = false; // QA: playing, so the Game view is what the screenshot should show
         FlyCamera& cam = m_viewports[0].camera;
@@ -886,6 +888,8 @@ void Editor::ensureTerrain() {
     }
     m_roadTool.init(*m_renderer, m_scenes[0].app->world(), *m_terrainPanel.terrain(), m_terrainPanel.vegetation(),
                     fs::path(FOH_PROJECT_ROOT) / "world" / "roads.fohroads");
+    m_cityPanel.ensureCreated(*m_renderer, *m_jobs, m_scenes[0].app->world(), m_terrainPanel, fs::path(FOH_PROJECT_ROOT) / "world");
+    if (WorldSurface* ws = m_scenes[0].app->world().resource<WorldSurface>()) ws->city = m_cityPanel.city();
     if (m_options.roadsTest) {
         // QA: an avenue along Leblon beach a little inland of the shore, and a street climbing away from it, both carved.
         Terrain& t = *m_terrainPanel.terrain();
@@ -917,6 +921,8 @@ void Editor::ensureTerrain() {
 void Editor::shutdown() {
     if (m_renderer) m_renderer->device().waitIdle();
     m_roadTool.shutdown(); // saves the roads; before the terrain they stand on goes
+    if (WorldSurface* ws = m_scenes.empty() ? nullptr : m_scenes[0].app->world().resource<WorldSurface>()) ws->city = nullptr;
+    m_cityPanel.shutdown();
     if (WorldSurface* ws = m_scenes.empty() ? nullptr : m_scenes[0].app->world().resource<WorldSurface>()) *ws = WorldSurface{};
     m_terrainPanel.shutdown(); // saves the sculpting, then releases the tile meshes while the renderer and world still exist
     m_prefs.save();
@@ -1082,6 +1088,7 @@ bool Editor::frame(float dt) {
         m_viewports[0].camera.position = p;
     }
     m_terrainPanel.update(m_viewports[0].camera.position); // before the worlds update: it spawns and re-meshes node entities
+    if (m_cityPanel.created()) m_cityPanel.update(*m_terrainPanel.terrain(), m_viewports[0].camera.position);
         profileLap("terrain+vegetation update", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
 
@@ -1223,6 +1230,7 @@ void Editor::drawMenuBar() {
         ImGui::MenuItem("Assets Workshop", nullptr, &m_showWorkshop);
         ImGui::MenuItem("Terrain", nullptr, &m_showTerrain);
         ImGui::MenuItem("Roads", nullptr, &m_showRoads);
+        ImGui::MenuItem("City", nullptr, &m_showCity);
         ImGui::MenuItem("Atmosphere", nullptr, &m_showAtmosphere);
         ImGui::MenuItem("Render Graph", nullptr, &m_showRenderGraph);
         ImGui::MenuItem("Stats", nullptr, &m_showStats);
@@ -1301,6 +1309,10 @@ void Editor::buildUi(float dt) {
     if (m_showTerrain) {
         ensureTerrain();
         m_terrainPanel.draw(&m_showTerrain);
+    }
+    if (m_showCity) {
+        ensureTerrain(); // the city stands on the terrain
+        m_cityPanel.draw(&m_showCity);
     }
     if (m_showRoads) {
         ensureTerrain(); // roads stand on the terrain

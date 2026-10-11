@@ -21,6 +21,7 @@
 #include "atmosphere_panel.h"
 #include "asset_inspector.h"
 #include "asset_picker.h"
+#include "city_panel.h"
 #include "road_tool.h"
 #include "terrain_panel.h"
 #include "content_browser.h"
@@ -70,6 +71,7 @@ struct EditorOptions {
     bool profile = false;
     bool terrainSculpt = false;
     bool roadsTest = false;
+    bool city = false; // --city: the Leblon / Ipanema district (implies --terrain)
     int terrainView = 0;
     std::string cam; // --cam x,z,eye,yaw,pitch
     bool terrain = false;      // --terrain: creates the terrain, opens its panel and flies the Scene camera over it (QA)
@@ -248,6 +250,8 @@ private:
     TerrainPanel m_terrainPanel;
     bool m_showRoads = false;
     RoadTool m_roadTool;
+    bool m_showCity = false;
+    CityPanel m_cityPanel;
     void ensureTerrain();
     bool m_showEntities = true;
     bool m_showInspector = true;

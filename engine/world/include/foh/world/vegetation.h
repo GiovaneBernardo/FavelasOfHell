@@ -14,7 +14,9 @@
 //
 // Thread-safety: main thread only (it talks to the Renderer); tile generation runs on jobs and only reads the Terrain.
 
+#include <cmath>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include "foh/asset_id.h"
@@ -32,6 +34,31 @@ struct VegetationClearing {
     f32 feather = 10.0f; // fades back to full density over this much more
 };
 
+// A plant placed by hand or by a generator (street trees, park trees, beach palms): drawn and collided like the natural ones.
+struct VegetationPlant {
+    f32 x = 0.0f, z = 0.0f;
+    f32 scale = 1.0f; // 1 = the mesh's natural size (a tree ~11-18 m, a palm ~10 m)
+    f32 yaw = 0.0f;
+    u8 kind = 0;      // 0..3 broadleaf variants, 4 palm
+    u32 tint = 0xFFFFFFFFu;
+};
+
+// Explicit plants bucketed by tree tile (128 m), so a tile finds its own without scanning them all.
+struct VegetationPlants {
+    std::unordered_map<u64, std::vector<VegetationPlant>> byTile;
+    static u64 Key(f32 x, f32 z) {
+        return (u64(static_cast<u32>(i32(std::floor(x / 128.0f)))) << 32) | u64(static_cast<u32>(i32(std::floor(z / 128.0f))));
+    }
+    void add(const VegetationPlant& p) { byTile[Key(p.x, p.z)].push_back(p); }
+};
+
+// Where natural vegetation may grow, 0..1 (the city's paving and sand say 0). Called from job threads: must be thread-safe.
+class VegetationMask {
+public:
+    virtual ~VegetationMask() = default;
+    virtual f32 density(f32 x, f32 z) const = 0;
+};
+
 struct VegetationSettings {
     bool trees = true;
     bool palms = true;
@@ -43,6 +70,8 @@ struct VegetationSettings {
     f32 grassDensity = 1.0f;       // multiplier
     u32 seed = 1;
     std::vector<VegetationClearing> clearings;
+    std::shared_ptr<const VegetationMask> mask;     // null = everywhere
+    std::shared_ptr<const VegetationPlants> plants; // explicit plants, in addition to the natural ones
 };
 
 struct VegetationStats {
